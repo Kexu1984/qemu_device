@@ -69,12 +69,18 @@ Host → Python: 'W' (1B) | addr(4B) | size(1B) | data(sizeB)
    make fw
    ```
 
-2. **Build QEMU with custom device (takes 10-15 minutes):**
+2. **Test the protocol (optional):**
+   ```bash
+   make test
+   ```
+
+3. **Build QEMU with custom device (takes 10-15 minutes):**
+3. **Build QEMU with custom device (takes 10-15 minutes):**
    ```bash
    make qemu
    ```
 
-3. **Run the demo:**
+4. **Run the demo:**
    
    **Terminal 1** (Python device server):
    ```bash
@@ -126,6 +132,7 @@ qemu_device/
 ## Makefile Targets
 
 - `make fw` - Build bare metal firmware
+- `make test` - Test protocol implementation
 - `make qemu` - Build QEMU with custom device
 - `make run` - Show demo run instructions  
 - `make clean` - Clean all build artifacts
@@ -157,6 +164,44 @@ The bare metal firmware demonstrates:
 - Memory-mapped I/O access functions
 - UART-style character transmission
 - Proper register polling (TXREADY status)
+
+## Testing
+
+### Protocol Test
+
+You can test the Python device server and binary protocol without building QEMU:
+
+```bash
+make test
+```
+
+This test:
+- Starts the device server on port 7891
+- Connects via TCP socket
+- Tests read/write operations for STATUS, CTRL, and TXDATA registers
+- Verifies protocol compliance and character output
+
+Expected output:
+```
+Testing MMIO device server protocol...
+Connected to server
+Test 1: Reading STATUS register...
+STATUS = 0x00000001 (expected: 0x00000001)
+Test 2: Writing/reading CTRL register...
+CTRL = 0x00000005 (expected: 0x00000005)
+Test 3: Writing to TXDATA register...
+Expected output: 'A'
+A
+Test 4: Writing test string...
+Expected output: 'Hello!'
+Hello!
+All protocol tests passed!
+✓ Protocol test successful
+```
+
+### Full System Test
+
+For full system testing with QEMU, follow the Quick Start section above.
 
 ## Troubleshooting
 

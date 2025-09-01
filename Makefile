@@ -1,6 +1,6 @@
 # Makefile for QEMU MMIO Socket Device Project
 
-.PHONY: all qemu fw run clean help
+.PHONY: all qemu fw run clean test help
 
 # Default target
 all: help
@@ -46,6 +46,11 @@ run-auto:
 	@echo "Stopping Python server..."
 	pkill -f "mmio_device_server.py" || true
 
+# Test the protocol implementation
+test:
+	@echo "Testing protocol implementation..."
+	python3 scripts/test_protocol.py
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
@@ -63,10 +68,12 @@ help:
 	@echo "  fw        - Build bare metal firmware"
 	@echo "  run       - Show instructions for running demo"
 	@echo "  run-auto  - Run demo automatically (experimental)"
+	@echo "  test      - Test protocol implementation"
 	@echo "  clean     - Clean all build artifacts"
 	@echo "  help      - Show this help"
 	@echo ""
 	@echo "Quick start:"
 	@echo "  make fw        # Build firmware"
+	@echo "  make test      # Test protocol"
 	@echo "  make qemu      # Build QEMU (takes time)"
 	@echo "  make run       # Show run instructions"
