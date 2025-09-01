@@ -1,0 +1,9 @@
+build/
+qemu-fork/build/
+*.o
+*.bin
+*.elf
+*.map
+.DS_Store
+__pycache__/
+*.pyc
