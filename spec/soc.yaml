@@ -1,0 +1,84 @@
+# ============================================================================
+# KX6625 SoC Hardware Configuration
+# ============================================================================
+#
+# This file is the single source of truth for the KX6625 SoC's hardware
+# topology: CPU, clocks, memory regions, peripheral stubs, and IRQ table.
+#
+# The code generator (scripts/gen_device_code.py) reads this file and emits:
+#
+#   scripts/qemu-fork/hw/arm/kx6625_soc.h
+#       C #defines + table arrays, included by kx6625.c at QEMU build time.
+#
+# IRQ numbers are cross-referenced from spec/devices.yaml so that the same
+# source of truth drives both the Python device server and the QEMU SoC.
+#
+# After changing this file, regenerate and rebuild QEMU:
+#   make gen                          # regenerates kx6625_soc.h
+#   ninja -C scripts/qemu-fork/build  # recompiles kx6625.c
+#
+# ============================================================================
+
+soc:
+  name:    KX6625
+  mc_desc: "KX6625 SoC (Cortex-M3, 512K Flash, 128K SRAM)"
+
+# ── CPU ─────────────────────────────────────────────────────────────────────
+cpu:
+  type:           cortex-m3   # QEMU CPU type string passed to ARMv7M core
+  num_irq:        16          # External interrupt lines wired to NVIC
+  enable_bitband: false       # ARMv7-M optional bit-band region
+
+# ── Clocks ───────────────────────────────────────────────────────────────────
+#
+# Each entry produces:
+#   #define KX6625_<NAME>_HZ   <hz>ULL
+#
+clocks:
+  - name:        sysclk
+    hz:          48000000    # 48 MHz — CPU / AHB bus clock
+    description: "CPU and peripheral bus clock"
+
+  - name:        refclk
+    hz:          1000000     # 1 MHz — SysTick reference
+    description: "SysTick reference clock"
+
+# ── Flash (ROM) regions ───────────────────────────────────────────────────────
+#
+# Table of non-contiguous flash/ROM regions instantiated at SoC init time.
+# Regions are created as read-only (execute-in-place).
+# Firmware / kernel image is loaded into flash_regions[0].
+#
+# Each entry produces a row in the C array kx6625_flash_regions[].
+#
+flash_regions:
+  - name:        flash
+    base:        0x00000000
+    size:        0x80000     # 512 KB
+    description: "Primary execute-in-place FLASH"
+
+# ── SRAM (RAM) regions ───────────────────────────────────────────────────────
+#
+# Table of non-contiguous SRAM regions.  Each becomes a read/write RAM region
+# accessible by both the CPU and device-model bus-master DMA (via MemChannel).
+#
+# Each entry produces a row in the C array kx6625_sram_regions[].
+#
+sram_regions:
+  - name:        sram
+    base:        0x20000000
+    size:        0x20000     # 128 KB
+    description: "Data + stack SRAM"
+
+# ── Peripheral stub regions ───────────────────────────────────────────────────
+#
+# Address ranges not backed by a specific QEMU model.  QEMU maps these as
+# "unimplemented" so accesses produce a log warning rather than crashing.
+#
+# Each entry produces a row in the C array kx6625_periph_stubs[].
+#
+peripheral_stubs:
+  - name:        periph
+    base:        0x40000000
+    size:        0x00100000  # 1 MB — full peripheral address space
+    description: "Peripheral address space (unimplemented stub)"
