@@ -1,0 +1,49 @@
+# ============================================================================
+# CRC Engine — per-device register map
+# ============================================================================
+#
+# Referenced by spec/devices.yaml via  spec: crc.yaml
+#
+# Algorithm: CRC-32/ISO-HDLC  (IEEE 802.3, used in Ethernet / ZIP / PNG)
+#   Polynomial : 0x04C11DB7  (reflected: 0xEDB88320)
+#   Initial    : 0xFFFFFFFF
+#   Input  reflected: yes
+#   Output reflected: yes
+#   Final XOR  : 0xFFFFFFFF
+#
+# Test vector: CRC-32("123456789") = 0xCBF43926
+#
+# Typical usage sequence:
+#   1. Write CTRL = 0x1  — reset accumulator to 0xFFFFFFFF
+#   2. Write DATA repeatedly — feed each data byte into the CRC engine
+#      (byte writes: size=1; or word writes: size=4, little-endian byte order)
+#   3. Read  RESULT — get the final CRC-32 value (accumulator ^ 0xFFFFFFFF)
+
+registers:
+  - offset:      0x00
+    name:        DATA
+    access:      RW
+    description: >
+      Write: feed one or more bytes into the CRC-32 accumulator.
+      Byte writes (size=1) feed exactly one byte.
+      Word writes (size=4) feed four bytes in little-endian order.
+      Read: returns the current raw accumulator value (before final XOR).
+    reset_value: 0xFFFFFFFF
+
+  - offset:      0x04
+    name:        RESULT
+    access:      R
+    description: >
+      Current CRC-32 result with final XOR applied:
+      RESULT = accumulator ^ 0xFFFFFFFF.
+      Read this register after feeding all data bytes to obtain the CRC.
+    reset_value: 0x00000000
+
+  - offset:      0x08
+    name:        CTRL
+    access:      RW
+    description: >
+      Control register.
+      bit0 = RESET — write 1 to clear the accumulator back to 0xFFFFFFFF.
+      Writing 0 has no effect.  The bit reads back as 0.
+    reset_value: 0x00

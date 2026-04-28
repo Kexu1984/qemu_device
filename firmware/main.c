@@ -12,6 +12,7 @@
  *   0x40004000  console_uart device (mmio-sockdev, IRQ0)
  *   0x40005000  dma device          (mmio-sockdev, IRQ1)
  *   0x40006000  timer0 device       (mmio-sockdev, IRQ2)
+ *   0x40008000  crc device          (mmio-sockdev, polled)
  */
 
 #include <stdint.h>
@@ -36,6 +37,13 @@
 #define DMA_CLIENT_SRC     (SRAM_BASE + 0x3000U)  /* 512 B source buffer  */
 #define DMA_CLIENT_DST     (SRAM_BASE + 0x4000U)  /* 512 B dest   buffer  */
 #define DMA_CLIENT_LEN     32U                    /* bytes to transfer    */
+
+/* CRC device helpers — register aliases from generated header */
+/* CRC_DATA_REG, CRC_RESULT_REG, CRC_CTRL_REG are defined in mmio_devices.h */
+#define CRC_CTRL_RESET     0x1U   /* bit0: reset accumulator to 0xFFFFFFFF */
+
+/* CRC-32 test vector: CRC-32("123456789") = 0xCBF43926  (ISO-HDLC / IEEE 802.3) */
+#define CRC_EXPECTED       0xCBF43926U
 
 /* -----------------------------------------------------------------------
  * Low-level MMIO helpers
@@ -125,6 +133,11 @@ void dma_client_irq_handler(void)  /* vector table IRQ3 */
 {
     dma_client_done++;
     send_string("[IRQ] DMA client done! INTID=3\n");
+}
+
+void crc_irq_handler(void)          /* vector table IRQ4 — CRC is polled; handler unused */
+{
+    /* CRC computation is instantaneous; IRQ4 is never asserted in this demo */
 }
 
 /* -----------------------------------------------------------------------
@@ -255,6 +268,45 @@ void main(void)
     }
 
     send_string("[FW] All demos complete.\n");
+
+    /*
+     * ── Phase 4: CRC-32 hardware accelerator test ─────────────────────────────────────
+     *
+     * Test vector: CRC-32("123456789") = 0xCBF43926
+     * Algorithm  : CRC-32/ISO-HDLC (Ethernet / ZIP / PNG polynomial)
+     *
+     * Firmware sequence:
+     *   1. Write CTRL = 0x1 to reset the accumulator to 0xFFFFFFFF.
+     *   2. Write each byte of the test string one at a time to DATA.
+     *   3. Read RESULT to obtain the final CRC.
+     *   4. Compare against the known reference value 0xCBF43926.
+     */
+    send_string("[FW] CRC test: computing CRC-32 of \"123456789\".\n");
+
+    /* 1. Reset the CRC accumulator */
+    mmio_write32(CRC_CTRL_REG, CRC_CTRL_RESET);
+
+    /* 2. Feed each byte of \"123456789\" (ASCII 0x31..0x39) */
+    {
+        static const uint8_t crc_data[] = {
+            0x31U, 0x32U, 0x33U, 0x34U, 0x35U, 0x36U, 0x37U, 0x38U, 0x39U
+        };
+        for (i = 0; i < 9U; i++) {
+            mmio_write8(CRC_DATA_REG, crc_data[i]);
+        }
+    }
+
+    /* 3. Read result and verify */
+    {
+        uint32_t crc_result = mmio_read32(CRC_RESULT_REG);
+        if (crc_result == CRC_EXPECTED) {
+            send_string("[CRC] Result 0xCBF43926 PASSED!\n");
+        } else {
+            send_string("[CRC] Result FAILED!\n");
+        }
+    }
+
+    send_string("[FW] All tests done.\n");
 
     /* Idle forever */
     while (1) {

@@ -78,7 +78,17 @@ devices:
     irq_delay:   0.0
     rw_port:     7898
     irq_port:    7899
-    spec:        dma_client_demo.yaml  # register map → spec/dma_client_demo.yaml
+    spec:        dma_client_demo.yaml   # register map → spec/dma_client_demo.yaml
+
+  - name:        crc
+    description: "CRC-32 hardware accelerator (ISO-HDLC / IEEE 802.3 polynomial)"
+    base_addr:   0x40008000
+    size:        0x1000
+    irq_num:     4           # External IRQ 4 on KX6625 (unused — CRC is polled)
+    irq_delay:   0.0
+    rw_port:     7900
+    irq_port:    7901
+    spec:        crc.yaml    # register map → spec/crc.yaml
 
 # ── Physical Memory Regions ──────────────────────────────────────────────────────────────────
 #

@@ -26,6 +26,7 @@
 .extern dma_irq_handler
 .extern timer_irq_handler
 .extern dma_client_irq_handler
+.extern crc_irq_handler
 
 /* ── Vector table — must be the very first thing in the image ───────── */
 .section .vectors, "a"
@@ -55,9 +56,10 @@ _vectors:
     .word   dma_irq_handler        /* IRQ1: dma device           */
     .word   timer_irq_handler      /* IRQ2: timer0 device        */
     .word   dma_client_irq_handler /* IRQ3: dma_client_demo      */
+    .word   crc_irq_handler        /* IRQ4: crc (polled; handler is no-op) */
 
-    /* ── External IRQs 4-15 (indices 20-31) — default ──────────────── */
-    .rept 12
+    /* ── External IRQs 5-15 (indices 21-31) — default ────────────────── */
+    .rept 11
     .word   default_handler
     .endr
 

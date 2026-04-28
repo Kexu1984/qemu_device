@@ -55,6 +55,7 @@ from device_model.uart_model        import ConsoleUartDevice                    
 from device_model.timer_model       import TimerDevice                            # noqa: E402
 from device_model.dma_controller    import DmaController                          # noqa: E402
 from device_model.dma_client_demo   import DmaClientDemoDevice                    # noqa: E402
+from device_model.crc_device        import CrcDevice                              # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +321,11 @@ _DEMO_SIZE       = 0x1000
 _DEMO_RW_PORT    = 7898
 _DEMO_IRQ_PORT   = 7899
 
+_CRC_BASE        = 0x40008000
+_CRC_SIZE        = 0x1000
+_CRC_RW_PORT     = 7900
+_CRC_IRQ_PORT    = 7901
+
 
 # ---------------------------------------------------------------------------
 # Transport: virtual-clock tick channel  (QEMU → Python)
@@ -502,6 +508,7 @@ def main() -> None:
     dma_irq_ctrl   = IRQController()
     timer_irq_ctrl = IRQController()
     demo_irq_ctrl  = IRQController()
+    crc_irq_ctrl   = IRQController()   # CRC is polled; controller present but never fired
 
     # ── 2. DMA bus-master memory channel ─────────────────────────────────
     mem_channel = MemChannel()
@@ -549,6 +556,11 @@ def main() -> None:
             irq_idx=0,
         ),
     )
+    # CRC-32 hardware accelerator — polled only, no IRQ fired at runtime.
+    bus.register(
+        _CRC_BASE, _CRC_SIZE,
+        CrcDevice(irq_controller=crc_irq_ctrl, irq_idx=0),
+    )
 
     # ── 5. Transport servers ──────────────────────────────────────────────
     uart_irq_server = IRQServer(port=uart_irq_port, irq_controller=uart_irq_ctrl)
@@ -581,6 +593,13 @@ def main() -> None:
     demo_rw_server = RWServer(port=_DEMO_RW_PORT, bus=bus, base_addr=_DEMO_BASE)
     threading.Thread(target=demo_rw_server.start, daemon=True).start()
 
+    # CRC transport servers
+    crc_irq_server = IRQServer(port=_CRC_IRQ_PORT, irq_controller=crc_irq_ctrl)
+    threading.Thread(target=crc_irq_server.start, daemon=True).start()
+
+    crc_rw_server = RWServer(port=_CRC_RW_PORT, bus=bus, base_addr=_CRC_BASE)
+    threading.Thread(target=crc_rw_server.start, daemon=True).start()
+
     uart_rw_server = RWServer(port=uart_rw_port, bus=bus, base_addr=_UART_BASE)
     try:
         uart_rw_server.start()
@@ -597,6 +616,8 @@ def main() -> None:
         tick_server.stop()
         demo_rw_server.stop()
         demo_irq_server.stop()
+        crc_rw_server.stop()
+        crc_irq_server.stop()
 
 
 if __name__ == '__main__':
