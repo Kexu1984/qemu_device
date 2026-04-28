@@ -33,9 +33,8 @@ from __future__ import annotations
 
 import struct
 import threading
-from typing import Optional
 
-from device_model.mmio_base import IRQController, MMIODevice
+from device_model.mmio_base import MMIODevice
 
 
 # ---------------------------------------------------------------------------
@@ -76,13 +75,7 @@ class CrcDevice(MMIODevice):
     # CTRL bits
     _CTRL_RESET = 0x01
 
-    def __init__(
-        self,
-        irq_controller: Optional[IRQController] = None,
-        irq_idx: int = 0,
-    ) -> None:
-        self._irq       = irq_controller   # not used — CRC is polled only
-        self._irq_idx   = irq_idx
+    def __init__(self) -> None:
         self._lock      = threading.Lock()
         self._acc: int  = self._INIT       # running CRC accumulator
 

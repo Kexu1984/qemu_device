@@ -38,9 +38,11 @@
 #define DMA_CLIENT_DST     (SRAM_BASE + 0x4000U)  /* 512 B dest   buffer  */
 #define DMA_CLIENT_LEN     32U                    /* bytes to transfer    */
 
-/* CRC device helpers — register aliases from generated header */
-/* CRC_DATA_REG, CRC_RESULT_REG, CRC_CTRL_REG are defined in mmio_devices.h */
+/* DMA transfer-mode flag: bit0=DEST_FIXED — keep destination fixed (M2P) */
+#define DMA_DEST_FIXED     0x1U
+
 #define CRC_CTRL_RESET     0x1U   /* bit0: reset accumulator to 0xFFFFFFFF */
+#define DMA_CRC_SRC        (SRAM_BASE + 0x5000U)  /* 16B source for DMA→CRC test */
 
 /* CRC-32 test vector: CRC-32("123456789") = 0xCBF43926  (ISO-HDLC / IEEE 802.3) */
 #define CRC_EXPECTED       0xCBF43926U
@@ -133,11 +135,6 @@ void dma_client_irq_handler(void)  /* vector table IRQ3 */
 {
     dma_client_done++;
     send_string("[IRQ] DMA client done! INTID=3\n");
-}
-
-void crc_irq_handler(void)          /* vector table IRQ4 — CRC is polled; handler unused */
-{
-    /* CRC computation is instantaneous; IRQ4 is never asserted in this demo */
 }
 
 /* -----------------------------------------------------------------------
@@ -281,6 +278,18 @@ void main(void)
      *   3. Read RESULT to obtain the final CRC.
      *   4. Compare against the known reference value 0xCBF43926.
      */
+    /*
+     * ── Phase 4a: CRC-32 direct-write test ────────────────────────────────────
+     *
+     * Test vector: CRC-32("123456789") = 0xCBF43926
+     * Algorithm  : CRC-32/ISO-HDLC (Ethernet / ZIP / PNG polynomial)
+     *
+     * Firmware sequence:
+     *   1. Write CTRL = 0x1 to reset the accumulator to 0xFFFFFFFF.
+     *   2. Write each byte of the test string one at a time to DATA.
+     *   3. Read RESULT to obtain the final CRC.
+     *   4. Compare against the known reference value 0xCBF43926.
+     */
     send_string("[FW] CRC test: computing CRC-32 of \"123456789\".\n");
 
     /* 1. Reset the CRC accumulator */
@@ -303,6 +312,59 @@ void main(void)
             send_string("[CRC] Result 0xCBF43926 PASSED!\n");
         } else {
             send_string("[CRC] Result FAILED!\n");
+        }
+    }
+
+    /*
+     * ── Phase 4b: DMA → CRC (M2P, fixed destination) ─────────────────────
+     *
+     * Demonstrates decoupled M2P DMA: the CRC device has no interface to
+     * the DMA controller.  The DMA engine reads from SRAM (incr src addr)
+     * and writes each byte to CRC_DATA_REG (fixed dest addr), feeding
+     * the CRC accumulator byte-by-byte via the memory bus.
+     *
+     *   DMA CH0 MODE.DEST_FIXED = 1  →  M2P transfer:
+     *     src: 0x20005000 (SRAM, incremented each byte)
+     *     dst: CRC_DATA_REG (0x40008000, fixed)
+     *     len: 9 bytes
+     */
+    send_string("[FW] DMA-CRC test: M2P DMA feeding CRC-32 engine.\n");
+
+    /* 1. Prepare source data in SRAM @ DMA_CRC_SRC */
+    {
+        static const uint8_t crc_data[] = {
+            0x31U, 0x32U, 0x33U, 0x34U, 0x35U, 0x36U, 0x37U, 0x38U, 0x39U
+        };
+        volatile uint8_t *buf = (volatile uint8_t *)(uintptr_t)DMA_CRC_SRC;
+        for (i = 0; i < 9U; i++) buf[i] = crc_data[i];
+    }
+
+    /* 2. Reset CRC accumulator before the DMA feed */
+    mmio_write32(CRC_CTRL_REG, CRC_CTRL_RESET);
+
+    /* 3. Program DMA CH0: src=SRAM, dst=CRC_DATA_REG (fixed), len=9 */
+    mmio_write32(DMA_CH0_SRC_ADDR_REG, (uint32_t)DMA_CRC_SRC);
+    mmio_write32(DMA_CH0_DST_ADDR_REG, (uint32_t)CRC_DATA_REG);
+    mmio_write32(DMA_CH0_LENGTH_REG,   9U);
+    mmio_write32(DMA_CH0_MODE_REG,     DMA_DEST_FIXED);  /* M2P mode */
+
+    /* 4. Arm DMA done flag then start transfer */
+    dma_irq_fired = 0;
+    mmio_write32(DMA_CH0_CTRL_REG, 0x1u);  /* START */
+    send_string("[FW] DMA-CRC started. Waiting for DMA done IRQ...\n");
+
+    /* 5. Wait for DMA completion IRQ (same IRQ1 as Phase 2) */
+    while (!dma_irq_fired) {
+        __asm__ volatile ("wfi");
+    }
+
+    /* 6. Read CRC result (accumulator fed by DMA) and verify */
+    {
+        uint32_t dma_crc = mmio_read32(CRC_RESULT_REG);
+        if (dma_crc == CRC_EXPECTED) {
+            send_string("[DMA-CRC] Result 0xCBF43926 PASSED!\n");
+        } else {
+            send_string("[DMA-CRC] Result FAILED!\n");
         }
     }
 

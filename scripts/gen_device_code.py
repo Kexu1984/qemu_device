@@ -95,12 +95,12 @@ def _validate(cfg: dict) -> None:
     seen_irq_ports: dict[int, str] = {}
 
     for dev in cfg["devices"]:
-        for key in ("name", "base_addr", "size", "irq_num",
-                    "irq_delay", "rw_port", "irq_port", "registers"):
+        for key in ("name", "base_addr", "size", "rw_port", "registers"):
             if key not in dev:
                 sys.exit(
                     f"ERROR: device '{dev.get('name', '?')}' is missing field '{key}'"
                 )
+        # irq_num, irq_delay, irq_port are optional — polled devices omit them.
 
         name = dev["name"]
         if name in seen_names:
@@ -114,17 +114,22 @@ def _validate(cfg: dict) -> None:
             )
         seen_bases[base] = name
 
-        for port_dict, port_key, label in (
-            (seen_rw_ports,  "rw_port",  "rw_port"),
-            (seen_irq_ports, "irq_port", "irq_port"),
-        ):
-            port = int(dev[port_key])
-            if port in port_dict:
+        rw_port = int(dev["rw_port"])
+        if rw_port in seen_rw_ports:
+            sys.exit(
+                f"ERROR: device '{name}' shares rw_port {rw_port} "
+                f"with '{seen_rw_ports[rw_port]}'"
+            )
+        seen_rw_ports[rw_port] = name
+
+        if "irq_port" in dev:
+            irq_port = int(dev["irq_port"])
+            if irq_port in seen_irq_ports:
                 sys.exit(
-                    f"ERROR: device '{name}' shares {label} {port} "
-                    f"with '{port_dict[port]}'"
+                    f"ERROR: device '{name}' shares irq_port {irq_port} "
+                    f"with '{seen_irq_ports[irq_port]}'"
                 )
-            port_dict[port] = name
+            seen_irq_ports[irq_port] = name
 
         for reg in dev["registers"]:
             for key in ("offset", "name", "access", "description"):
@@ -190,27 +195,29 @@ def generate_c_header(cfg: dict, config_path: str) -> str:
         prefix     = _upper(dev["name"])
         base       = int(dev["base_addr"])
         size       = int(dev["size"])
-        irq_num    = int(dev["irq_num"])
-        irq_delay  = float(dev["irq_delay"])
+        irq_num    = int(dev["irq_num"])   if "irq_num"   in dev else None
+        irq_delay  = float(dev["irq_delay"]) if "irq_delay" in dev else None
         rw_port    = int(dev["rw_port"])
-        irq_port   = int(dev["irq_port"])
+        irq_port   = int(dev["irq_port"])   if "irq_port"  in dev else None
         description = dev.get("description", "")
 
+        irq_info = (f"  irq_num={irq_num}  irq_port={irq_port}"
+                    if irq_num is not None else "  (polled — no IRQ)")
         sep = "─" * (60 - len(prefix))
         lines.append(
             f"/* ── {prefix} {sep}\n"
             f" * {description}\n"
             f" * base={_hex(base)}  size={_hex(size, 4)}"
-            f"  irq_num={irq_num}"
-            f"  rw_port={rw_port}  irq_port={irq_port}\n"
+            f"  rw_port={rw_port}{irq_info}\n"
             f" * ─────────────────────────────────────────────────────────── */\n"
         )
         lines.append(f"#define {prefix}_BASE          {_hex(base)}UL\n")
         lines.append(f"#define {prefix}_SIZE          {_hex(size, 4)}UL\n")
-        lines.append(f"#define {prefix}_IRQ_INTID     {irq_num}U\n")
-        lines.append(f"#define {prefix}_IRQ_DELAY_S   {irq_delay}\n")
+        if irq_num is not None:
+            lines.append(f"#define {prefix}_IRQ_INTID     {irq_num}U\n")
+            lines.append(f"#define {prefix}_IRQ_DELAY_S   {irq_delay}\n")
+            lines.append(f"#define {prefix}_IRQ_PORT      {irq_port}\n")
         lines.append(f"#define {prefix}_RW_PORT       {rw_port}\n")
-        lines.append(f"#define {prefix}_IRQ_PORT      {irq_port}\n")
         lines.append("\n/* Registers */\n")
 
         for reg in dev["registers"]:
@@ -261,10 +268,10 @@ def generate_python_consts(cfg: dict, config_path: str) -> str:
         prefix      = _upper(dev["name"])
         base        = int(dev["base_addr"])
         size        = int(dev["size"])
-        irq_num     = int(dev["irq_num"])
-        irq_delay   = float(dev["irq_delay"])
+        irq_num     = int(dev["irq_num"])   if "irq_num"   in dev else None
+        irq_delay   = float(dev["irq_delay"]) if "irq_delay" in dev else None
         rw_port     = int(dev["rw_port"])
-        irq_port    = int(dev["irq_port"])
+        irq_port    = int(dev["irq_port"])   if "irq_port"  in dev else None
         description = dev.get("description", "")
 
         sep = "─" * (60 - len(prefix))
@@ -272,10 +279,11 @@ def generate_python_consts(cfg: dict, config_path: str) -> str:
         lines.append(f"# {description}\n")
         lines.append(f"{prefix}_BASE         = {_hex(base)}\n")
         lines.append(f"{prefix}_SIZE         = {_hex(size, 4)}\n")
-        lines.append(f"{prefix}_IRQ_INTID    = {irq_num}\n")
-        lines.append(f"{prefix}_IRQ_DELAY_S  = {irq_delay}\n")
+        if irq_num is not None:
+            lines.append(f"{prefix}_IRQ_INTID    = {irq_num}\n")
+            lines.append(f"{prefix}_IRQ_DELAY_S  = {irq_delay}\n")
+            lines.append(f"{prefix}_IRQ_PORT     = {irq_port}\n")
         lines.append(f"{prefix}_RW_PORT      = {rw_port}\n")
-        lines.append(f"{prefix}_IRQ_PORT     = {irq_port}\n")
         lines.append("\n# Registers\n")
 
         for reg in dev["registers"]:
@@ -451,6 +459,8 @@ def generate_soc_header(soc_cfg: dict, dev_cfg: dict,
         "/* Maps peripheral name → NVIC external IRQ number.           */\n"
     )
     for dev in dev_cfg.get("devices", []):
+        if "irq_num" not in dev:
+            continue   # polled device — no IRQ assignment
         name    = dev["name"]
         irq_num = int(dev["irq_num"])
         desc    = dev.get("description", name)

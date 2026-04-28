@@ -121,8 +121,7 @@ info "Starting QEMU..."
     -chardev socket,id=demo_irq,host=127.0.0.1,port=7899 \
     -device mmio-sockdev,chardev=demo_rw,irq-chardev=demo_irq,addr=0x40007000,irq-num=3 \
     -chardev socket,id=crc_rw,host=127.0.0.1,port=7900 \
-    -chardev socket,id=crc_irq,host=127.0.0.1,port=7901 \
-    -device mmio-sockdev,chardev=crc_rw,irq-chardev=crc_irq,addr=0x40008000,irq-num=4 \
+    -device mmio-sockdev,chardev=crc_rw,addr=0x40008000 \
     -kernel "${FIRMWARE_BIN%.bin}.elf" \
     </dev/null > "$QEMU_LOG" 2>&1 &
 QEMU_PID=$!
@@ -146,6 +145,8 @@ EXPECTED=(
     "All demos complete"
     "CRC test"
     "0xCBF43926 PASSED"
+    "DMA-CRC test"
+    "DMA-CRC] Result 0xCBF43926 PASSED"
     "All tests done"
 )
 

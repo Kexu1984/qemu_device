@@ -324,7 +324,6 @@ _DEMO_IRQ_PORT   = 7899
 _CRC_BASE        = 0x40008000
 _CRC_SIZE        = 0x1000
 _CRC_RW_PORT     = 7900
-_CRC_IRQ_PORT    = 7901
 
 
 # ---------------------------------------------------------------------------
@@ -508,7 +507,6 @@ def main() -> None:
     dma_irq_ctrl   = IRQController()
     timer_irq_ctrl = IRQController()
     demo_irq_ctrl  = IRQController()
-    crc_irq_ctrl   = IRQController()   # CRC is polled; controller present but never fired
 
     # ── 2. DMA bus-master memory channel ─────────────────────────────────
     mem_channel = MemChannel()
@@ -556,10 +554,10 @@ def main() -> None:
             irq_idx=0,
         ),
     )
-    # CRC-32 hardware accelerator — polled only, no IRQ fired at runtime.
+    # CRC-32 hardware accelerator — polled only, no IRQ.
     bus.register(
         _CRC_BASE, _CRC_SIZE,
-        CrcDevice(irq_controller=crc_irq_ctrl, irq_idx=0),
+        CrcDevice(),
     )
 
     # ── 5. Transport servers ──────────────────────────────────────────────
@@ -593,10 +591,6 @@ def main() -> None:
     demo_rw_server = RWServer(port=_DEMO_RW_PORT, bus=bus, base_addr=_DEMO_BASE)
     threading.Thread(target=demo_rw_server.start, daemon=True).start()
 
-    # CRC transport servers
-    crc_irq_server = IRQServer(port=_CRC_IRQ_PORT, irq_controller=crc_irq_ctrl)
-    threading.Thread(target=crc_irq_server.start, daemon=True).start()
-
     crc_rw_server = RWServer(port=_CRC_RW_PORT, bus=bus, base_addr=_CRC_BASE)
     threading.Thread(target=crc_rw_server.start, daemon=True).start()
 
@@ -617,7 +611,6 @@ def main() -> None:
         demo_rw_server.stop()
         demo_irq_server.stop()
         crc_rw_server.stop()
-        crc_irq_server.stop()
 
 
 if __name__ == '__main__':

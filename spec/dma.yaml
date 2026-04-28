@@ -46,6 +46,12 @@ registers:
     description: "CH0 status: bit0=BUSY, bit1=DONE"
     reset_value: 0x00
 
+  - offset:      0x14
+    name:        CH0_MODE
+    access:      RW
+    description: "CH0 transfer mode: bit0=DEST_FIXED (0=M2M both incr, 1=M2P fixed dest)"
+    reset_value: 0x00
+
   # ── Channel 1 (peripheral DREQ/DACK path, e.g. dma_client_demo) ──────────
   - offset:      0x20
     name:        CH1_SRC_ADDR
@@ -75,4 +81,10 @@ registers:
     name:        CH1_STATUS
     access:      R
     description: "CH1 status: bit0=BUSY, bit1=DONE"
+    reset_value: 0x00
+
+  - offset:      0x34
+    name:        CH1_MODE
+    access:      RW
+    description: "CH1 transfer mode: bit0=DEST_FIXED (0=M2M both incr, 1=M2P fixed dest)"
     reset_value: 0x00
