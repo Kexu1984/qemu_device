@@ -32,6 +32,11 @@
 #define DMA_DEMO_DST       (SRAM_BASE + 0x2000U)  /* 512 B dest   buffer  */
 #define DMA_DEMO_LEN       32U                    /* bytes to transfer    */
 
+/* DMA client demo buffers — placed further in SRAM to avoid overlap */
+#define DMA_CLIENT_SRC     (SRAM_BASE + 0x3000U)  /* 512 B source buffer  */
+#define DMA_CLIENT_DST     (SRAM_BASE + 0x4000U)  /* 512 B dest   buffer  */
+#define DMA_CLIENT_LEN     32U                    /* bytes to transfer    */
+
 /* -----------------------------------------------------------------------
  * Low-level MMIO helpers
  * ----------------------------------------------------------------------- */
@@ -80,14 +85,14 @@ static void send_string(const char *str)
  * ----------------------------------------------------------------------- */
 static void nvic_init(void)
 {
-    /* 1. Clear any stale pending state for IRQ 0, 1, 2 */
-    mmio_write32(NVIC_ICPR0, (1u << 0) | (1u << 1) | (1u << 2));
+    /* 1. Clear any stale pending state for IRQ 0, 1, 2, 3 */
+    mmio_write32(NVIC_ICPR0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
 
     /* 2. Set priority 0 (highest) for IRQ 0-3 */
     mmio_write32(NVIC_IPR0, 0x00000000U);
 
-    /* 3. Enable IRQ 0 (bit 0), IRQ 1 (bit 1), IRQ 2 (bit 2) in ISER0 */
-    mmio_write32(NVIC_ISER0, (1u << 0) | (1u << 1) | (1u << 2));
+    /* 3. Enable IRQ 0 (bit 0), IRQ 1 (bit 1), IRQ 2 (bit 2), IRQ 3 (bit 3) in ISER0 */
+    mmio_write32(NVIC_ISER0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
 }
 
 /* -----------------------------------------------------------------------
@@ -95,8 +100,9 @@ static void nvic_init(void)
  * Cortex-M3 hardware saves/restores the exception frame automatically;
  * plain C functions with no special attribute are sufficient.
  * ----------------------------------------------------------------------- */
-volatile int irq_count     = 0;
-volatile int dma_irq_fired = 0;
+volatile int irq_count          = 0;
+volatile int dma_irq_fired      = 0;
+volatile int dma_client_done    = 0;
 
 void uart_irq_handler(void)     /* vector table IRQ0 */
 {
@@ -113,6 +119,12 @@ void dma_irq_handler(void)      /* vector table IRQ1 */
 void timer_irq_handler(void)    /* vector table IRQ2 */
 {
     /* timer interrupt — not exercised in this demo */
+}
+
+void dma_client_irq_handler(void)  /* vector table IRQ3 */
+{
+    dma_client_done++;
+    send_string("[IRQ] DMA client done! INTID=3\n");
 }
 
 /* -----------------------------------------------------------------------
@@ -168,11 +180,11 @@ void main(void)
         for (i = 0; i < DMA_DEMO_LEN; i++) dst[i] = 0xFF;  /* poison dst */
     }
 
-    /* 2+3. Program DMA and start */
-    mmio_write32(DMA_SRC_ADDR_REG, (uint32_t)DMA_DEMO_SRC);
-    mmio_write32(DMA_DST_ADDR_REG, (uint32_t)DMA_DEMO_DST);
-    mmio_write32(DMA_LENGTH_REG,   DMA_DEMO_LEN);
-    mmio_write32(DMA_CTRL_REG,     0x3u);  /* START | ENABLE */
+    /* 2+3. Program DMA CH0 and start */
+    mmio_write32(DMA_CH0_SRC_ADDR_REG, (uint32_t)DMA_DEMO_SRC);
+    mmio_write32(DMA_CH0_DST_ADDR_REG, (uint32_t)DMA_DEMO_DST);
+    mmio_write32(DMA_CH0_LENGTH_REG,   DMA_DEMO_LEN);
+    mmio_write32(DMA_CH0_CTRL_REG,     0x3u);  /* START | ENABLE */
 
     send_string("[FW] DMA started. Waiting for IRQ7 (DMA done)...\n");
 
@@ -193,6 +205,56 @@ void main(void)
     }
 
     send_string("[FW] Demo complete.\n");
+
+    /*
+     * ── Phase 3: DMA client interface demo ───────────────────────────────
+     *
+     * Demonstrates the DMA client (DREQ/DACK) architecture:
+     *   1. Firmware fills SRAM source buffer.
+     *   2. Programs DmaClientDemoDevice registers (same as DMA, but the
+     *      device internally uses DmaClientHandle — no direct MemChannel).
+     *   3. Writes CTRL.START → device asserts DREQ → DmaController accepts
+     *      (DACK) → copies data after transfer_ticks virtual ticks.
+     *   4. DmaController calls device callback → device sets STATUS.DONE
+     *      and pulses IRQ3.
+     *   5. Firmware verifies DST == SRC.
+     */
+    send_string("[FW] DMA client test: SRAM 0x20003000 -> 0x20004000, 32 bytes.\n");
+
+    /* 1. Fill source buffer */
+    {
+        volatile uint8_t *src = (volatile uint8_t *)DMA_CLIENT_SRC;
+        volatile uint8_t *dst = (volatile uint8_t *)DMA_CLIENT_DST;
+        for (i = 0; i < DMA_CLIENT_LEN; i++) src[i] = (uint8_t)(0xA0 + i);
+        for (i = 0; i < DMA_CLIENT_LEN; i++) dst[i] = 0xFF;  /* poison dst */
+    }
+
+    /* 2+3. Program DmaClientDemoDevice and start */
+    mmio_write32(DMA_CLIENT_DEMO_SRC_ADDR_REG, (uint32_t)DMA_CLIENT_SRC);
+    mmio_write32(DMA_CLIENT_DEMO_DST_ADDR_REG, (uint32_t)DMA_CLIENT_DST);
+    mmio_write32(DMA_CLIENT_DEMO_LENGTH_REG,   DMA_CLIENT_LEN);
+    mmio_write32(DMA_CLIENT_DEMO_CTRL_REG,     0x1u);  /* START */
+
+    send_string("[FW] DMA client transfer started. Waiting for IRQ3...\n");
+
+    /* 4. Wait for DMA client IRQ */
+    while (!dma_client_done) {
+        __asm__ volatile ("wfi");
+    }
+
+    /* 5. Verify */
+    {
+        volatile uint8_t *src = (volatile uint8_t *)DMA_CLIENT_SRC;
+        volatile uint8_t *dst = (volatile uint8_t *)DMA_CLIENT_DST;
+        int ok = 1;
+        for (i = 0; i < DMA_CLIENT_LEN; i++) {
+            if (dst[i] != src[i]) { ok = 0; break; }
+        }
+        send_string(ok ? "[DMA-CLIENT] Transfer verified PASSED!\n"
+                       : "[DMA-CLIENT] Transfer verified FAILED!\n");
+    }
+
+    send_string("[FW] All demos complete.\n");
 
     /* Idle forever */
     while (1) {

@@ -50,10 +50,11 @@ from typing import Optional
 # Ensure project root is on sys.path for sibling package imports.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from device_model.mmio_base    import IRQController, MemChannel, MMIODevice, recv_exact  # noqa: E402
-from device_model.uart_model  import ConsoleUartDevice                      # noqa: E402
-from device_model.dma_model   import DmaDevice                              # noqa: E402
-from device_model.timer_model import TimerDevice                            # noqa: E402
+from device_model.mmio_base         import IRQController, MemChannel, MMIODevice, recv_exact  # noqa: E402
+from device_model.uart_model        import ConsoleUartDevice                      # noqa: E402
+from device_model.timer_model       import TimerDevice                            # noqa: E402
+from device_model.dma_controller    import DmaController                          # noqa: E402
+from device_model.dma_client_demo   import DmaClientDemoDevice                    # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +80,8 @@ class MMIOBus:
     """
 
     def __init__(self) -> None:
-        self._entries: list = []  # list[tuple[int, int, MMIODevice]]
+        self._entries: list = []         # list[tuple[int, int, MMIODevice]]
+        self._tick_observers: list = []  # objects that only need on_tick()
 
     def register(self, base: int, size: int, device: MMIODevice) -> None:
         """Register *device* at the address range [base, base+size)."""
@@ -112,14 +114,26 @@ class MMIOBus:
             return
         device.write(offset, size, data)
 
+    def add_tick_observer(self, observer: object) -> None:
+        """Register an object that should receive on_tick() calls.
+
+        Use this for non-MMIO objects (e.g. a shared DmaController) that
+        need virtual-clock ticks but are not mapped into the address space.
+        The observer must implement ``on_tick(vtime_ns: int)``.
+        """
+        self._tick_observers.append(observer)
+
     def tick_all(self, vtime_ns: int) -> None:
-        """Broadcast a virtual-clock tick to every registered device.
+        """Broadcast a virtual-clock tick to every registered device and
+        every tick observer registered via add_tick_observer().
 
         Each device's ``on_tick()`` is called in registration order.
         Devices with no timing needs use the default no-op from MMIODevice.
         """
         for _base, _size, device in self._entries:
             device.on_tick(vtime_ns)
+        for observer in self._tick_observers:
+            observer.on_tick(vtime_ns)
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +314,11 @@ _TIMER_SIZE     = 0x1000
 _TIMER_RW_PORT   = 7894
 _TIMER_IRQ_PORT  = 7895
 _TIMER_TICK_PORT = 7896   # QEMU → Python virtual-clock tick channel
+
+_DEMO_BASE       = 0x40007000
+_DEMO_SIZE       = 0x1000
+_DEMO_RW_PORT    = 7898
+_DEMO_IRQ_PORT   = 7899
 
 
 # ---------------------------------------------------------------------------
@@ -482,11 +501,29 @@ def main() -> None:
     uart_irq_ctrl  = IRQController()
     dma_irq_ctrl   = IRQController()
     timer_irq_ctrl = IRQController()
+    demo_irq_ctrl  = IRQController()
 
     # ── 2. DMA bus-master memory channel ─────────────────────────────────
     mem_channel = MemChannel()
 
-    # ── 3. Address bus + device registration ─────────────────────────────
+    # ── 3. DMA controller — the MMIO-mapped engine ───────────────────────
+    #
+    # DmaController is the single DMA IP on the SoC.  It is registered on
+    # the bus at _DMA_BASE so firmware can read/write its channel registers
+    # directly (M2M transfers).  Peripherals that need DMA obtain a
+    # DmaClientHandle via get_handle() for the DREQ/DACK interface (P2M/M2P).
+    #
+    #   CH0 @ _DMA_BASE+0x000 — firmware-programmed (M2M, IRQ=dma_irq_ctrl)
+    #   CH1 @ _DMA_BASE+0x020 — DmaClientDemoDevice via DmaClientHandle
+    dma_ctrl = DmaController(
+        num_channels=2,
+        mem_channel=mem_channel,
+        irq_controller=dma_irq_ctrl,
+        irq_idx=0,
+        transfer_ticks=10,
+    )
+
+    # ── 4. Address bus + device registration ─────────────────────────────
     bus = MMIOBus()
 
     bus.register(
@@ -497,21 +534,23 @@ def main() -> None:
             irq_delay=uart_irq_delay,
         ),
     )
-    bus.register(
-        _DMA_BASE, _DMA_SIZE,
-        DmaDevice(
-            irq_controller=dma_irq_ctrl,
-            irq_idx=0,
-            transfer_ticks=10,
-            mem_channel=mem_channel,
-        ),
-    )
+    # DmaController IS the DMA MMIO device — no separate DmaDevice needed.
+    bus.register(_DMA_BASE, _DMA_SIZE, dma_ctrl)
     bus.register(
         _TIMER_BASE, _TIMER_SIZE,
         TimerDevice(irq_controller=timer_irq_ctrl, irq_idx=0),
     )
+    # DmaClientDemoDevice uses DMA CH1 via DmaClientHandle (DREQ/DACK).
+    bus.register(
+        _DEMO_BASE, _DEMO_SIZE,
+        DmaClientDemoDevice(
+            dma_handle=dma_ctrl.get_handle(1),
+            irq_controller=demo_irq_ctrl,
+            irq_idx=0,
+        ),
+    )
 
-    # ── 4. Transport servers ──────────────────────────────────────────────
+    # ── 5. Transport servers ──────────────────────────────────────────────
     uart_irq_server = IRQServer(port=uart_irq_port, irq_controller=uart_irq_ctrl)
     threading.Thread(target=uart_irq_server.start, daemon=True).start()
 
@@ -535,6 +574,13 @@ def main() -> None:
     timer_rw_server = RWServer(port=_TIMER_RW_PORT, bus=bus, base_addr=_TIMER_BASE)
     threading.Thread(target=timer_rw_server.start, daemon=True).start()
 
+    # DmaClientDemoDevice transport servers
+    demo_irq_server = IRQServer(port=_DEMO_IRQ_PORT, irq_controller=demo_irq_ctrl)
+    threading.Thread(target=demo_irq_server.start, daemon=True).start()
+
+    demo_rw_server = RWServer(port=_DEMO_RW_PORT, bus=bus, base_addr=_DEMO_BASE)
+    threading.Thread(target=demo_rw_server.start, daemon=True).start()
+
     uart_rw_server = RWServer(port=uart_rw_port, bus=bus, base_addr=_UART_BASE)
     try:
         uart_rw_server.start()
@@ -549,6 +595,8 @@ def main() -> None:
         timer_rw_server.stop()
         timer_irq_server.stop()
         tick_server.stop()
+        demo_rw_server.stop()
+        demo_irq_server.stop()
 
 
 if __name__ == '__main__':

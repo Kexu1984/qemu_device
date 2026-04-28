@@ -117,6 +117,9 @@ info "Starting QEMU..."
     -chardev socket,id=timer_irq,host=127.0.0.1,port=7895 \
     -chardev socket,id=timer_tick,host=127.0.0.1,port=7896 \
     -device mmio-sockdev,chardev=timer_rw,irq-chardev=timer_irq,tick-chardev=timer_tick,tick-period-ms=1,addr=0x40006000,irq-num=2 \
+    -chardev socket,id=demo_rw,host=127.0.0.1,port=7898 \
+    -chardev socket,id=demo_irq,host=127.0.0.1,port=7899 \
+    -device mmio-sockdev,chardev=demo_rw,irq-chardev=demo_irq,addr=0x40007000,irq-num=3 \
     -kernel "${FIRMWARE_BIN%.bin}.elf" \
     </dev/null > "$QEMU_LOG" 2>&1 &
 QEMU_PID=$!
@@ -134,6 +137,10 @@ EXPECTED=(
     "DMA started"
     "Verification PASSED"
     "Demo complete"
+    "DMA client test"
+    "DMA client transfer started"
+    "Transfer verified PASSED"
+    "All demos complete"
 )
 
 info "Waiting up to ${TIMEOUT}s for expected firmware output (in SERVER_LOG)..."

@@ -70,6 +70,16 @@ devices:
     tick_port:   7896        # QEMU → Python virtual-clock ticks (tick-chardev)
     spec:        timer.yaml  # register map → spec/timer.yaml
 
+  - name:        dma_client_demo
+    description: "DMA client demo peripheral — uses DmaClientHandle (DREQ/DACK interface)"
+    base_addr:   0x40007000
+    size:        0x1000
+    irq_num:     3           # External IRQ 3 on KX6625
+    irq_delay:   0.0
+    rw_port:     7898
+    irq_port:    7899
+    spec:        dma_client_demo.yaml  # register map → spec/dma_client_demo.yaml
+
 # ── Physical Memory Regions ──────────────────────────────────────────────────────────────────
 #
 # RAM regions visible to both firmware (CPU) and device models (via MemChannel).

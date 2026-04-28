@@ -7,10 +7,10 @@ A framework for implementing custom ARM hardware devices in QEMU, with register 
 This project implements:
 - **Custom QEMU Device** (`mmio-sockdev`): Generic SysBus proxy — 4 KB MMIO, IRQ line, optional virtual-clock tick channel, optional bus-master DMA memory channel. One instance per device on the QEMU command line.
 - **Python Device Server** (`device_model/mmio_device_server.py`): Transport + address dispatcher (`MMIOBus`). Each peripheral is a `MMIODevice` subclass with `read()`, `write()`, and an optional `on_tick()` override.
-- **Three modelled peripherals**: Console UART, DMA controller, countdown timer.
-- **Bare-Metal ARM Firmware**: ARMv7-A / GICv2 init, IRQ handler, UART demo, DMA memory-copy demo.
-- **SRAM region**: 64 KB at `0x20000000` added to the QEMU `virt` machine — accessible by both the CPU and the DMA device model via the bus-master memory channel.
-- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server, boots QEMU, fires UART IRQ and DMA transfer, asserts firmware output.
+- **Four modelled peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral.
+- **KX6625 Custom SoC** (`scripts/qemu-fork/hw/arm/kx6625.c`): Cortex-M3 @ 48 MHz, 512 KB FLASH @ `0x00000000`, 128 KB SRAM @ `0x20000000`, NVIC with 16 external IRQs.
+- **Bare-Metal Cortex-M3 Firmware**: NVIC init, IRQ handlers, UART demo, DMA M2M copy demo, DMA peripheral DREQ/DACK demo.
+- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server, boots QEMU, exercises all four devices, asserts firmware output.
 
 ## Architecture
 
@@ -18,20 +18,23 @@ This project implements:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
-│  QEMU  (ARM virt, Cortex-A15, GICv2)                                                       │
+│  QEMU  (KX6625 custom SoC — Cortex-M3 @ 48 MHz, NVIC, 16 external IRQs)                   │
 │                                                                                            │
 │  ┌──────────────┐    MMIO                ┌──────────────────────────────────────────────┐ │
-│  │  Firmware    │ ─── read/write ──────► │  mmio-sockdev (×3 instances)                 │ │
-│  │  (ARMv7-A)   │                        │                                              │ │
-│  │              │ ◄── IRQ (GICv2 SPI) ── │   chardev      ↔ R/W TCP channel             │ │
+│  │  Firmware    │ ─── read/write ──────► │  mmio-sockdev (×4 instances)                 │ │
+│  │  (Cortex-M3) │                        │                                              │ │
+│  │              │ ◄── IRQ (NVIC) ──────── │   chardev      ↔ R/W TCP channel             │ │
 │  └──────┬───────┘                        │   irq-chardev  ← IRQ TCP channel             │ │
 │         │                                │   tick-chardev → virtual-clock tick TCP      │ │
 │         │ read/write                     │   mem-chardev  ← DMA bus-master TCP (opt.)   │ │
 │         ▼                                └───────────┬──────────────────────────────────┘ │
-│  ┌──────────────┐                                    │ TCP channels                       │
-│  │  SRAM 64 KB  │ ◄── cpu_physical_memory_write ─────┘ (mem-chardev → QEMU phys mem)     │
-│  │  0x20000000  │                                                                         │
-│  └──────────────┘   QEMU_CLOCK_VIRTUAL fires QEMUTimer every tick-period-ms              │
+│  ┌────────────────────┐                              │ TCP channels                       │
+│  │  FLASH  512 KB     │                              │                                    │
+│  │  0x00000000        │ ◄── cpu_physical_memory_write (mem-chardev → QEMU phys mem)       │
+│  ├────────────────────┤                                                                   │
+│  │  SRAM   128 KB     │   QEMU_CLOCK_VIRTUAL fires QEMUTimer every tick-period-ms         │
+│  │  0x20000000        │                                                                   │
+│  └────────────────────┘                                                                   │
 └────────────────────────────────────────────────────────────────────────────────────────────┘
                               │ TCP (per-channel connections)
                               ▼
@@ -39,23 +42,24 @@ This project implements:
 │  Python Device Server  (device_model/mmio_device_server.py)                                │
 │                                                                                            │
 │  RWServer               IRQServer              TickServer          MemServer               │
-│  :7890/:7892/:7894      :7891/:7893/:7895      :7896               :7897                   │
+│  :7890/:7892/:7894/:7898 :7891/:7893/:7895/:7899 :7896             :7897                   │
 │  QEMU ↔ Python          Python → QEMU          QEMU → Python       Python → QEMU           │
 │  (MMIO R/W ops)         (IRQ injection)        (virtual clock)     (bus-master DMA)        │
 │        │                      │                     │                   │                  │
 │        └──────────────┬───────┘          bus.tick_all(vtime_ns)   MemChannel               │
 │                       │                                            dma_read/dma_write()    │
 │                   MMIOBus                                               │                  │
-│          ┌────────────┼────────────┐                                   │                  │
-│          ▼            ▼            ▼                                   │                  │
-│  ConsoleUartDevice  DmaDevice  TimerDevice                             │                  │
-│  0x10020000         0x10030000  0x10040000                             │                  │
-│       │             on_tick():  on_tick():                             │                  │
-│       │             countdown;  elapsed check                          │                  │
-│       │             dma_read() ─────────────────────────────────────── ┘ → SRAM read      │
-│       │             dma_write()─────────────────────────── QEMU phys mem write (SRAM)     │
-│       │             fire IRQ 33                                                            │
-│       └─ fire IRQ 32                                                                       │
+│       ┌───────────────┼────────────┬───────────────┐                   │                  │
+│       ▼               ▼            ▼               ▼                   │                  │
+│  ConsoleUart    DmaController  TimerDevice   DmaClientDemo             │                  │
+│  0x40004000     0x40005000     0x40006000    0x40007000                │                  │
+│  IRQ 0          CH0 M2M        on_tick():    IRQ 3                     │                  │
+│                 CH1 DREQ/DACK  elapsed check handle.transfer() ────────┘                  │
+│                 IRQ 1          IRQ 2         (DREQ→DACK→TC callback)                       │
+│                 on_tick()                                                                  │
+│                 dma_read/write ──────────────────────────────────────── → SRAM r/w         │
+│       │         fire IRQ 1                                                                 │
+│       └─ fire IRQ 0                                                                        │
 └────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -78,9 +82,10 @@ QEMU_CLOCK_VIRTUAL
     │  'T'|vtime_ns  (TCP :7896)
     ▼
 TickServer  ──► bus.tick_all(vtime_ns)
-                   ├── ConsoleUartDevice.on_tick()  →  no-op (inherited)
-                   ├── DmaDevice.on_tick()          →  decrement _ticks_remaining; DMA copy + IRQ on 0
-                   └── TimerDevice.on_tick()        →  check elapsed_ns ≥ load_ns; IRQ on expiry
+                   ├── ConsoleUartDevice.on_tick()   →  no-op (inherited)
+                   ├── DmaController.on_tick()       →  advance every BUSY channel; DMA copy + IRQ on 0
+                   ├── TimerDevice.on_tick()         →  check elapsed_ns ≥ load_ns; IRQ on expiry
+                   └── DmaClientDemoDevice.on_tick() →  no-op (inherited)
 ```
 
 ### IRQ Flow
@@ -89,15 +94,17 @@ TickServer  ──► bus.tick_all(vtime_ns)
 MMIODevice.irq_controller.set_irq(idx, level)
     │  'I'(1B) | idx(1B) | level(1B)  (TCP irq-port)
     ▼
-mmio-sockdev (QEMU)  ──►  GICv2 SPI (INTID = irq-num)  ──►  Cortex-A15 IRQ line
+mmio-sockdev (QEMU)  ──►  NVIC (IRQ line)  ──►  Cortex-M3
 ```
+
+NVIC pulse pattern: assert then immediately deassert so the NVIC edge-trigger does not re-fire.
 
 ### Bus-Master DMA Flow
 
-The DMA device model acts as a bus master: it directly reads/writes QEMU physical memory without involving the firmware CPU. This is modelled via a dedicated `mem-chardev` TCP channel:
+The DMA controller model acts as a bus master: it directly reads/writes QEMU physical memory without involving the firmware CPU. This is modelled via a dedicated `mem-chardev` TCP channel:
 
 ```
-DmaDevice.on_tick() calls:
+DmaController._tick_channel() calls:
     MemChannel.dma_read(src_addr, length)
         │  'M'(1B)|'R'(1B)|phys_addr(8B LE)|length(4B LE)  → QEMU
         │  QEMU executes cpu_physical_memory_read() and responds data(lengthB)
@@ -105,21 +112,45 @@ DmaDevice.on_tick() calls:
     MemChannel.dma_write(dst_addr, data)
         │  'M'(1B)|'W'(1B)|phys_addr(8B LE)|length(4B LE)|data(lengthB)  → QEMU
         ▼
-        QEMU executes cpu_physical_memory_write() into the SRAM region
+        QEMU executes cpu_physical_memory_write() into SRAM
+```
+
+### DMA Controller Architecture
+
+`DmaController` (`dma_controller.py`) is the single MMIO-mapped DMA IP. It supports two independent channels:
+
+| Channel | Mode | How triggered | Completion |
+|---------|------|--------------|------------|
+| CH0 | Memory-to-memory (M2M) | Firmware writes `CH0_CTRL.START` | Pulses DMA IRQ (NVIC) |
+| CH1 | Peripheral DREQ/DACK (P2M/M2P) | `DmaClientHandle.transfer()` call | Calls peripheral's `on_complete` callback |
+
+Each channel has its own 0x20-byte register slot. Transfers are tick-driven: a countdown (`transfer_ticks=10`) advances on every virtual-clock tick, so latency is tied to QEMU's virtual clock and stops during debug pauses.
+
+```
+Firmware path (CH0):
+  write CH0_CTRL.START  →  _firmware_start()  →  _arm_channel()
+  → _tick_channel() after N ticks → MemChannel copy → pulse IRQ 1
+
+Peripheral path (CH1 / DmaClientDemoDevice):
+  DmaClientHandle.transfer()  →  _peripheral_request()  →  _arm_channel()
+  → _tick_channel() after N ticks → MemChannel copy → on_complete() callback
+  → DmaClientDemoDevice sets STATUS.DONE → pulses IRQ 3
 ```
 
 ## Devices
 
 ### Memory Map
 
-| Region        | Base Address  | Size   | GIC INTID  | R/W Port | IRQ Port | Tick Port | Mem Port |
-|---------------|---------------|--------|------------|----------|----------|-----------|----------|
-| Console UART  | `0x10020000`  | 4 KB   | 32 (SPI 0) | 7890     | 7891     | —         | —        |
-| DMA           | `0x10030000`  | 4 KB   | 33 (SPI 1) | 7892     | 7893     | —         | 7897     |
-| Timer 0       | `0x10040000`  | 4 KB   | 34 (SPI 2) | 7894     | 7895     | 7896      | —        |
-| **SRAM**      | `0x20000000`  | 64 KB  | —          | —        | —        | —         | —        |
+| Region           | Base Address  | Size   | NVIC IRQ | R/W Port | IRQ Port | Tick Port | Mem Port |
+|------------------|---------------|--------|----------|----------|----------|-----------|----------|
+| Console UART     | `0x40004000`  | 4 KB   | 0        | 7890     | 7891     | —         | —        |
+| DMA Controller   | `0x40005000`  | 4 KB   | 1        | 7892     | 7893     | —         | 7897     |
+| Timer 0          | `0x40006000`  | 4 KB   | 2        | 7894     | 7895     | 7896      | —        |
+| DMA Client Demo  | `0x40007000`  | 4 KB   | 3        | 7898     | 7899     | —         | —        |
+| **FLASH**        | `0x00000000`  | 512 KB | —        | —        | —        | —         | —        |
+| **SRAM**         | `0x20000000`  | 128 KB | —        | —        | —        | —         | —        |
 
-The tick channel (`:7896`) is shared — a single `TickServer` broadcasts ticks from the timer's `mmio-sockdev` instance to **all** bus devices via `MMIOBus.tick_all()`.
+The tick channel (`:7896`) is shared — a single `TickServer` broadcasts virtual-clock ticks from the timer's `mmio-sockdev` instance to **all** bus devices via `MMIOBus.tick_all()`.
 
 ### Console UART (`uart_model.py`)
 
@@ -131,20 +162,43 @@ The tick channel (`:7896`) is shared — a single `TickServer` broadcasts ticks 
 
 Fires a one-shot demo IRQ ~2 s after the IRQ channel connects. Does not use `on_tick()`. Characters are line-buffered in Python (flushed on `\n`) to prevent interleaving with other device thread output.
 
-### DMA Controller (`dma_model.py`)
+### DMA Controller (`dma_controller.py`)
+
+A multi-channel DMA controller that acts as both the firmware-visible MMIO device and the engine for peripheral DREQ/DACK transfers. Two channels, each occupying a 0x20-byte register slot:
+
+**Per-channel register layout (stride = 0x20)**
+
+| Offset within slot | Name       | Access | Description                              |
+|--------------------|------------|--------|------------------------------------------|
+| +0x00              | CH_SRC_ADDR | R/W   | Transfer source physical address         |
+| +0x04              | CH_DST_ADDR | R/W   | Transfer destination physical address    |
+| +0x08              | CH_LENGTH   | R/W   | Transfer length in bytes                 |
+| +0x0C              | CH_CTRL     | R/W   | bit0 = START, bit1 = ENABLE              |
+| +0x10              | CH_STATUS   | R     | bit0 = BUSY, bit1 = DONE                 |
+
+CH0 starts at offset `0x00`; CH1 starts at offset `0x20`.
+
+Writing `CH_CTRL.START` sets `STATUS.BUSY` and starts a virtual-clock countdown (`transfer_ticks = 10`). After 10 ticks the DMA controller:
+1. Reads `length` bytes from `src_addr` via `MemChannel.dma_read()`.
+2. Writes them to `dst_addr` via `MemChannel.dma_write()`.
+3. Sets `STATUS.DONE`, clears `STATUS.BUSY`.
+4. **M2M (CH0 firmware path)**: pulses DMA IRQ 1.  **P2M/M2P (CH1 peripheral path)**: calls the peripheral's `on_complete(success)` callback.
+
+Peripheral devices obtain a `DmaClientHandle` via `DmaController.get_handle(channel_id)` and call `handle.transfer(src, dst, length, callback)` — analogous to asserting a hardware DREQ line. The controller returns `True` (DACK) or `False` (NACK if channel busy).
+
+### DMA Client Demo (`dma_client_demo.py`)
+
+A demo peripheral that uses the DMA controller's DREQ/DACK interface to perform transfers without firmware involvement.
 
 | Offset | Name     | Access | Description                          |
 |--------|----------|--------|--------------------------------------|
 | 0x00   | SRC_ADDR | R/W    | Transfer source physical address     |
 | 0x04   | DST_ADDR | R/W    | Transfer destination physical address|
 | 0x08   | LENGTH   | R/W    | Transfer length in bytes             |
-| 0x0C   | CTRL     | R/W    | bit0 = START, bit1 = ENABLE          |
+| 0x0C   | CTRL     | R/W    | bit0 = START                         |
 | 0x10   | STATUS   | R      | bit0 = BUSY, bit1 = DONE             |
 
-Writing `CTRL.START` sets `STATUS.BUSY` and starts a virtual-clock countdown (`transfer_ticks = 10` by default). After 10 ticks the DMA model:
-1. Reads `length` bytes from `src_addr` in QEMU physical memory via `MemChannel.dma_read()`.
-2. Writes them to `dst_addr` via `MemChannel.dma_write()`.
-3. Sets `STATUS.DONE`, clears `STATUS.BUSY`, and fires IRQ 33.
+Firmware writes `CTRL.START`; the demo device calls `dma_handle.transfer()` (DREQ). On completion, `STATUS.DONE` is set and IRQ 3 is pulsed.
 
 ### Timer 0 (`timer_model.py`)
 
@@ -212,19 +266,24 @@ The Python device server binds all TCP ports first; QEMU connects to them as a c
 # Console UART
 -chardev socket,id=uart_rw,host=127.0.0.1,port=7890
 -chardev socket,id=uart_irq,host=127.0.0.1,port=7891
--device  mmio-sockdev,chardev=uart_rw,irq-chardev=uart_irq,addr=0x10020000,irq-num=32
+-device  mmio-sockdev,chardev=uart_rw,irq-chardev=uart_irq,addr=0x40004000,irq-num=0
 
-# DMA (includes bus-master memory channel)
+# DMA controller (includes bus-master memory channel)
 -chardev socket,id=dma_rw,host=127.0.0.1,port=7892
 -chardev socket,id=dma_irq,host=127.0.0.1,port=7893
 -chardev socket,id=dma_mem,host=127.0.0.1,port=7897
--device  mmio-sockdev,chardev=dma_rw,irq-chardev=dma_irq,mem-chardev=dma_mem,addr=0x10030000,irq-num=33
+-device  mmio-sockdev,chardev=dma_rw,irq-chardev=dma_irq,mem-chardev=dma_mem,addr=0x40005000,irq-num=1
 
-# Timer 0  (also carries the shared tick broadcast)
+# Timer 0 (also carries the shared tick broadcast)
 -chardev socket,id=timer_rw,host=127.0.0.1,port=7894
 -chardev socket,id=timer_irq,host=127.0.0.1,port=7895
 -chardev socket,id=timer_tick,host=127.0.0.1,port=7896
--device  mmio-sockdev,chardev=timer_rw,irq-chardev=timer_irq,tick-chardev=timer_tick,tick-period-ms=1,addr=0x10040000,irq-num=34
+-device  mmio-sockdev,chardev=timer_rw,irq-chardev=timer_irq,tick-chardev=timer_tick,tick-period-ms=1,addr=0x40006000,irq-num=2
+
+# DMA Client Demo peripheral
+-chardev socket,id=demo_rw,host=127.0.0.1,port=7898
+-chardev socket,id=demo_irq,host=127.0.0.1,port=7899
+-device  mmio-sockdev,chardev=demo_rw,irq-chardev=demo_irq,addr=0x40007000,irq-num=3
 ```
 
 ## Quick Start
@@ -259,9 +318,9 @@ bash scripts/e2e_test.sh
 ```
 
 This single command:
-1. Starts the Python device server (all three devices)
+1. Starts the Python device server (all four devices)
 2. Waits for the UART port to be ready
-3. Starts QEMU with three `mmio-sockdev` instances and the firmware
+3. Starts QEMU (`-M kx6625`) with four `mmio-sockdev` instances and the firmware
 4. Polls firmware output in the server log for up to 80 s
 5. Asserts all expected log lines are present and prints PASS or FAIL
 
@@ -271,13 +330,17 @@ Logs are written to `build/e2e_server.log` and `build/e2e_qemu.log` for post-mor
 
 ```
 [PASS] Found: "MMIO SockDev Interrupt Demo"
-[PASS] Found: "GIC initialised"
+[PASS] Found: "NVIC initialised"
 [PASS] Found: "IRQs enabled"
 [PASS] Found: "UART interrupt handled"
 [PASS] Found: "DMA demo"
 [PASS] Found: "DMA started"
 [PASS] Found: "Verification PASSED"
 [PASS] Found: "Demo complete"
+[PASS] Found: "DMA client test"
+[PASS] Found: "DMA client transfer started"
+[PASS] Found: "Transfer verified PASSED"
+[PASS] Found: "All demos complete"
 
 [PASS] End-to-end IRQ test PASSED
 ```
@@ -293,7 +356,7 @@ Logs are written to `build/e2e_server.log` and `build/e2e_qemu.log` for post-mor
 
 ### 4. Run the full server interactively
 
-**Terminal 1** — Python device server (all three devices):
+**Terminal 1** — Python device server (all four devices):
 ```bash
 python3 device_model/mmio_device_server.py
 ```
@@ -307,21 +370,29 @@ Firmware character output (via TXDATA writes) appears in Terminal 1.
 
 ## Firmware Demo Sequence
 
-The firmware (`firmware/main.c`) executes two demos back-to-back:
+The firmware (`firmware/main.c`) executes three demos back-to-back:
 
 ### Phase 1 — UART IRQ
 
-1. Initialises GICv2 (Group0, INTID 32 + 33 armed, routed to CPU 0).
-2. Enables IRQs and polls `GICC_IAR` / `wfi` for INTID 32.
+1. Initialises NVIC (16 external IRQs armed, IRQs 0–3 enabled).
+2. Enables IRQs and waits (`WFI`) for IRQ 0.
 3. Python server fires the UART IRQ ~2 s after connecting; firmware acknowledges and prints `[FW] UART interrupt handled successfully!`.
 
-### Phase 2 — DMA Memory Copy
+### Phase 2 — DMA Memory-to-Memory Copy (CH0)
 
-1. Fills SRAM source buffer `0x20000000+0x000` with bytes `0x01..0x20` (32 bytes).
-2. Programs DMA registers: `SRC=0x20000000`, `DST=0x20000200`, `LEN=32`, `CTRL=START|ENABLE`.
-3. DMA device model (Python) reads the source via `dma_read()`, writes the destination via `dma_write()`, then fires IRQ 33 after 10 virtual ticks.
-4. Firmware polls for INTID 33, then verifies the destination buffer matches the source.
+1. Fills SRAM source buffer `0x20000000` with bytes `0x01..0x20` (32 bytes).
+2. Programs DMA CH0 registers: `CH0_SRC_ADDR=0x20000000`, `CH0_DST_ADDR=0x20000200`, `CH0_LENGTH=32`, `CH0_CTRL=START`.
+3. DMA controller (Python) reads the source via `dma_read()`, writes the destination via `dma_write()`, then pulses IRQ 1 after 10 virtual ticks.
+4. Firmware handles IRQ 1, then verifies the destination buffer matches the source.
 5. Prints `[DMA] Verification PASSED!` and `[FW] Demo complete.`
+
+### Phase 3 — DMA Client Demo (CH1, DREQ/DACK)
+
+1. Firmware programs `DMA_CLIENT_DEMO` registers (`SRC_ADDR`, `DST_ADDR`, `LENGTH`) and writes `CTRL.START`.
+2. `DmaClientDemoDevice` calls `dma_handle.transfer()` — DREQ to CH1.
+3. DMA controller accepts (DACK), performs the copy, then calls the demo device's `on_complete` callback.
+4. Demo device sets `STATUS.DONE` and pulses IRQ 3.
+5. Firmware handles IRQ 3, verifies buffer, prints `[DMA] Transfer verified PASSED!` and `[FW] All demos complete.`
 
 ## Project Structure
 
@@ -332,30 +403,33 @@ qemu_device/
 ├── spec/                             # Device specs (single source of truth)
 │   ├── devices.yaml                  # Platform memory map + IRQ + TCP port topology
 │   ├── uart.yaml                     # Console UART register map
-│   ├── dma.yaml                      # DMA controller register map
+│   ├── dma.yaml                      # DMA controller CH0/CH1 register map
+│   ├── dma_client_demo.yaml          # DMA client demo register map
 │   └── timer.yaml                    # Timer 0 register map
-├── firmware/                         # Bare-metal ARM firmware
-│   ├── start.S                       # Vector table, mode stacks, VBAR setup
-│   ├── main.c                        # GICv2 init + UART IRQ demo + DMA demo
-│   ├── linker.ld                     # Memory layout (text at 0x40200000)
+├── firmware/                         # Bare-metal Cortex-M3 firmware
+│   ├── start.S                       # Vector table, Reset_Handler, IRQ dispatch
+│   ├── main.c                        # NVIC init + UART IRQ + DMA M2M + DMA client demo
+│   ├── linker.ld                     # Memory layout (FLASH @ 0x00000000, SRAM @ 0x20000000)
 │   └── Makefile                      # Runs gen_device_code.py then compiles
 ├── device_model/                     # Python device emulation layer
 │   ├── mmio_base.py                  # MMIODevice ABC, IRQController, MemChannel, recv_exact()
 │   ├── mmio_device_server.py         # MMIOBus + RWServer + IRQServer + TickServer + MemServer + main()
 │   ├── uart_model.py                 # Console UART (character output + demo IRQ)
-│   ├── dma_model.py                  # DMA controller (tick-based latency + bus-master copy)
+│   ├── dma_controller.py             # DMA controller (multi-channel M2M + DREQ/DACK)
+│   ├── dma_client_demo.py            # DMA client demo peripheral (DREQ/DACK to DMA CH1)
 │   ├── timer_model.py                # Countdown timer (virtual-clock, one-shot + periodic)
-│   ├── mmio_sockdev.c                # QEMU C device model (canonical source — copied to qemu-fork on build)
 │   └── generated/                    # Auto-generated constants (make gen / make fw)
 │       └── device_consts.py          # Python constants mirroring mmio_devices.h
+├── qemu-fork/                        # Custom QEMU device sources
+│   └── hw/
+│       ├── misc/mmio_sockdev.c       # Generic SysBus mmio-sockdev (canonical source)
+│       └── arm/kx6625.c             # KX6625 custom SoC definition
 ├── scripts/
 │   ├── build_qemu.sh                 # QEMU configure + ninja build
 │   ├── gen_device_code.py            # Code generator: spec/ → C header + Python consts
 │   ├── run_demo.sh                   # Interactive demo launcher
 │   ├── e2e_test.sh                   # Automated end-to-end smoke test
-│   └── qemu-fork/                    # Modified QEMU 8.1.0 source tree
-│       ├── hw/misc/mmio_sockdev.c    # Custom SysBus device (built copy)
-│       └── hw/arm/virt.c             # virt machine: SRAM region + mmio-sockdev whitelist
+│   └── qemu-fork/                    # Modified QEMU 8.1.0 source tree (build target)
 └── build/                            # Build artifacts (gitignored)
     ├── firmware.elf / firmware.bin
     └── generated/
@@ -372,27 +446,26 @@ qemu_device/
 | `make run`   | Print interactive run instructions                           |
 | `make clean` | Remove all build artifacts                                   |
 
-## GIC / IRQ Configuration
+## NVIC / IRQ Configuration
 
-| Parameter     | Value                                   |
-|---------------|-----------------------------------------|
-| Machine       | `virt` (Cortex-A15)                     |
-| GIC version   | GICv2                                   |
-| GICD base     | `0x08000000`                            |
-| GICC base     | `0x08010000`                            |
-| UART IRQ      | INTID 32 = SPI 0 (`irq-num=32`)         |
-| DMA IRQ       | INTID 33 = SPI 1 (`irq-num=33`)         |
-| Timer 0 IRQ   | INTID 34 = SPI 2 (`irq-num=34`)         |
+| Parameter             | Value                             |
+|-----------------------|-----------------------------------|
+| Machine               | `kx6625` (Cortex-M3 @ 48 MHz)    |
+| NVIC external IRQs    | 16                                |
+| UART IRQ              | 0 (`irq-num=0`)                   |
+| DMA IRQ               | 1 (`irq-num=1`)                   |
+| Timer 0 IRQ           | 2 (`irq-num=2`)                   |
+| DMA Client Demo IRQ   | 3 (`irq-num=3`)                   |
 
-**Note — Group0 requirement for Secure SVC mode**: The ARM Cortex-A15 resets into Secure SVC mode. When SPIs are configured as **Group1** (`GICD_IGROUPR1 ≠ 0`), `GICC_IAR` returns INTID **1022** instead of the actual interrupt ID (with `AckCtl=0`). The firmware therefore keeps all used SPIs in **Group0** (`GICD_IGROUPR1 = 0`) and enables only Group0 at the CPU Interface (`GICC_CTLR = 1`). This causes `GICC_IAR` to return the real INTID directly in Secure state.
+IRQ pulse pattern: assert then immediately deassert to edge-trigger the NVIC without re-firing.
 
 ## Extending: Adding a New Device
 
 1. **Define the spec**: add an entry in `spec/devices.yaml` and create `spec/<name>.yaml` with the register map.
-2. **Write the model**: create `device_model/<name>_model.py` subclassing `MMIODevice`. Override `read()`, `write()`, and optionally `on_tick()` for timing behaviour or `MemChannel.dma_read/write()` for bus-master DMA.
+2. **Write the model**: create `device_model/<name>_model.py` subclassing `MMIODevice`. Override `read()`, `write()`, and optionally `on_tick()` for timing behaviour. For bus-master DMA, use `MemChannel.dma_read/write()`. To use the DMA controller as a peripheral, obtain a `DmaClientHandle` from `DmaController.get_handle(ch)`.
 3. **Register on the bus**: add `bus.register(BASE, SIZE, YourDevice(...))` in `mmio_device_server.py`'s `main()`.
-4. **Add transport servers**: create `RWServer` and `IRQServer` instances as needed. If the device needs timing, it uses the existing `TickServer` automatically (no changes required). If it needs bus-master DMA, add a `MemServer` instance.
-5. **Extend the QEMU command line**: add a `mmio-sockdev` instance with the appropriate `chardev`/`irq-chardev`/`addr`/`irq-num` properties. Add `mem-chardev` for DMA.
+4. **Add transport servers**: create `RWServer` and `IRQServer` instances as needed. Devices that need timing use the existing `TickServer` automatically. Devices that need bus-master DMA get a dedicated `MemServer` instance.
+5. **Extend the QEMU command line**: add a `mmio-sockdev` instance with `chardev`, `irq-chardev`, `addr`, `irq-num`. Add `mem-chardev` for DMA; `tick-chardev` for timer-style ticks.
 6. Regenerate constants with `make gen`.
 
 ## Troubleshooting
@@ -407,7 +480,7 @@ qemu_device/
 | QEMU build fails | Install missing libs: `sudo apt install libglib2.0-dev libpixman-1-dev` |
 | ARM toolchain missing | `sudo apt install gcc-arm-none-eabi` |
 | `"Parameter 'driver' expects a pluggable device type"` | QEMU binary is stale; run `make qemu` |
-| Firmware stuck at "Waiting for UART interrupt" | GIC misconfiguration; ensure `GICD_IGROUPR1=0` (Group0) in `gic_init()` |
+| Firmware stuck at "Waiting for UART interrupt" | Check NVIC configuration in `nvic_init()`; ensure IRQ 0 is enabled |
 
 Stop QEMU: `Ctrl+C` (script) or `Ctrl+A X` (nographic monitor).
 

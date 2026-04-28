@@ -25,6 +25,7 @@
 .extern uart_irq_handler
 .extern dma_irq_handler
 .extern timer_irq_handler
+.extern dma_client_irq_handler
 
 /* ── Vector table — must be the very first thing in the image ───────── */
 .section .vectors, "a"
@@ -49,13 +50,14 @@ _vectors:
     .word   default_handler     /* 14: PendSV                                 */
     .word   default_handler     /* 15: SysTick                                */
 
-    /* ── External IRQs 0-2 (indices 16-18) — our devices ───────────────── */
-    .word   uart_irq_handler    /* IRQ0: console_uart device  */
-    .word   dma_irq_handler     /* IRQ1: dma device           */
-    .word   timer_irq_handler   /* IRQ2: timer0 device        */
+    /* ── External IRQs 0-3 (indices 16-19) — our devices ───────────────── */
+    .word   uart_irq_handler       /* IRQ0: console_uart device  */
+    .word   dma_irq_handler        /* IRQ1: dma device           */
+    .word   timer_irq_handler      /* IRQ2: timer0 device        */
+    .word   dma_client_irq_handler /* IRQ3: dma_client_demo      */
 
-    /* ── External IRQs 3-15 (indices 19-31) — default ──────────────── */
-    .rept 13
+    /* ── External IRQs 4-15 (indices 20-31) — default ──────────────── */
+    .rept 12
     .word   default_handler
     .endr
 

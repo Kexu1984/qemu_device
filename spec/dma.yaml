@@ -1,37 +1,78 @@
 # ============================================================================
-# Simple DMA Controller — per-device register map
+# DMA Controller — per-device register map
 # ============================================================================
 #
 # This file is referenced by spec/devices.yaml via  spec: dma.yaml
 # gen_device_code.py merges it with the top-level entry at build time.
+#
+# The DMA controller has N independent channels.  Each channel occupies a
+# 0x20-byte register slot starting at DMA_BASE + channel_index * 0x20.
+#
+#   CH0 registers: DMA_BASE + 0x00 … 0x1F  (firmware M2M transfers)
+#   CH1 registers: DMA_BASE + 0x20 … 0x3F  (peripheral DREQ/DACK, e.g. dma_client_demo)
+#
+# Generated C names follow the pattern:  DMA_CH<n>_<REG>_REG
+# e.g.  DMA_CH0_SRC_ADDR_REG, DMA_CH1_CTRL_REG, etc.
 
 registers:
+  # ── Channel 0 (firmware-programmed, M2M) ─────────────────────────────────
   - offset:      0x00
-    name:        SRC_ADDR
+    name:        CH0_SRC_ADDR
     access:      RW
-    description: "DMA source address"
+    description: "CH0 DMA source address"
     reset_value: 0x00
 
   - offset:      0x04
-    name:        DST_ADDR
+    name:        CH0_DST_ADDR
     access:      RW
-    description: "DMA destination address"
+    description: "CH0 DMA destination address"
     reset_value: 0x00
 
   - offset:      0x08
-    name:        LENGTH
+    name:        CH0_LENGTH
     access:      RW
-    description: "Transfer length in bytes"
+    description: "CH0 transfer length in bytes"
     reset_value: 0x00
 
   - offset:      0x0C
-    name:        CTRL
+    name:        CH0_CTRL
     access:      RW
-    description: "Control: bit0=START, bit1=ENABLE"
+    description: "CH0 control: bit0=START, bit1=ENABLE"
     reset_value: 0x00
 
   - offset:      0x10
-    name:        STATUS
+    name:        CH0_STATUS
     access:      R
-    description: "Status: bit0=BUSY, bit1=DONE"
+    description: "CH0 status: bit0=BUSY, bit1=DONE"
+    reset_value: 0x00
+
+  # ── Channel 1 (peripheral DREQ/DACK path, e.g. dma_client_demo) ──────────
+  - offset:      0x20
+    name:        CH1_SRC_ADDR
+    access:      RW
+    description: "CH1 DMA source address"
+    reset_value: 0x00
+
+  - offset:      0x24
+    name:        CH1_DST_ADDR
+    access:      RW
+    description: "CH1 DMA destination address"
+    reset_value: 0x00
+
+  - offset:      0x28
+    name:        CH1_LENGTH
+    access:      RW
+    description: "CH1 transfer length in bytes"
+    reset_value: 0x00
+
+  - offset:      0x2C
+    name:        CH1_CTRL
+    access:      RW
+    description: "CH1 control: bit0=START, bit1=ENABLE"
+    reset_value: 0x00
+
+  - offset:      0x30
+    name:        CH1_STATUS
+    access:      R
+    description: "CH1 status: bit0=BUSY, bit1=DONE"
     reset_value: 0x00
