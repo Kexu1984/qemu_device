@@ -6,6 +6,8 @@ Provides:
   MMIODevice                    — abstract base class for all device models
   IRQController                 — thread-safe IRQ injection into QEMU
   MemChannel                    — bus-master DMA channel into QEMU physical memory
+  AddressSpace                  — address-based router: MMIO → bus (in-process),
+                                  other → MemChannel (QEMU physical memory via TCP)
 
 This module has no device-specific logic; it is imported by every device
 model (uart_model.py, dma_model.py, …) and by mmio_device_server.py.
@@ -255,3 +257,73 @@ class MemChannel:
                 print(f'[MEM]  dma_read error: {exc}', file=sys.stderr)
                 self._signal_close()
                 return None
+
+
+# ---------------------------------------------------------------------------
+# Address space — routes DMA reads/writes by physical address
+# ---------------------------------------------------------------------------
+
+class AddressSpace:
+    """
+    Unified address-space accessor for bus-master devices (e.g. DMA engine).
+
+    Routes reads/writes by physical address:
+
+    - Addresses within any registered MMIO region:
+        Dispatched directly to the Python MMIOBus in-process.
+        No TCP round-trip — the device model's ``read()``/``write()`` is called
+        synchronously, making M2P and P2M transfers race-free.
+
+    - All other addresses (SRAM, flash, …):
+        Dispatched to QEMU physical memory via ``MemChannel`` (TCP round-trip
+        to ``cpu_physical_memory_read/write``).
+
+    The ``mmio_bus`` parameter is duck-typed: any object implementing
+    ``read(addr, size) -> bytes`` and ``write(addr, size, data)`` is accepted.
+    This avoids a circular import with ``mmio_device_server.MMIOBus``.
+
+    Usage::
+
+        addr_space = AddressSpace(
+            mem_channel  = mem_ch,
+            mmio_bus     = bus,
+            mmio_regions = [(0x40000000, 0x100000)],  # peripheral address space
+        )
+        dma_ctrl = DmaController(address_space=addr_space, ...)
+    """
+
+    def __init__(
+        self,
+        mem_channel:  'MemChannel',
+        mmio_bus:     object,           # duck-typed: read()/write() methods
+        mmio_regions: list,             # list[tuple[int, int]]  [(base, size), …]
+    ) -> None:
+        self._mem     = mem_channel
+        self._bus     = mmio_bus
+        self._regions = mmio_regions    # [(base: int, size: int), …]
+
+    def _is_mmio(self, addr: int) -> bool:
+        return any(base <= addr < base + size for base, size in self._regions)
+
+    def read(self, addr: int, length: int) -> Optional[bytes]:
+        """
+        Read ``length`` bytes from ``addr``.
+
+        Returns bytes on success; ``None`` if a QEMU transport error occurs
+        (MMIO reads always succeed, returning zero bytes for unmapped ranges).
+        """
+        if self._is_mmio(addr):
+            return self._bus.read(addr, length)   # MMIOBus always returns bytes
+        return self._mem.dma_read(addr, length)
+
+    def write(self, addr: int, data: bytes) -> bool:
+        """
+        Write ``data`` to ``addr``.
+
+        Returns ``True`` on success, ``False`` on QEMU transport error
+        (MMIO writes always succeed).
+        """
+        if self._is_mmio(addr):
+            self._bus.write(addr, len(data), data)
+            return True
+        return self._mem.dma_write(addr, data)

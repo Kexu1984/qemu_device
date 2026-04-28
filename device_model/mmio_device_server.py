@@ -50,7 +50,7 @@ from typing import Optional
 # Ensure project root is on sys.path for sibling package imports.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from device_model.mmio_base         import IRQController, MemChannel, MMIODevice, recv_exact  # noqa: E402
+from device_model.mmio_base         import AddressSpace, IRQController, MemChannel, MMIODevice, recv_exact  # noqa: E402
 from device_model.uart_model        import ConsoleUartDevice                      # noqa: E402
 from device_model.timer_model       import TimerDevice                            # noqa: E402
 from device_model.dma_controller    import DmaController                          # noqa: E402
@@ -518,18 +518,41 @@ def main() -> None:
     # directly (M2M transfers).  Peripherals that need DMA obtain a
     # DmaClientHandle via get_handle() for the DREQ/DACK interface (P2M/M2P).
     #
-    #   CH0 @ _DMA_BASE+0x000 — firmware-programmed (M2M, IRQ=dma_irq_ctrl)
+    # AddressSpace routes DMA reads/writes by address:
+    #   - MMIO region [0x40000000, 0x50000000): dispatched directly to the
+    #     Python MMIOBus in-process — no TCP round-trip, no ordering race.
+    #   - All other addresses (SRAM, flash): forwarded to QEMU physical memory
+    #     via MemChannel (cpu_physical_memory_read/write over TCP).
+    #
+    # The bus reference in AddressSpace is live — devices can be registered
+    # on the bus after addr_space is created; transfers happen at runtime when
+    # the bus is already fully populated.
+    #
+    #   CH0 @ _DMA_BASE+0x000 — firmware-programmed (IRQ=dma_irq_ctrl)
     #   CH1 @ _DMA_BASE+0x020 — DmaClientDemoDevice via DmaClientHandle
+    bus = MMIOBus()
+
+    addr_space = AddressSpace(
+        mem_channel  = mem_channel,
+        mmio_bus     = bus,
+        mmio_regions = [
+            (_UART_BASE,  _UART_SIZE),
+            (_DMA_BASE,   _DMA_SIZE),
+            (_TIMER_BASE, _TIMER_SIZE),
+            (_DEMO_BASE,  _DEMO_SIZE),
+            (_CRC_BASE,   _CRC_SIZE),
+        ],
+    )
+
     dma_ctrl = DmaController(
-        num_channels=2,
-        mem_channel=mem_channel,
-        irq_controller=dma_irq_ctrl,
-        irq_idx=0,
-        transfer_ticks=10,
+        num_channels  = 2,
+        address_space = addr_space,
+        irq_controller= dma_irq_ctrl,
+        irq_idx       = 0,
+        transfer_ticks= 10,
     )
 
     # ── 4. Address bus + device registration ─────────────────────────────
-    bus = MMIOBus()
 
     bus.register(
         _UART_BASE, _UART_SIZE,

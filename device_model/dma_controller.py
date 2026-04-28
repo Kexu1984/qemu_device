@@ -54,7 +54,7 @@ import sys
 import threading
 from typing import Callable, Optional
 
-from device_model.mmio_base import IRQController, MemChannel, MMIODevice
+from device_model.mmio_base import AddressSpace, IRQController, MMIODevice
 
 
 # ---------------------------------------------------------------------------
@@ -66,15 +66,16 @@ _CH_DST_ADDR = 0x04
 _CH_LENGTH   = 0x08
 _CH_CTRL     = 0x0C
 _CH_STATUS   = 0x10
-_CH_MODE     = 0x14   # bit0=DEST_FIXED: 1=M2P (fixed dest), 0=M2M (incr dest)
+_CH_SRC_MODE = 0x14   # bit0=FIXED: source address holds (P2x) vs increments
+_CH_DST_MODE = 0x18   # bit0=FIXED: destination address holds (xP) vs increments
 _CH_STRIDE   = 0x20   # bytes per channel register block
 
 # CTRL bits
 _CTRL_START  = 0x01
 _CTRL_ENABLE = 0x02
 
-# MODE bits
-_MODE_DEST_FIXED = 0x01   # destination address is fixed (M2P / memory-to-peripheral)
+# Address-mode bit (shared by SRC_MODE and DST_MODE)
+_MODE_FIXED  = 0x01   # 0 = address increments after each byte, 1 = address fixed
 
 # STATUS bits
 _STATUS_BUSY = 0x01
@@ -97,7 +98,8 @@ class _DmaChannel:
         self.src              = 0
         self.dst              = 0
         self.length           = 0
-        self.dest_fixed       = False   # True = M2P mode (fixed destination)
+        self.src_fixed        = False   # True = source address is held (P2x transfer)
+        self.dst_fixed        = False   # True = dest address is held (xP transfer)
         self.ticks_remaining  = 0
         self.on_complete: Optional[Callable[[bool], None]] = None
 
@@ -130,7 +132,7 @@ class DmaController(MMIODevice):
     def __init__(
         self,
         num_channels: int,
-        mem_channel: Optional[MemChannel] = None,
+        address_space: Optional[AddressSpace] = None,
         irq_controller: Optional[IRQController] = None,
         irq_idx: int = 0,
         transfer_ticks: int = 10,
@@ -141,7 +143,7 @@ class DmaController(MMIODevice):
         self._regs           = bytearray(self._regsize)
         self._channels       = [_DmaChannel(i) for i in range(n)]
         self._locks          = [threading.Lock() for _ in range(n)]
-        self._mem            = mem_channel
+        self._addrspace      = address_space
         self._irq_ctrl       = irq_controller
         self._irq_idx        = irq_idx
         self._transfer_ticks = transfer_ticks
@@ -215,6 +217,8 @@ class DmaController(MMIODevice):
         dst: int,
         length: int,
         on_complete: Callable[[bool], None],
+        src_fixed: bool = False,
+        dst_fixed: bool = False,
     ) -> bool:
         """Internal: accept a DREQ from a peripheral (via DmaClientHandle).
 
@@ -226,10 +230,13 @@ class DmaController(MMIODevice):
         with lock:
             if ch.state == _DmaChannel.BUSY:
                 return False
-            self._arm_channel(ch, src, dst, length, on_complete)
+            self._arm_channel(ch, src, dst, length, on_complete,
+                              src_fixed=src_fixed, dst_fixed=dst_fixed)
 
+        _MODE_NAMES = {(False,False):'M2M',(False,True):'M2P',(True,False):'P2M',(True,True):'P2P'}
+        mode_str = _MODE_NAMES[(src_fixed, dst_fixed)]
         print(
-            f'[DMA] CH{channel_id}: DACK — peripheral request accepted '
+            f'[DMA] CH{channel_id}: DACK — peripheral request accepted [{mode_str}] '
             f'src=0x{src:08x} dst=0x{dst:08x} len={length} '
             f'({self._transfer_ticks} ticks)',
             flush=True,
@@ -252,15 +259,18 @@ class DmaController(MMIODevice):
             src    = int.from_bytes(self._regs[base + _CH_SRC_ADDR : base + _CH_SRC_ADDR + 4], 'little')
             dst    = int.from_bytes(self._regs[base + _CH_DST_ADDR : base + _CH_DST_ADDR + 4], 'little')
             length = int.from_bytes(self._regs[base + _CH_LENGTH   : base + _CH_LENGTH   + 4], 'little')
-            mode   = int.from_bytes(self._regs[base + _CH_MODE     : base + _CH_MODE     + 4], 'little')
-            dest_fixed = bool(mode & _MODE_DEST_FIXED)
+            src_mode   = int.from_bytes(self._regs[base + _CH_SRC_MODE : base + _CH_SRC_MODE + 4], 'little')
+            dst_mode   = int.from_bytes(self._regs[base + _CH_DST_MODE : base + _CH_DST_MODE + 4], 'little')
+            src_fixed  = bool(src_mode & _MODE_FIXED)
+            dst_fixed  = bool(dst_mode & _MODE_FIXED)
             if ch.state == _DmaChannel.BUSY:
                 print(f'[DMA] CH{ch_idx}: START ignored — channel already BUSY', flush=True)
                 return
             self._arm_channel(ch, src, dst, length, on_complete=None,
-                              dest_fixed=dest_fixed)
+                              src_fixed=src_fixed, dst_fixed=dst_fixed)
 
-        mode_str = 'M2P(fixed-dst)' if dest_fixed else 'M2M'
+        _MODE_NAMES = {(False,False):'M2M',(False,True):'M2P',(True,False):'P2M',(True,True):'P2P'}
+        mode_str = _MODE_NAMES[(src_fixed, dst_fixed)]
         print(
             f'[DMA] CH{ch_idx}: firmware START [{mode_str}] — '
             f'src=0x{src:08x} dst=0x{dst:08x} len={length} '
@@ -275,7 +285,8 @@ class DmaController(MMIODevice):
         dst: int,
         length: int,
         on_complete: Optional[Callable[[bool], None]],
-        dest_fixed: bool = False,
+        src_fixed: bool = False,
+        dst_fixed: bool = False,
     ) -> None:
         """Arm *ch* for transfer. Caller must hold self._locks[ch.idx]."""
         base = ch.idx * _CH_STRIDE
@@ -283,7 +294,8 @@ class DmaController(MMIODevice):
         ch.src             = src
         ch.dst             = dst
         ch.length          = length
-        ch.dest_fixed      = dest_fixed
+        ch.src_fixed       = src_fixed
+        ch.dst_fixed       = dst_fixed
         ch.ticks_remaining = self._transfer_ticks
         ch.on_complete     = on_complete
         self._regs[base + _CH_STATUS] = _STATUS_BUSY
@@ -299,7 +311,7 @@ class DmaController(MMIODevice):
             if ch.ticks_remaining > 0:
                 return
 
-            # Snapshot and mark idle before blocking TCP I/O.
+            # Snapshot and mark idle before blocking I/O.
             src      = ch.src
             dst      = ch.dst
             length   = ch.length
@@ -307,42 +319,47 @@ class DmaController(MMIODevice):
             ch.state = _DmaChannel.IDLE
 
         # Bus-master copy outside the per-channel lock.
+        _MODE_NAMES = {(False,False):'M2M',(False,True):'M2P',(True,False):'P2M',(True,True):'P2P'}
         success = False
-        if self._mem and length > 0:
-            data = self._mem.dma_read(src, length)
+        if self._addrspace and length > 0:
+            # --- Read source data -----------------------------------------
+            if ch.src_fixed:
+                # P2x: read repeatedly from the same source address
+                # (e.g. a UART RX FIFO register or peripheral status reg).
+                data: Optional[bytes] = b''
+                for _ in range(length):
+                    chunk = self._addrspace.read(src, 1)
+                    if chunk is None:
+                        data = None
+                        break
+                    data += chunk  # type: ignore[operator]
+            else:
+                # M2x: bulk read from incrementing source address (SRAM/flash).
+                data = self._addrspace.read(src, length)
+
             if data:
-                if ch.dest_fixed:
-                    # M2P mode: write each byte individually to the fixed dest
-                    # (e.g. a peripheral MMIO register like CRC_DATA_REG).
-                    # QEMU dispatches each cpu_physical_memory_write(dst, 1B)
-                    # through the destination device's MemoryRegion write callback.
+                # --- Write destination data --------------------------------
+                if ch.dst_fixed:
+                    # xP: write each byte individually to the fixed destination
+                    # (e.g. a CRC DATA register or TX FIFO).
+                    # When dst is in MMIO space, AddressSpace routes this directly
+                    # to the Python device model — no TCP round-trip, no ordering race.
                     for b in data:
-                        self._mem.dma_write(dst, bytes([b]))
-                    # Synchronisation fence: dma_write is fire-and-forget; the
-                    # IRQ travels over a DIFFERENT socket than the mem writes, so
-                    # QEMU's event-loop could process the IRQ before all N writes.
-                    # A synchronous dma_read on the SAME mem socket forces QEMU to
-                    # drain all preceding writes first (TCP FIFO within one conn).
-                    # After this returns, all bytes are guaranteed to have been
-                    # forwarded to the CRC device before the IRQ fires.
-                    self._mem.dma_read(src, 1)   # flush fence; result discarded
-                    print(
-                        f'[DMA] CH{ch.idx}: M2P {length}B '
-                        f'src=0x{src:08x} → dst=0x{dst:08x} (fixed) @{vtime_ns}ns',
-                        flush=True,
-                    )
+                        self._addrspace.write(dst, bytes([b]))
                 else:
-                    # M2M mode: single bulk write to incrementing destination
-                    self._mem.dma_write(dst, data)
-                    print(
-                        f'[DMA] CH{ch.idx}: copied {length}B '
-                        f'0x{src:08x} → 0x{dst:08x} @{vtime_ns}ns',
-                        flush=True,
-                    )
+                    # xM: bulk write to incrementing destination (SRAM).
+                    self._addrspace.write(dst, data)
+
+                mode_str = _MODE_NAMES[(ch.src_fixed, ch.dst_fixed)]
+                print(
+                    f'[DMA] CH{ch.idx}: {mode_str} {length}B '
+                    f'src=0x{src:08x} → dst=0x{dst:08x} @{vtime_ns}ns',
+                    flush=True,
+                )
                 success = True
             else:
                 print(
-                    f'[DMA] CH{ch.idx}: dma_read 0x{src:08x} failed',
+                    f'[DMA] CH{ch.idx}: read failed src=0x{src:08x}',
                     file=sys.stderr, flush=True,
                 )
         elif length == 0:
@@ -413,14 +430,22 @@ class DmaClientHandle:
         dst: int,
         length: int,
         on_complete: Callable[[bool], None],
+        src_fixed: bool = False,
+        dst_fixed: bool = False,
     ) -> bool:
         """Assert DREQ — request a DMA transfer.
 
         Returns True (DACK) if accepted, False (NACK) if channel busy.
         *on_complete(success)* is called from the DmaController tick thread.
+
+        ``src_fixed=True`` keeps the source address fixed after each byte
+        (P2x transfer, e.g. reading a peripheral RX FIFO register).
+        ``dst_fixed=True`` keeps the destination address fixed (xP transfer,
+        e.g. writing a peripheral TX FIFO or CRC data register).
         """
         return self._ctrl._peripheral_request(
-            self._channel_id, src, dst, length, on_complete
+            self._channel_id, src, dst, length, on_complete,
+            src_fixed=src_fixed, dst_fixed=dst_fixed,
         )
 
     @property

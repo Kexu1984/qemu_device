@@ -47,9 +47,15 @@ registers:
     reset_value: 0x00
 
   - offset:      0x14
-    name:        CH0_MODE
+    name:        CH0_SRC_MODE
     access:      RW
-    description: "CH0 transfer mode: bit0=DEST_FIXED (0=M2M both incr, 1=M2P fixed dest)"
+    description: "CH0 source address mode: bit0=FIXED (0=increment after each byte, 1=hold fixed — P2x transfer)"
+    reset_value: 0x00
+
+  - offset:      0x18
+    name:        CH0_DST_MODE
+    access:      RW
+    description: "CH0 destination address mode: bit0=FIXED (0=increment after each byte, 1=hold fixed — xP transfer)"
     reset_value: 0x00
 
   # ── Channel 1 (peripheral DREQ/DACK path, e.g. dma_client_demo) ──────────
@@ -84,7 +90,13 @@ registers:
     reset_value: 0x00
 
   - offset:      0x34
-    name:        CH1_MODE
+    name:        CH1_SRC_MODE
     access:      RW
-    description: "CH1 transfer mode: bit0=DEST_FIXED (0=M2M both incr, 1=M2P fixed dest)"
+    description: "CH1 source address mode: bit0=FIXED (0=increment after each byte, 1=hold fixed — P2x transfer)"
+    reset_value: 0x00
+
+  - offset:      0x38
+    name:        CH1_DST_MODE
+    access:      RW
+    description: "CH1 destination address mode: bit0=FIXED (0=increment after each byte, 1=hold fixed — xP transfer)"
     reset_value: 0x00

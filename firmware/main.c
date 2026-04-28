@@ -38,8 +38,9 @@
 #define DMA_CLIENT_DST     (SRAM_BASE + 0x4000U)  /* 512 B dest   buffer  */
 #define DMA_CLIENT_LEN     32U                    /* bytes to transfer    */
 
-/* DMA transfer-mode flag: bit0=DEST_FIXED — keep destination fixed (M2P) */
-#define DMA_DEST_FIXED     0x1U
+/* DMA address-mode flag: bit0=FIXED — hold address after each byte (xP or Px transfer) */
+#define DMA_ADDR_FIXED     0x1U
+#define DMA_ADDR_INCR      0x0U   /* address increments after each byte (default) */
 
 #define CRC_CTRL_RESET     0x1U   /* bit0: reset accumulator to 0xFFFFFFFF */
 #define DMA_CRC_SRC        (SRAM_BASE + 0x5000U)  /* 16B source for DMA→CRC test */
@@ -346,7 +347,8 @@ void main(void)
     mmio_write32(DMA_CH0_SRC_ADDR_REG, (uint32_t)DMA_CRC_SRC);
     mmio_write32(DMA_CH0_DST_ADDR_REG, (uint32_t)CRC_DATA_REG);
     mmio_write32(DMA_CH0_LENGTH_REG,   9U);
-    mmio_write32(DMA_CH0_MODE_REG,     DMA_DEST_FIXED);  /* M2P mode */
+    mmio_write32(DMA_CH0_SRC_MODE_REG, DMA_ADDR_INCR);  /* src increments (SRAM) */
+    mmio_write32(DMA_CH0_DST_MODE_REG, DMA_ADDR_FIXED); /* dst fixed (CRC_DATA_REG) */
 
     /* 4. Arm DMA done flag then start transfer */
     dma_irq_fired = 0;
