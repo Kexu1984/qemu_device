@@ -1,0 +1,37 @@
+# ============================================================================
+# Simple DMA Controller — per-device register map
+# ============================================================================
+#
+# This file is referenced by spec/devices.yaml via  spec: dma.yaml
+# gen_device_code.py merges it with the top-level entry at build time.
+
+registers:
+  - offset:      0x00
+    name:        SRC_ADDR
+    access:      RW
+    description: "DMA source address"
+    reset_value: 0x00
+
+  - offset:      0x04
+    name:        DST_ADDR
+    access:      RW
+    description: "DMA destination address"
+    reset_value: 0x00
+
+  - offset:      0x08
+    name:        LENGTH
+    access:      RW
+    description: "Transfer length in bytes"
+    reset_value: 0x00
+
+  - offset:      0x0C
+    name:        CTRL
+    access:      RW
+    description: "Control: bit0=START, bit1=ENABLE"
+    reset_value: 0x00
+
+  - offset:      0x10
+    name:        STATUS
+    access:      R
+    description: "Status: bit0=BUSY, bit1=DONE"
+    reset_value: 0x00

@@ -17,6 +17,10 @@ fi
 
 cd "$QEMU_DIR"
 
+# Copy our custom device model into the QEMU source tree
+echo "Installing custom mmio_sockdev.c from device_model/ ..."
+cp "$SCRIPT_DIR/../device_model/mmio_sockdev.c" hw/misc/mmio_sockdev.c
+
 # Install build dependencies (Ubuntu/Debian)
 if command -v apt-get >/dev/null 2>&1; then
     echo "Installing build dependencies..."

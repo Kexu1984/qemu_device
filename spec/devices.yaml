@@ -1,0 +1,89 @@
+# ============================================================================
+# Top-level Device Configuration  — memory map + IRQ topology
+# ============================================================================
+#
+# This file defines the platform and the address/IRQ/port assignment for
+# every device.  Register-level details live in per-device YAML files
+# (referenced via the 'spec:' field) so each device spec can evolve
+# independently.
+#
+#   scripts/gen_device_code.py  reads this file + each spec/*.yaml and produces:
+#
+#     build/generated/mmio_devices.h            — C #defines for firmware drivers
+#     device_model/generated/device_consts.py   — Python constants for tools/tests
+#
+# After adding or changing a device, regenerate with:
+#   make gen          (or: python3 scripts/gen_device_code.py)
+# ============================================================================
+
+# ── Platform ────────────────────────────────────────────────────────────────
+platform:
+  machine:    kx6625
+  nvic_base:  0xE000E000   # ARM Cortex-M NVIC base
+
+# ── Devices ─────────────────────────────────────────────────────────────────
+#
+# Field descriptions
+# ------------------
+#   name        Snake-case identifier; upper-cased as C #define prefix.
+#   description Human-readable string (appears in generated comments).
+#   base_addr   Physical base address that must match QEMU addr= property.
+#   size        Address-space size in bytes.
+#   irq_num     GIC INTID (SPI 0 = 32, SPI 1 = 33, …).  0 → no IRQ.
+#   irq_delay   Seconds after IRQ channel connects before the server fires.
+#   rw_port     TCP port for the MMIO R/W chardev channel (QEMU → Python).
+#   irq_port    TCP port for the IRQ injection channel   (Python → QEMU).
+#   tick_port   TCP port for virtual-clock tick channel  (QEMU → Python, optional).
+#               Only timer-class devices need this field.
+#   spec        Path (relative to this file) of the per-device register YAML.
+
+devices:
+  - name:        console_uart
+    description: "Console UART — byte-at-a-time character output + one-shot IRQ"
+    base_addr:   0x40004000
+    size:        0x1000
+    irq_num:     0           # External IRQ 0 on KX6625
+    irq_delay:   2.0
+    rw_port:     7890
+    irq_port:    7891
+    spec:        uart.yaml   # register map → spec/uart.yaml
+
+  - name:        dma
+    description: "Simple DMA controller"
+    base_addr:   0x40005000
+    size:        0x1000
+    irq_num:     1           # External IRQ 1 on KX6625
+    irq_delay:   0.0
+    rw_port:     7892
+    irq_port:    7893
+    mem_port:    7897        # Python → QEMU physical memory (DMA bus-master channel)
+    spec:        dma.yaml    # register map → spec/dma.yaml
+
+  - name:        timer0
+    description: "Countdown timer — one-shot and periodic modes, ms resolution"
+    base_addr:   0x40006000
+    size:        0x1000
+    irq_num:     2           # External IRQ 2 on KX6625
+    irq_delay:   0.0
+    rw_port:     7894
+    irq_port:    7895
+    tick_port:   7896        # QEMU → Python virtual-clock ticks (tick-chardev)
+    spec:        timer.yaml  # register map → spec/timer.yaml
+
+# ── Physical Memory Regions ──────────────────────────────────────────────────────────────────
+#
+# RAM regions visible to both firmware (CPU) and device models (via MemChannel).
+# The generator emits BASE and SIZE constants in both C and Python.
+#
+# Field descriptions
+# ------------------
+#   name        Snake-case identifier; upper-cased as C #define prefix.
+#   description Human-readable string.
+#   base_addr   Physical address of the region.
+#   size        Region size in bytes (hex or decimal).
+
+memory:
+  - name:        sram
+    description: "Scratchpad SRAM for device DMA transfers"
+    base_addr:   0x20000000
+    size:        0x20000   # 128 KB

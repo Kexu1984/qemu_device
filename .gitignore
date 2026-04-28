@@ -1,5 +1,9 @@
 build/
 qemu-fork/build/
+scripts/qemu-fork/build/
+# Exclude the full QEMU source tree (clone/build separately via scripts/build_qemu.sh)
+# Custom changes to QEMU are tracked individually below.
+scripts/qemu-fork/
 *.o
 *.bin
 *.elf

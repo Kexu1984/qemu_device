@@ -1,0 +1,47 @@
+# ============================================================================
+# Timer0 — per-device register map
+# ============================================================================
+#
+# Referenced by spec/devices.yaml via  spec: timer.yaml
+#
+# Time unit: the LOAD register holds a value in **milliseconds**.
+# The Python device model (timer_model.py) uses wall-clock threading.Timer,
+# so "1 tick = 1 ms" from wall-clock time.
+#
+# Typical usage sequence:
+#   1. Write LOAD  — set countdown value (ms)
+#   2. Write CTRL  — set ENABLE | INT_ENABLE (+ PERIODIC if needed)
+#      => Python starts the countdown thread
+#   3. Firmware polls STATUS or waits for IRQ (INTID 34 = SPI 2)
+#   4. IRQ handler: read STATUS to confirm, write INTCLR to clear
+
+registers:
+  - offset:      0x00
+    name:        LOAD
+    access:      RW
+    description: "Countdown load value in milliseconds (0 = no-op)"
+    reset_value: 0x00
+
+  - offset:      0x04
+    name:        VALUE
+    access:      R
+    description: "Remaining time in milliseconds (approximate, wall-clock)"
+    reset_value: 0x00
+
+  - offset:      0x08
+    name:        CTRL
+    access:      RW
+    description: "Control: bit0=ENABLE, bit1=PERIODIC, bit2=INT_ENABLE"
+    reset_value: 0x00
+
+  - offset:      0x0C
+    name:        STATUS
+    access:      R
+    description: "Status: bit0=INT_PENDING (set on expiry, cleared by INTCLR)"
+    reset_value: 0x00
+
+  - offset:      0x10
+    name:        INTCLR
+    access:      W
+    description: "Write any value to clear INT_PENDING and deassert IRQ"
+    reset_value: 0x00

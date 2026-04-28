@@ -1,0 +1,33 @@
+# ============================================================================
+# Console UART — per-device register map
+# ============================================================================
+#
+# This file is referenced by spec/devices.yaml via  spec: uart.yaml
+# gen_device_code.py merges it with the top-level entry at build time.
+#
+# Fields
+# ------
+#   offset       Byte offset from device base_addr (defined in devices.yaml).
+#   name         Short name; becomes part of C macro: {DEVICE}_{NAME}_REG.
+#   access       R, W, or RW.
+#   description  Comment text in generated files.
+#   reset_value  Register value after reset (default 0).
+
+registers:
+  - offset:      0x00
+    name:        TXDATA
+    access:      W
+    description: "Transmit data byte (low 8 bits → stdout)"
+    reset_value: 0x00
+
+  - offset:      0x04
+    name:        STATUS
+    access:      R
+    description: "Status: bit0=TXREADY (always 1)"
+    reset_value: 0x01
+
+  - offset:      0x08
+    name:        CTRL
+    access:      RW
+    description: "Control: bit0=ENABLE"
+    reset_value: 0x01

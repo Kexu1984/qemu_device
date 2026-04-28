@@ -1,16 +1,21 @@
 # Makefile for QEMU MMIO Socket Device Project
 
-.PHONY: all qemu fw run clean test help
+.PHONY: all qemu fw gen run clean test help
 
 # Default target
 all: help
+
+# Generate C header and Python device map from spec/devices.yaml
+gen:
+	@echo "Generating device code from spec/devices.yaml..."
+	python3 scripts/gen_device_code.py
 
 # Build QEMU with custom mmio-sockdev
 qemu:
 	@echo "Building QEMU with custom mmio-sockdev..."
 	./scripts/build_qemu.sh
 
-# Build firmware
+# Build firmware (runs gen automatically)
 fw:
 	@echo "Building firmware..."
 	$(MAKE) -C firmware
@@ -24,7 +29,7 @@ run:
 	@echo "To run the demo, you need TWO terminals:"
 	@echo ""
 	@echo "Terminal 1 (Python server):"
-	@echo "  python3 tools/mmio_device_server.py --port 7890"
+	@echo "  python3 device_model/mmio_device_server.py --port 7890"
 	@echo ""
 	@echo "Terminal 2 (QEMU):"
 	@echo "  ./scripts/run_demo.sh"
@@ -38,7 +43,7 @@ run:
 # Start Python server in background and run QEMU
 run-auto:
 	@echo "Starting Python server in background..."
-	python3 tools/mmio_device_server.py --port 7890 &
+	python3 device_model/mmio_device_server.py --port 7890 &
 	@echo "Waiting for server to start..."
 	sleep 2
 	@echo "Starting QEMU..."
@@ -46,17 +51,12 @@ run-auto:
 	@echo "Stopping Python server..."
 	pkill -f "mmio_device_server.py" || true
 
-# Test the protocol implementation
-test:
-	@echo "Testing protocol implementation..."
-	python3 scripts/test_protocol.py
-
 # Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
 	rm -rf build/
 	$(MAKE) -C firmware clean
-	rm -rf qemu-fork/build/
+	rm -rf device_model/generated/
 
 # Help
 help:
@@ -64,8 +64,9 @@ help:
 	@echo "================================"
 	@echo ""
 	@echo "Available targets:"
+	@echo "  gen       - Generate C header + Python map from config/devices.yaml"
 	@echo "  qemu      - Build QEMU with custom mmio-sockdev"
-	@echo "  fw        - Build bare metal firmware"
+	@echo "  fw        - Build bare metal firmware (runs gen automatically)"
 	@echo "  run       - Show instructions for running demo"
 	@echo "  run-auto  - Run demo automatically (experimental)"
 	@echo "  test      - Test protocol implementation"
@@ -73,6 +74,7 @@ help:
 	@echo "  help      - Show this help"
 	@echo ""
 	@echo "Quick start:"
+	@echo "  make gen       # Generate device headers from config/devices.yaml"
 	@echo "  make fw        # Build firmware"
 	@echo "  make test      # Test protocol"
 	@echo "  make qemu      # Build QEMU (takes time)"

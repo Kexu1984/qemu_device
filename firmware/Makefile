@@ -1,33 +1,39 @@
 # Makefile for firmware
 CROSS_COMPILE ?= arm-none-eabi-
 CC = $(CROSS_COMPILE)gcc
-AS = $(CROSS_COMPILE)as
 LD = $(CROSS_COMPILE)ld
 OBJCOPY = $(CROSS_COMPILE)objcopy
 
-CFLAGS = -mcpu=cortex-a15 -marm -ffreestanding -nostdlib -nostartfiles -Wall -Wextra
-ASFLAGS = -mcpu=cortex-a15
+CFLAGS  = -mcpu=cortex-m3 -mthumb -ffreestanding -nostdlib -nostartfiles -Wall -Wextra \
+          -I ../build/generated
 LDFLAGS = -T linker.ld
 
-BUILD_DIR = ../build
-SOURCES = start.S main.c
-OBJECTS = $(SOURCES:%.c=$(BUILD_DIR)/%.o)
-OBJECTS := $(OBJECTS:%.S=$(BUILD_DIR)/%.o)
+BUILD_DIR  = ../build
+GEN_HEADER = $(BUILD_DIR)/generated/mmio_devices.h
+SOURCES    = start.S main.c
+OBJECTS    = $(SOURCES:%.c=$(BUILD_DIR)/%.o)
+OBJECTS   := $(OBJECTS:%.S=$(BUILD_DIR)/%.o)
 
 TARGET = $(BUILD_DIR)/firmware
 
-.PHONY: all clean
+.PHONY: all gen clean
 
-all: $(TARGET).bin
+all: gen $(TARGET).bin
+
+# Run code generator before compiling firmware
+gen: $(GEN_HEADER)
+
+$(GEN_HEADER): ../spec/devices.yaml
+	python3 ../scripts/gen_device_code.py
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
-$(BUILD_DIR)/%.o: %.c | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: %.c $(GEN_HEADER) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/%.o: %.S | $(BUILD_DIR)
-	$(AS) $(ASFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
 $(TARGET).elf: $(OBJECTS)
 	$(LD) $(LDFLAGS) $(OBJECTS) -o $@
@@ -38,3 +44,4 @@ $(TARGET).bin: $(TARGET).elf
 clean:
 	rm -f $(BUILD_DIR)/firmware.*
 	rm -f $(BUILD_DIR)/*.o
+	rm -rf $(BUILD_DIR)/generated
