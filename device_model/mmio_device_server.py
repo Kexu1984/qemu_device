@@ -300,19 +300,19 @@ class IRQServer:
 
 # Device defaults — mirror spec/devices.yaml.
 # These are the canonical runtime values; override per device via CLI args.
-_UART_BASE      = 0x10020000
+_UART_BASE      = 0x40004000
 _UART_SIZE      = 0x1000
 _UART_RW_PORT   = 7890
 _UART_IRQ_PORT  = 7891
 _UART_IRQ_DELAY = 2.0
 
-_DMA_BASE       = 0x10030000
+_DMA_BASE       = 0x40005000
 _DMA_SIZE       = 0x1000
 _DMA_RW_PORT    = 7892
 _DMA_IRQ_PORT   = 7893
 _DMA_MEM_PORT   = 7897   # Python → QEMU physical memory (DMA bus-master channel)
 
-_TIMER_BASE     = 0x10040000
+_TIMER_BASE     = 0x40006000
 _TIMER_SIZE     = 0x1000
 _TIMER_RW_PORT   = 7894
 _TIMER_IRQ_PORT  = 7895
