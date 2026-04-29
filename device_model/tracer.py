@@ -137,7 +137,7 @@ class DeviceTracer:
         """
         self._vtime_ns = vtime_ns
 
-    def emit(self, event: str, **data) -> None:
+    def emit(self, event: str, t_virt_ns_override: Optional[int] = None, **data) -> None:
         """
         Record a trace event.
 
@@ -145,11 +145,16 @@ class DeviceTracer:
         ``"IRQ_PULSE"``).  Additional keyword arguments are merged into the
         top-level record alongside the standard fields.
 
+        *t_virt_ns_override* lets callers supply an explicit virtual-time
+        timestamp (e.g. arm_time + transfer_ns for DMA completion events)
+        instead of the last tick time stored in ``self._vtime_ns``.
+
         This call is non-blocking: the record is placed on an internal queue
         and written by a background thread.
         """
         if self._tracer is not None:
-            self._tracer._put(self._dev, event, self._vtime_ns, data)
+            vtime = t_virt_ns_override if t_virt_ns_override is not None else self._vtime_ns
+            self._tracer._put(self._dev, event, vtime, data)
 
 
 class _NullDeviceTracer(DeviceTracer):

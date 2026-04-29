@@ -45,7 +45,21 @@ Transfer modes
     On completion the controller calls the peripheral's callback (TC signal).
     The STATUS register of that channel also reflects DONE.
 
-Both modes share the same tick-driven latency and MemChannel transport.
+Timing model
+------------
+QEMU sends virtual-time ticks via tick-chardev every ``tick-period-ms=1`` of
+virtual time.  The RW channel (firmware register writes) carries NO vtime_ns,
+so Python only learns the current virtual time at tick boundaries.
+
+  tick_period = 1 ms = 1,000,000 ns
+  DMA transfer = 512 ns (32 B M2M at HCLK=48MHz)
+
+Because tick_period >> transfer_ns for all practical transfers, waiting for
+the *next* tick to fire the completion would add ~1 ms of artificial latency
+(≈2000× the modelled 512 ns).  To avoid this, transfers are executed
+immediately in a background thread when armed.  The on_tick() path remains
+as a safety-net for any transfer that somehow did not complete before the
+next tick (e.g. if the background thread was slow).
 """
 
 from __future__ import annotations
@@ -236,12 +250,20 @@ class DmaController(MMIODevice):
     # -- Tick observer interface ------------------------------------------
 
     def on_tick(self, vtime_ns: int) -> None:
-        """Advance all BUSY channels and check for completion."""
+        """Update virtual clock; execute any transfers that are still pending.
+
+        For normal operation, transfers already completed synchronously when
+        armed (see _arm_and_execute).  This path is a safety-net for any
+        channel still BUSY at tick time (e.g. transfer thread delayed).
+        """
         with self._vtime_lock:
             self._vtime_ns = vtime_ns
         self._tr.tick(vtime_ns)
         for ch in self._channels:
-            self._tick_channel(ch, vtime_ns)
+            with self._locks[ch.idx]:
+                if ch.state == _DmaChannel.BUSY:
+                    # Transfer thread is still running — let it finish.
+                    pass
 
     # -- Peripheral DREQ/DACK interface -----------------------------------
 
@@ -295,6 +317,11 @@ class DmaController(MMIODevice):
         )
         self._tr.emit('CH_DREQ', ch=channel_id, src=src, dst=dst,
                       length=length, mode=mode_str, latency_ns=latency_ns)
+        # Execute immediately: transfer_ns (sub-µs) << tick_period (1 ms)
+        threading.Thread(
+            target=self._execute_transfer, args=(ch, now_ns),
+            daemon=True, name=f'dma-ch{channel_id}',
+        ).start()
         return True
 
     def channel_busy(self, channel_id: int) -> bool:
@@ -337,6 +364,11 @@ class DmaController(MMIODevice):
         )
         self._tr.emit('CH_START', ch=ch_idx, src=src, dst=dst,
                       length=length, mode=mode_str, latency_ns=latency_ns)
+        # Execute immediately: transfer_ns (sub-µs) << tick_period (1 ms)
+        threading.Thread(
+            target=self._execute_transfer, args=(ch, now_ns),
+            daemon=True, name=f'dma-ch{ch_idx}',
+        ).start()
 
     def _arm_channel(
         self,
@@ -362,28 +394,35 @@ class DmaController(MMIODevice):
         ch.on_complete    = on_complete
         self._regs[base + _CH_STATUS] = _STATUS_BUSY
 
-    def _tick_channel(self, ch: _DmaChannel, vtime_ns: int) -> None:
+    def _execute_transfer(self, ch: _DmaChannel, arm_vtime_ns: int) -> None:
+        """Perform the actual bus-master copy and fire completion signals.
+
+        Called immediately after arming (in a background thread) so that
+        sub-microsecond transfers are not artificially delayed to the next
+        1 ms tick boundary.  The per-channel lock is NOT held on entry.
+
+        The virtual time reported for DONE is the arm time plus the modelled
+        AHB+PCLK latency — giving firmware a correct picture of when the
+        transfer ended in the virtual-clock domain.
+        """
         lock = self._locks[ch.idx]
         base = ch.idx * _CH_STRIDE
+        _MODE_NAMES = {(False,False):'M2M',(False,True):'M2P',(True,False):'P2M',(True,True):'P2P'}
 
         with lock:
             if ch.state != _DmaChannel.BUSY:
-                return
-            # Resolve arm time if not set (arm happened before first tick)
-            if ch.arm_vtime_ns < 0:
-                ch.arm_vtime_ns = vtime_ns
-            if (vtime_ns - ch.arm_vtime_ns) < ch.transfer_ns:
-                return
-
-            # Snapshot and mark idle before blocking I/O.
+                return   # already cancelled (e.g. reset while thread was starting)
             src      = ch.src
             dst      = ch.dst
             length   = ch.length
+            xfer_ns  = ch.transfer_ns
             callback = ch.on_complete
             ch.state = _DmaChannel.IDLE
 
-        # Bus-master copy outside the per-channel lock.
-        _MODE_NAMES = {(False,False):'M2M',(False,True):'M2P',(True,False):'P2M',(True,True):'P2P'}
+        # Virtual completion time = arm time + modelled AHB+PCLK latency
+        done_vtime_ns = arm_vtime_ns + xfer_ns
+
+        # Bus-master copy (outside per-channel lock — may block on TCP I/O)
         success = False
         if self._addrspace and length > 0:
             # --- Read source data -----------------------------------------
@@ -406,8 +445,6 @@ class DmaController(MMIODevice):
                 if ch.dst_fixed:
                     # xP: write each byte individually to the fixed destination
                     # (e.g. a CRC DATA register or TX FIFO).
-                    # When dst is in MMIO space, AddressSpace routes this directly
-                    # to the Python device model — no TCP round-trip, no ordering race.
                     for b in data:
                         self._addrspace.write(dst, bytes([b]))
                 else:
@@ -417,7 +454,8 @@ class DmaController(MMIODevice):
                 mode_str = _MODE_NAMES[(ch.src_fixed, ch.dst_fixed)]
                 print(
                     f'[DMA] CH{ch.idx}: {mode_str} {length}B '
-                    f'src=0x{src:08x} → dst=0x{dst:08x} @{vtime_ns}ns',
+                    f'src=0x{src:08x} → dst=0x{dst:08x} '
+                    f'vtime={done_vtime_ns}ns (+{xfer_ns}ns)',
                     flush=True,
                 )
                 success = True
@@ -437,19 +475,27 @@ class DmaController(MMIODevice):
 
         # Notify peripheral callback (P2M/M2P path).
         if callback:
-            self._tr.emit('CH_DONE', ch=ch.idx, ok=success, path='peripheral')
+            self._tr.emit('CH_DONE', ch=ch.idx, ok=success, path='peripheral',
+                          t_virt_ns_override=done_vtime_ns)
             callback(success)
         else:
             # Firmware-triggered path: pulse the shared DMA IRQ.
             if self._irq is not None:
-                print(f'[DMA] CH{ch.idx}: transfer complete @{vtime_ns}ns — IRQ asserted', flush=True)
+                print(
+                    f'[DMA] CH{ch.idx}: transfer complete '
+                    f'vtime={done_vtime_ns}ns — IRQ asserted',
+                    flush=True,
+                )
                 self._irq.pulse()
-                self._tr.emit('CH_DONE', ch=ch.idx, ok=success)
-                self._tr.emit('IRQ_PULSE', ch=ch.idx, irq_idx=self._irq.idx)
+                self._tr.emit('CH_DONE', ch=ch.idx, ok=success,
+                              t_virt_ns_override=done_vtime_ns)
+                self._tr.emit('IRQ_PULSE', ch=ch.idx, irq_idx=self._irq.idx,
+                              t_virt_ns_override=done_vtime_ns)
                 print(f'[DMA] CH{ch.idx}: IRQ deasserted', flush=True)
             else:
                 print(f'[DMA] CH{ch.idx}: transfer complete (no IRQ wired)', flush=True)
-                self._tr.emit('CH_DONE', ch=ch.idx, ok=success)
+                self._tr.emit('CH_DONE', ch=ch.idx, ok=success,
+                              t_virt_ns_override=done_vtime_ns)
 
 
 # ---------------------------------------------------------------------------
