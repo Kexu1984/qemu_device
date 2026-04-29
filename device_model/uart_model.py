@@ -22,7 +22,7 @@ from typing import Optional
 # whether this module is imported as a package or run directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from device_model.mmio_base import IRQController, MMIODevice  # noqa: E402
+from device_model.mmio_base import IRQController, IrqLine, MMIODevice, RegisterBank  # noqa: E402
 
 
 class ConsoleUartDevice(MMIODevice):
@@ -47,11 +47,10 @@ class ConsoleUartDevice(MMIODevice):
         irq_idx: int = 0,
         irq_delay: float = 2.0,
     ) -> None:
-        self._regs = bytearray(self._REGSIZE)
-        self._regs[self._CTRL] = 0x01          # ENABLE=1 by default
-
-        self._irq_ctrl  = irq_controller
-        self._irq_idx   = irq_idx
+        _init = bytearray(self._REGSIZE)
+        _init[self._CTRL] = 0x01           # ENABLE=1 by default
+        self._regs      = RegisterBank(self._REGSIZE, bytes(_init))
+        self._irq       = IrqLine(irq_controller, irq_idx)
         self._irq_delay = irq_delay
         self._irq_fired = False
         self._irq_lock  = threading.Lock()
@@ -69,10 +68,7 @@ class ConsoleUartDevice(MMIODevice):
     def read(self, offset: int, size: int) -> bytes:
         if offset == self._STATUS:
             return (1).to_bytes(size, 'little')    # TXREADY always set
-        end = offset + size
-        if end <= self._REGSIZE:
-            return bytes(self._regs[offset:end])
-        return b'\x00' * size
+        return self._regs.read(offset, size)
 
     def write(self, offset: int, size: int, data: bytes) -> None:
         if offset == self._TXDATA:
@@ -85,13 +81,10 @@ class ConsoleUartDevice(MMIODevice):
             else:
                 self._line_buf += f'[{ch:#04x}]'
             return
-        end = offset + size
-        if end <= self._REGSIZE:
-            self._regs[offset:end] = data[:size]
+        self._regs.write(offset, size, data)
 
     def on_reset(self) -> None:
-        self._regs[:] = bytearray(self._REGSIZE)
-        self._regs[self._CTRL] = 0x01
+        self._regs.reset()
         with self._irq_lock:
             self._irq_fired = False
         if self._line_buf:
@@ -102,10 +95,7 @@ class ConsoleUartDevice(MMIODevice):
 
     def _irq_task(self) -> None:
         """One-shot IRQ: fires *irq_delay* seconds after the channel connects."""
-        ctrl = self._irq_ctrl
-        assert ctrl is not None
-
-        ctrl.wait_connected()
+        self._irq.wait_connected()
         time.sleep(self._irq_delay)
 
         with self._irq_lock:
@@ -113,13 +103,13 @@ class ConsoleUartDevice(MMIODevice):
                 return
             self._irq_fired = True
 
-        ctrl.set_irq(self._irq_idx, 1)
+        self._irq.assert_()
         print(
-            f'[IRQ] IRQ {self._irq_idx} asserted  (level=1)'
+            f'[IRQ] IRQ {self._irq.idx} asserted  (level=1)'
             ' \u2192 QEMU will raise NVIC IRQ'
         )
         # Deassert immediately: NVIC latches the rising edge as pending; the
         # level must be low by the time the handler returns so the NVIC does
         # not re-fire (Cortex-M re-pends while level is still high).
-        ctrl.set_irq(self._irq_idx, 0)
-        print(f'[IRQ] IRQ {self._irq_idx} deasserted (level=0)')
+        self._irq.deassert()
+        print(f'[IRQ] IRQ {self._irq.idx} deasserted (level=0)')

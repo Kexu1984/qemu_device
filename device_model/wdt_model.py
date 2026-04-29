@@ -42,7 +42,7 @@ from __future__ import annotations
 import threading
 from typing import Callable, Optional
 
-from device_model.mmio_base import IRQController, MMIODevice
+from device_model.mmio_base import IRQController, IrqLine, MMIODevice, VirtualClock
 
 
 class WdtDevice(MMIODevice):
@@ -76,17 +76,15 @@ class WdtDevice(MMIODevice):
         irq_idx: int = 0,
         reset_callback: Optional[Callable[[], None]] = None,
     ) -> None:
-        self._irq_ctrl      = irq_controller
-        self._irq_idx       = irq_idx
+        self._irq            = IrqLine(irq_controller, irq_idx)
         self._reset_callback = reset_callback   # SystemResetManager.wdt_reset
+        self._clock          = VirtualClock()
         self._lock           = threading.Lock()
 
         # ── Volatile registers (cleared by on_reset / watchdog reset) ────
-        self._load_ms:         int           = 0
-        self._ctrl:            int           = 0
-        self._status:          int           = 0
-        self._start_vtime_ns:  Optional[int] = None
-        self._last_vtime_ns:   Optional[int] = None
+        self._load_ms: int = 0
+        self._ctrl:    int = 0
+        self._status:  int = 0
 
         # ── Retention registers (survive watchdog reset) ──────────────────
         # These are set *before* on_reset() is called, then preserved.
@@ -104,10 +102,7 @@ class WdtDevice(MMIODevice):
         if offset == self._LOAD:
             return self._load_ms
         if offset == self._VALUE:
-            if self._start_vtime_ns is not None and self._last_vtime_ns is not None:
-                elapsed_ms = (self._last_vtime_ns - self._start_vtime_ns) // 1_000_000
-                return max(0, self._load_ms - elapsed_ms)
-            return self._load_ms
+            return self._clock.remaining_ms(self._load_ms)
         if offset == self._CTRL:
             return self._ctrl
         if offset == self._STATUS:
@@ -129,18 +124,19 @@ class WdtDevice(MMIODevice):
                 prev_enable = self._ctrl & self._CTRL_ENABLE
                 self._ctrl  = value
                 if (value & self._CTRL_ENABLE) and not prev_enable:
-                    # Arm: record start time on next tick (use last known time)
-                    self._start_vtime_ns = self._last_vtime_ns
+                    # Arm from the most recent tick (or None if no tick yet;
+                    # on_tick() will arm from the first tick in that case).
+                    self._clock.arm()
                     self._status &= ~self._STATUS_TIMEOUT
                     print(f'[WDT] enabled, timeout = {self._load_ms} ms')
                 elif not (value & self._CTRL_ENABLE) and prev_enable:
-                    self._start_vtime_ns = None
+                    self._clock.disarm()
                     print('[WDT] disabled')
 
             elif offset == self._KICK:
                 # Reload countdown regardless of content written
                 if self._ctrl & self._CTRL_ENABLE:
-                    self._start_vtime_ns = self._last_vtime_ns
+                    self._clock.arm()
                     self._status &= ~self._STATUS_TIMEOUT
                     print('[WDT] kicked — countdown reloaded')
 
@@ -151,11 +147,11 @@ class WdtDevice(MMIODevice):
         Called by SystemResetManager on watchdog reset.
         Clears volatile state; retention registers are preserved.
         """
+        self._clock.disarm()
         with self._lock:
-            self._load_ms        = 0
-            self._ctrl           = 0
-            self._status         = 0
-            self._start_vtime_ns = None
+            self._load_ms = 0
+            self._ctrl    = 0
+            self._status  = 0
             # _reset_reason and _timeout_cnt are intentionally NOT cleared here.
             print(
                 f'[WDT] on_reset(): volatile state cleared  '
@@ -173,42 +169,42 @@ class WdtDevice(MMIODevice):
         Fires the optional warning IRQ and schedules a system reset when
         the countdown reaches zero.
         """
-        fire_reset = False
+        self._clock.update(vtime_ns)
+
+        fire_reset  = False
+        fire_irq    = False
 
         with self._lock:
-            self._last_vtime_ns = vtime_ns
-
-            # Not enabled or not yet armed
             if not (self._ctrl & self._CTRL_ENABLE):
                 return
-            if self._start_vtime_ns is None:
-                self._start_vtime_ns = vtime_ns
+
+            # Arm on the first tick if CTRL.ENABLE was set before any tick
+            # arrived (VirtualClock.arm() with no current_ns leaves start=None).
+            if not self._clock.armed:
+                self._clock.arm(vtime_ns)
                 return
 
-            elapsed_ms = (vtime_ns - self._start_vtime_ns) // 1_000_000
-            if elapsed_ms < self._load_ms:
+            if not self._clock.is_expired(self._load_ms):
                 return
 
             # ── Timeout ─────────────────────────────────────────────────
-            self._status    |= self._STATUS_TIMEOUT
-            self._ctrl      &= ~self._CTRL_ENABLE   # disarm to prevent re-fire
-            self._start_vtime_ns = None
+            self._status   |= self._STATUS_TIMEOUT
+            self._ctrl     &= ~self._CTRL_ENABLE   # disarm to prevent re-fire
+            self._clock.disarm()
 
             # Update retention registers BEFORE on_reset() is called
             self._reset_reason  = self.REASON_WDT
             self._timeout_cnt  += 1
             cnt = self._timeout_cnt
             print(f'[WDT] TIMEOUT — reset_reason=WDT  timeout_cnt={cnt}')
+            fire_irq   = bool(self._ctrl & self._CTRL_INT_ENABLE)
             fire_reset = True
 
-        if fire_reset:
-            # Fire optional pre-reset IRQ warning (if INT_ENABLE set)
-            if self._irq_ctrl is not None and (self._ctrl & self._CTRL_INT_ENABLE):
-                self._irq_ctrl.set_irq(self._irq_idx, 1)
-                import time as _time
-                _time.sleep(0.001)
-                self._irq_ctrl.set_irq(self._irq_idx, 0)
+        if fire_irq:
+            # Pulse the pre-reset warning IRQ (edge-trigger)
+            print(f'[WDT] IRQ {self._irq.idx} pulse (pre-reset warning)')
+            self._irq.pulse()
 
-            # Trigger system reset via callback (SystemResetManager.wdt_reset)
-            if self._reset_callback is not None:
-                self._reset_callback()
+        if fire_reset and self._reset_callback is not None:
+            self._reset_callback()
+

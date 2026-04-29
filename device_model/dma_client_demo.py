@@ -29,11 +29,9 @@ only needs a DmaClientHandle, not direct access to MemChannel or tick logic.
 
 from __future__ import annotations
 
-import threading
 from typing import Optional
 
-from device_model.mmio_base import IRQController, MMIODevice
-from device_model.dma_controller import DmaClientHandle
+from device_model.mmio_base import DmaRequestInterface, IRQController, IrqLine, MMIODevice, RegisterBank
 
 
 class DmaClientDemoDevice(MMIODevice):
@@ -74,15 +72,13 @@ class DmaClientDemoDevice(MMIODevice):
 
     def __init__(
         self,
-        dma_handle: DmaClientHandle,
+        dma_handle: DmaRequestInterface,
         irq_controller: Optional[IRQController] = None,
         irq_idx: int = 0,
     ) -> None:
-        self._regs     = bytearray(self._REGSIZE)
-        self._dma      = dma_handle
-        self._irq_ctrl = irq_controller
-        self._irq_idx  = irq_idx
-        self._lock     = threading.Lock()
+        self._regs = RegisterBank(self._REGSIZE)
+        self._dma  = dma_handle
+        self._irq  = IrqLine(irq_controller, irq_idx)
 
     @property
     def name(self) -> str:
@@ -91,29 +87,17 @@ class DmaClientDemoDevice(MMIODevice):
     # -- MMIODevice interface ---------------------------------------------
 
     def read(self, offset: int, size: int) -> bytes:
-        end = offset + size
-        if end <= self._REGSIZE:
-            with self._lock:
-                return bytes(self._regs[offset:end])
-        return b'\x00' * size
+        return self._regs.read(offset, size)
 
     def write(self, offset: int, size: int, data: bytes) -> None:
-        end = offset + size
-        if end > self._REGSIZE:
-            return
-        with self._lock:
-            self._regs[offset:end] = data[:size]
-        # Detect CTRL.START edge outside the lock to avoid deadlock with
-        # the callback path that also acquires _lock.
-        if offset <= self._CTRL < end:
-            if self._regs[self._CTRL] & self._CTRL_START:
-                with self._lock:
-                    self._regs[self._CTRL] &= ~self._CTRL_START  # clear START
+        self._regs.write(offset, size, data)
+        if offset <= self._CTRL < offset + size:
+            if self._regs.get32(self._CTRL) & self._CTRL_START:
+                self._regs.clear_bits(self._CTRL, self._CTRL_START)
                 self._kick_dma()
 
     def on_reset(self) -> None:
-        with self._lock:
-            self._regs[:] = bytearray(self._REGSIZE)
+        self._regs.reset()
 
     def on_tick(self, vtime_ns: int) -> None:
         # DMA timing is driven by DmaController; this device has no own tick.
@@ -123,10 +107,10 @@ class DmaClientDemoDevice(MMIODevice):
 
     def _kick_dma(self) -> None:
         """Assert DREQ — request a DMA transfer from the controller."""
-        with self._lock:
-            src    = int.from_bytes(self._regs[self._SRC_ADDR:self._SRC_ADDR + 4], 'little')
-            dst    = int.from_bytes(self._regs[self._DST_ADDR:self._DST_ADDR + 4], 'little')
-            length = int.from_bytes(self._regs[self._LENGTH:self._LENGTH + 4], 'little')
+        with self._regs:
+            src    = self._regs.get32_nolock(self._SRC_ADDR)
+            dst    = self._regs.get32_nolock(self._DST_ADDR)
+            length = self._regs.get32_nolock(self._LENGTH)
             self._regs[self._STATUS] = self._STATUS_BUSY
 
         print(
@@ -141,12 +125,12 @@ class DmaClientDemoDevice(MMIODevice):
                 f'[DMA_CLIENT] CH{self._dma.channel_id}: NACK — channel busy',
                 flush=True,
             )
-            with self._lock:
+            with self._regs:
                 self._regs[self._STATUS] = 0   # clear BUSY, request dropped
 
     def _on_transfer_done(self, success: bool) -> None:
         """DMA transfer-complete callback (TC) — called from DmaController thread."""
-        with self._lock:
+        with self._regs:
             if success:
                 self._regs[self._STATUS] = (
                     (self._regs[self._STATUS] & ~self._STATUS_BUSY) | self._STATUS_DONE
@@ -160,8 +144,5 @@ class DmaClientDemoDevice(MMIODevice):
             flush=True,
         )
 
-        # Pulse IRQ: assert then immediately deassert so NVIC does not
-        # re-fire the interrupt on exception return.
-        if self._irq_ctrl is not None:
-            self._irq_ctrl.set_irq(self._irq_idx, 1)
-            self._irq_ctrl.set_irq(self._irq_idx, 0)
+        # Pulse IRQ: edge-trigger so NVIC does not re-fire on exception return.
+        self._irq.pulse()

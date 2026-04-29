@@ -135,6 +135,136 @@ Peripheral path (CH1 / DmaClientDemoDevice):
   → DmaClientDemoDevice sets STATUS.DONE → pulses IRQ 3
 ```
 
+## Device Model Layer
+
+`device_model/mmio_base.py` provides the shared building blocks used by every Python device model. These helpers eliminate per-device boilerplate and encode common hardware access patterns as reusable, testable units.
+
+### `RegisterBank` — Thread-Safe Register Storage
+
+Replaces the raw `bytearray + threading.Lock + manual bounds-check` pattern that every device would otherwise repeat.
+
+```python
+self._regs = RegisterBank(
+    size,
+    initial=bytes(init_values),          # optional reset snapshot
+    policies={                            # optional per-register access policies
+        _STATUS:  RegAccess.READ_ONLY,
+        _VALUE:   RegAccess.READ_ONLY,
+        _INTCLR:  RegAccess.WRITE_ONLY,
+    },
+)
+```
+
+**Key methods:**
+
+| Method | Description |
+|--------|-------------|
+| `read(offset, size) → bytes` | CPU-side read; applies access policy |
+| `write(offset, size, data)` | CPU-side write; applies access policy |
+| `get32(offset) → int` | 32-bit LE read, **bypasses policy** (device-internal) |
+| `set32(offset, value)` | 32-bit LE write, bypasses policy |
+| `set_bits(offset, mask)` | Atomic OR, bypasses policy |
+| `clear_bits(offset, mask)` | Atomic AND-NOT, bypasses policy |
+| `reset(initial=None)` | Restore to construction-time snapshot |
+| `with self._regs:` | Acquire internal lock for atomic multi-register operations |
+| `get32_nolock / set32_nolock` | No-lock variants for use inside the context manager |
+| `self._regs[byte_offset]` | Direct byte access inside context manager |
+
+### `RegAccess` — Per-Register Access Policies
+
+`RegAccess` is an `enum.Flag` whose members describe how a register behaves when the CPU reads or writes it. Policies apply **only to the external CPU path** (`read()`/`write()`). Internal device helpers (`get32`, `set_bits`, `__setitem__`, etc.) always bypass policies so the device hardware can freely update its own state.
+
+| Flag | CPU Read | CPU Write | Typical Use |
+|------|----------|-----------|-------------|
+| *(none)* | returns stored value | stores value | normal R/W register |
+| `WRITE_ONLY` | returns **0** | stores normally | pulse/strobe registers (`INTCLR`, `KICK`, `SWRESET`) |
+| `READ_ONLY` | returns stored value | **dropped silently** | `STATUS`, `VALUE`, hardware-computed registers |
+| `READ_CLEAR` | returns value then **clears to 0** | stores normally | latching event / error registers |
+| `W1C` | returns stored value | **bits written 1 → cleared** | IRQ status (ARM convention): firmware acks by writing bit mask |
+| `W1S` | returns stored value | **bits written 1 → set** | set-only enable registers |
+
+Flags can be combined with `|`.
+
+```python
+# Example: standard ARM interrupt status register
+policies={
+    _STATUS: RegAccess.W1C,        # firmware clears individual IRQ bits
+    _INTCLR: RegAccess.WRITE_ONLY, # reads return 0
+    _VALUE:  RegAccess.READ_ONLY,  # hardware-computed; CPU writes dropped
+}
+
+# Example: self-clearing event latch
+policies={
+    _EVENTS: RegAccess.READ_CLEAR, # read returns accumulated flags and zeroes the register
+}
+```
+
+### `IrqLine` — Single Interrupt Line
+
+Encapsulates an `IRQController` + line index and provides named operations matching Cortex-M NVIC semantics.
+
+```python
+self._irq = IrqLine(irq_controller, idx=0)
+
+self._irq.assert_()    # level = 1  (stays high; use for level-triggered, e.g. timer)
+self._irq.deassert()   # level = 0
+self._irq.pulse()      # assert then immediately deassert (edge-trigger; NVIC won't re-fire)
+self._irq.wait_connected(timeout)  # block until QEMU IRQ channel connects
+self._irq.idx          # read-only: line index
+```
+
+`pulse()` is the correct primitive for most peripherals — the NVIC latches the rising edge as *pending*; the level must return low before the handler returns to prevent the NVIC re-pending the interrupt on exception return.
+
+If `irq_controller` is `None` all methods are silent no-ops, so devices remain constructible without an IRQ channel.
+
+### `VirtualClock` — Countdown Tracker
+
+Encapsulates the `_start_vtime_ns / _last_vtime_ns` countdown pattern shared by the Timer and WDT.
+
+```python
+self._clock = VirtualClock()
+
+# In on_tick():
+self._clock.update(vtime_ns)                # record latest timestamp
+if self._clock.is_expired(load_ms):
+    self._clock.disarm()                    # one-shot
+    # or:
+    self._clock.rearm_periodic(load_ms * 1_000_000)  # periodic — advances start by one period (no drift)
+
+# Arm (e.g. when CTRL.ENABLE written):
+self._clock.arm()                # from most-recent tick
+self._clock.arm(vtime_ns)        # from explicit timestamp
+
+# Read remaining time:
+remaining = self._clock.remaining_ms(load_ms)
+```
+
+The clock is correct across QEMU debug pauses: virtual time stops, `update()` stops being called, `is_expired()` stays False.
+
+### `DmaRequestInterface` — Abstract DREQ/DACK Protocol
+
+Abstract base class for the peripheral-to-DMA-controller handshake. Device models that need DMA accept this interface type instead of the concrete `DmaClientHandle`, decoupling them from the DMA controller implementation.
+
+```python
+class MyDevice(MMIODevice):
+    def __init__(self, dma: DmaRequestInterface, ...):
+        self._dma = dma
+
+    def _start_transfer(self):
+        ok = self._dma.transfer(
+            src, dst, length, callback=self._on_done,
+        )
+        # True = DACK (accepted), False = NACK (channel busy)
+
+    def _on_done(self, success: bool): ...
+```
+
+Abstract members: `transfer(src, dst, length, callback, *, src_fixed, dst_fixed) → bool`, `busy → bool`, `channel_id → int`.
+
+`src_fixed=True` / `dst_fixed=True` model peripheral register addresses that do not auto-increment (e.g. reading a FIFO or writing to the CRC DATA register).
+
+`DmaClientHandle` in `dma_controller.py` is the concrete implementation.
+
 ## Devices
 
 ### Memory Map
@@ -241,16 +371,6 @@ if (reason == WDT_REASON_POR) {
     uint32_t cnt = *(volatile uint32_t *)WDT_TIMEOUT_CNT_REG;
 }
 ```
-
-| Offset | Name   | Access | Description                              |
-|--------|--------|--------|------------------------------------------|
-| 0x00   | LOAD   | R/W    | Countdown value in milliseconds          |
-| 0x04   | VALUE  | R      | Remaining time in ms (virtual-clock)     |
-| 0x08   | CTRL   | R/W    | bit0 = ENABLE, bit1 = PERIODIC, bit2 = INT_ENABLE |
-| 0x0C   | STATUS | R      | bit0 = INT_PENDING                       |
-| 0x10   | INTCLR | W      | Write any value to clear INT_PENDING     |
-
-Writing `CTRL.ENABLE` records `vtime_ns` from the next tick. `on_tick()` computes `elapsed_ns = vtime_ns − start_vtime_ns`; fires IRQ when `elapsed_ns ≥ LOAD × 1 000 000`. Re-arms automatically in periodic mode.
 
 ## Communication Protocols
 
@@ -507,7 +627,9 @@ qemu_device/
 │   ├── linker.ld                     # Memory layout (FLASH @ 0x00000000, SRAM @ 0x20000000)
 │   └── Makefile                      # Runs gen_device_code.py then compiles
 ├── device_model/                     # Python device emulation layer
-│   ├── mmio_base.py                  # MMIODevice ABC, IRQController, MemChannel, RstController
+│   ├── mmio_base.py                  # MMIODevice ABC; IRQController; MemChannel; RstController
+│   │                                 #   RegisterBank (+ RegAccess policies); IrqLine;
+│   │                                 #   VirtualClock; DmaRequestInterface
 │   ├── mmio_device_server.py         # MMIOBus + RWServer + IRQServer + TickServer + MemServer
 │   │                                 #   + RstServer + SystemResetManager + main()
 │   ├── uart_model.py                 # Console UART (character output + demo IRQ)
@@ -560,7 +682,7 @@ IRQ pulse pattern: assert then immediately deassert to edge-trigger the NVIC wit
 ## Extending: Adding a New Device
 
 1. **Define the spec**: add an entry in `spec/devices.yaml` and create `spec/<name>.yaml` with the register map.
-2. **Write the model**: create `device_model/<name>_model.py` subclassing `MMIODevice`. Override `read()`, `write()`, and optionally `on_tick()` for timing behaviour. For bus-master DMA, use `MemChannel.dma_read/write()`. To use the DMA controller as a peripheral, obtain a `DmaClientHandle` from `DmaController.get_handle(ch)`. For watchdog-style resets, instantiate a `RstController` and pass a `SystemResetManager.wdt_reset` callback.
+2. **Write the model**: create `device_model/<name>_model.py` subclassing `MMIODevice`. Override `read()`, `write()`, and optionally `on_tick()` for timing behaviour. Use `RegisterBank` (with `RegAccess` policies) for register storage, `IrqLine` for interrupt injection, `VirtualClock` for countdown timing, and `DmaRequestInterface` for bus-master DMA requests. For watchdog-style resets, instantiate a `RstController` and pass a `SystemResetManager.wdt_reset` callback.
 3. **Register on the bus**: add `bus.register(BASE, SIZE, YourDevice(...))` in `mmio_device_server.py`'s `main()`.
 4. **Add transport servers**: create `RWServer` and `IRQServer` instances as needed. Devices that need timing use the existing `TickServer` automatically. Devices that need bus-master DMA get a dedicated `MemServer` instance. Devices that trigger system resets get an `RstServer` instance wired to a `RstController`.
 5. **Extend the QEMU command line**: add a `mmio-sockdev` instance with `chardev`, `irq-chardev`, `addr`, `irq-num`. Add `mem-chardev` for DMA; `tick-chardev` for timer-style ticks; `rst-chardev` for system-reset capability.

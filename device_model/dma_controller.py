@@ -54,7 +54,7 @@ import sys
 import threading
 from typing import Callable, Optional
 
-from device_model.mmio_base import AddressSpace, IRQController, MMIODevice
+from device_model.mmio_base import AddressSpace, IRQController, IrqLine, MMIODevice, DmaRequestInterface
 
 
 # ---------------------------------------------------------------------------
@@ -144,8 +144,7 @@ class DmaController(MMIODevice):
         self._channels       = [_DmaChannel(i) for i in range(n)]
         self._locks          = [threading.Lock() for _ in range(n)]
         self._addrspace      = address_space
-        self._irq_ctrl       = irq_controller
-        self._irq_idx        = irq_idx
+        self._irq           = IrqLine(irq_controller, irq_idx)
         self._transfer_ticks = transfer_ticks
 
     @property
@@ -376,10 +375,9 @@ class DmaController(MMIODevice):
             callback(success)
         else:
             # Firmware-triggered path: pulse the shared DMA IRQ.
-            if self._irq_ctrl is not None:
-                self._irq_ctrl.set_irq(self._irq_idx, 1)
+            if self._irq is not None:
                 print(f'[DMA] CH{ch.idx}: transfer complete @{vtime_ns}ns — IRQ asserted', flush=True)
-                self._irq_ctrl.set_irq(self._irq_idx, 0)
+                self._irq.pulse()
                 print(f'[DMA] CH{ch.idx}: IRQ deasserted', flush=True)
             else:
                 print(f'[DMA] CH{ch.idx}: transfer complete (no IRQ wired)', flush=True)
@@ -389,12 +387,14 @@ class DmaController(MMIODevice):
 # Per-peripheral handle  (hardware DREQ/DACK interface)
 # ---------------------------------------------------------------------------
 
-class DmaClientHandle:
+class DmaClientHandle(DmaRequestInterface):
     """
     Peripheral-side interface to one DMA channel inside DmaController.
 
     Each peripheral model holds one DmaClientHandle, obtained from
-    ``DmaController.get_handle(channel_id)``.
+    ``DmaController.get_handle(channel_id)``.  Implements
+    ``DmaRequestInterface`` so that device models can type-hint their DMA
+    dependency as the abstract interface rather than a concrete class.
 
     Hardware analogy
     ----------------
