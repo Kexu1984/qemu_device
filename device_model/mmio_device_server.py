@@ -686,7 +686,6 @@ def main() -> None:
         address_space = addr_space,
         irq_controller= dma_irq_ctrl,
         irq_idx       = 0,
-        transfer_ticks= 10,
         tracer        = tracer,
     )
 

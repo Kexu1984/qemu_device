@@ -54,7 +54,10 @@ import sys
 import threading
 from typing import Callable, Optional
 
-from device_model.mmio_base import AddressSpace, IRQController, IrqLine, MMIODevice, DmaRequestInterface
+from device_model.mmio_base import (
+    AddressSpace, DmaRequestInterface, IRQController, IrqLine, MMIODevice,
+    HCLK_HZ, NS_PER_HCLK, NS_PER_PCLK,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -77,9 +80,48 @@ _CTRL_ENABLE = 0x02
 # Address-mode bit (shared by SRC_MODE and DST_MODE)
 _MODE_FIXED  = 0x01   # 0 = address increments after each byte, 1 = address fixed
 
+# ---------------------------------------------------------------------------
+# AHB/PCLK timing model
+# ---------------------------------------------------------------------------
+#
+# KX6625 DMA engine: state machine runs on PCLK (12 MHz, APB domain);
+# actual burst transfer is on AHB bus (HCLK = 48 MHz).
+#
+# Latency breakdown for a transfer of `length` bytes:
+#
+#   AHB address phase  :  1 HCLK cycle
+#   AHB data beats     :  ceil(length / 4) HCLK cycles  (32-bit bus)
+#   DMA FSM overhead   :  4 PCLK cycles  (fetch desc + DONE handshake)
+#
+# Example: 32 bytes
+#   AHB: (1 + 8) × 20 ns  = 180 ns
+#   FSM: 4 × 83 ns         = 332 ns
+#   Total                  ≈ 512 ns  (vs 10 ms with tick-based model)
+
+_DMA_FSM_PCLK_CYCLES = 4   # APB-domain state-machine overhead per transfer
+
 # STATUS bits
 _STATUS_BUSY = 0x01
 _STATUS_DONE = 0x02
+
+
+def _compute_transfer_ns(length: int) -> int:
+    """Compute AHB-burst + PCLK-FSM latency in nanoseconds.
+
+    AHB transfer (HCLK domain, 32-bit bus):
+      - 1 address-phase cycle
+      - ceil(length / 4) data-beat cycles
+    DMA state-machine overhead (PCLK domain):
+      - _DMA_FSM_PCLK_CYCLES cycles
+
+    Minimum returned value is 1 PCLK cycle (avoids zero-latency instant done).
+    """
+    if length == 0:
+        return NS_PER_PCLK   # zero-length: FSM overhead only
+    ahb_beats  = (length + 3) // 4          # ceil(length / 4) 32-bit beats
+    ahb_ns     = (1 + ahb_beats) * NS_PER_HCLK
+    fsm_ns     = _DMA_FSM_PCLK_CYCLES * NS_PER_PCLK
+    return ahb_ns + fsm_ns
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +142,8 @@ class _DmaChannel:
         self.length           = 0
         self.src_fixed        = False   # True = source address is held (P2x transfer)
         self.dst_fixed        = False   # True = dest address is held (xP transfer)
-        self.ticks_remaining  = 0
+        self.transfer_ns      = 0       # latency in ns (computed from AHB + PCLK cycles)
+        self.arm_vtime_ns     = -1      # vtime_ns when channel was armed (-1 = unset)
         self.on_complete: Optional[Callable[[bool], None]] = None
 
 
@@ -135,7 +178,6 @@ class DmaController(MMIODevice):
         address_space: Optional[AddressSpace] = None,
         irq_controller: Optional[IRQController] = None,
         irq_idx: int = 0,
-        transfer_ticks: int = 10,
         tracer: Optional[Tracer] = None,
     ) -> None:
         n = num_channels
@@ -146,7 +188,8 @@ class DmaController(MMIODevice):
         self._locks          = [threading.Lock() for _ in range(n)]
         self._addrspace      = address_space
         self._irq           = IrqLine(irq_controller, irq_idx)
-        self._transfer_ticks = transfer_ticks
+        self._vtime_ns: int  = 0          # latest tick timestamp (ns)
+        self._vtime_lock     = threading.Lock()
         self._tr: DeviceTracer = tracer.context(self.name) if tracer else NULL_DEVICE_TRACER
 
     @property
@@ -193,7 +236,9 @@ class DmaController(MMIODevice):
     # -- Tick observer interface ------------------------------------------
 
     def on_tick(self, vtime_ns: int) -> None:
-        """Advance all BUSY channels by one tick."""
+        """Advance all BUSY channels and check for completion."""
+        with self._vtime_lock:
+            self._vtime_ns = vtime_ns
         self._tr.tick(vtime_ns)
         for ch in self._channels:
             self._tick_channel(ch, vtime_ns)
@@ -233,19 +278,23 @@ class DmaController(MMIODevice):
         with lock:
             if ch.state == _DmaChannel.BUSY:
                 return False
+            with self._vtime_lock:
+                now_ns = self._vtime_ns
             self._arm_channel(ch, src, dst, length, on_complete,
-                              src_fixed=src_fixed, dst_fixed=dst_fixed)
+                              src_fixed=src_fixed, dst_fixed=dst_fixed,
+                              vtime_ns=now_ns)
 
         _MODE_NAMES = {(False,False):'M2M',(False,True):'M2P',(True,False):'P2M',(True,True):'P2P'}
         mode_str = _MODE_NAMES[(src_fixed, dst_fixed)]
+        latency_ns = _compute_transfer_ns(length)
         print(
             f'[DMA] CH{channel_id}: DACK — peripheral request accepted [{mode_str}] '
             f'src=0x{src:08x} dst=0x{dst:08x} len={length} '
-            f'({self._transfer_ticks} ticks)',
+            f'(latency ~{latency_ns} ns)',
             flush=True,
         )
         self._tr.emit('CH_DREQ', ch=channel_id, src=src, dst=dst,
-                      length=length, mode=mode_str)
+                      length=length, mode=mode_str, latency_ns=latency_ns)
         return True
 
     def channel_busy(self, channel_id: int) -> bool:
@@ -271,19 +320,23 @@ class DmaController(MMIODevice):
             if ch.state == _DmaChannel.BUSY:
                 print(f'[DMA] CH{ch_idx}: START ignored — channel already BUSY', flush=True)
                 return
+            with self._vtime_lock:
+                now_ns = self._vtime_ns
             self._arm_channel(ch, src, dst, length, on_complete=None,
-                              src_fixed=src_fixed, dst_fixed=dst_fixed)
+                              src_fixed=src_fixed, dst_fixed=dst_fixed,
+                              vtime_ns=now_ns)
 
         _MODE_NAMES = {(False,False):'M2M',(False,True):'M2P',(True,False):'P2M',(True,True):'P2P'}
         mode_str = _MODE_NAMES[(src_fixed, dst_fixed)]
+        latency_ns = _compute_transfer_ns(length)
         print(
             f'[DMA] CH{ch_idx}: firmware START [{mode_str}] — '
             f'src=0x{src:08x} dst=0x{dst:08x} len={length} '
-            f'({self._transfer_ticks} ticks)',
+            f'(latency ~{latency_ns} ns)',
             flush=True,
         )
         self._tr.emit('CH_START', ch=ch_idx, src=src, dst=dst,
-                      length=length, mode=mode_str)
+                      length=length, mode=mode_str, latency_ns=latency_ns)
 
     def _arm_channel(
         self,
@@ -294,17 +347,19 @@ class DmaController(MMIODevice):
         on_complete: Optional[Callable[[bool], None]],
         src_fixed: bool = False,
         dst_fixed: bool = False,
+        vtime_ns: int = 0,
     ) -> None:
         """Arm *ch* for transfer. Caller must hold self._locks[ch.idx]."""
         base = ch.idx * _CH_STRIDE
-        ch.state           = _DmaChannel.BUSY
-        ch.src             = src
-        ch.dst             = dst
-        ch.length          = length
-        ch.src_fixed       = src_fixed
-        ch.dst_fixed       = dst_fixed
-        ch.ticks_remaining = self._transfer_ticks
-        ch.on_complete     = on_complete
+        ch.state          = _DmaChannel.BUSY
+        ch.src            = src
+        ch.dst            = dst
+        ch.length         = length
+        ch.src_fixed      = src_fixed
+        ch.dst_fixed      = dst_fixed
+        ch.transfer_ns    = _compute_transfer_ns(length)
+        ch.arm_vtime_ns   = vtime_ns     # -1 if unknown; resolved on first tick
+        ch.on_complete    = on_complete
         self._regs[base + _CH_STATUS] = _STATUS_BUSY
 
     def _tick_channel(self, ch: _DmaChannel, vtime_ns: int) -> None:
@@ -314,8 +369,10 @@ class DmaController(MMIODevice):
         with lock:
             if ch.state != _DmaChannel.BUSY:
                 return
-            ch.ticks_remaining -= 1
-            if ch.ticks_remaining > 0:
+            # Resolve arm time if not set (arm happened before first tick)
+            if ch.arm_vtime_ns < 0:
+                ch.arm_vtime_ns = vtime_ns
+            if (vtime_ns - ch.arm_vtime_ns) < ch.transfer_ns:
                 return
 
             # Snapshot and mark idle before blocking I/O.

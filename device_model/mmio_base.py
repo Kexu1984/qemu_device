@@ -40,6 +40,24 @@ def recv_exact(sock: socket.socket, n: int) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# SoC clock constants  (KX6625 — matches kx6625.c)
+# ---------------------------------------------------------------------------
+
+#: Cortex-M3 core / AHB bus clock  (48 MHz)
+HCLK_HZ: int = 48_000_000
+
+#: APB peripheral clock (PCLK = HCLK ÷ 4 = 12 MHz)
+#: Used by UART, Timer, WDT, CRC, DMA state-machine.
+PCLK_HZ: int = 12_000_000
+
+#: Nanoseconds per HCLK cycle  (≈ 20.83 ns)
+NS_PER_HCLK: int = 1_000_000_000 // HCLK_HZ   # = 20
+
+#: Nanoseconds per PCLK cycle  (≈ 83.33 ns)
+NS_PER_PCLK: int = 1_000_000_000 // PCLK_HZ   # = 83
+
+
+# ---------------------------------------------------------------------------
 # Device base class
 # ---------------------------------------------------------------------------
 
@@ -1004,6 +1022,25 @@ class VirtualClock:
             if self._start_ns is None or self._current_ns is None:
                 return False
             return (self._current_ns - self._start_ns) // 1_000_000 >= load_ms
+
+    def is_expired_ns(self, duration_ns: int) -> bool:
+        """
+        Return True if *duration_ns* nanoseconds have elapsed since arm().
+
+        More precise than :meth:`is_expired` (millisecond granularity):
+        use this when the timeout is derived from hardware clock cycles,
+        e.g.::
+
+            # AHB burst: (1 + beats) HCLK cycles
+            duration_ns = (1 + beats) * NS_PER_HCLK
+            if clock.is_expired_ns(duration_ns): ...
+        """
+        if duration_ns <= 0:
+            return True
+        with self._lock:
+            if self._start_ns is None or self._current_ns is None:
+                return False
+            return (self._current_ns - self._start_ns) >= duration_ns
 
 
 # ---------------------------------------------------------------------------
