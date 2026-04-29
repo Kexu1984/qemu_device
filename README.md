@@ -610,7 +610,19 @@ Logs are written to `build/e2e_server.log` and `build/e2e_qemu.log` for post-mor
 
 ### 4. Run the full server interactively
 
-**Terminal 1** — Python device server (all four devices):
+**Option A — one-command interactive demo (recommended)**
+
+Opens the Python device server, QEMU, and a dedicated UART terminal window in one step. Close the terminal window to stop everything:
+
+```bash
+bash scripts/run_interactive.sh
+```
+
+An `xterm` window titled **KX6625 UART Console** appears showing only the clean firmware UART output. All Python device-model debug logs (DMA, IRQ, tick messages) stay in `build/interactive_server.log`.
+
+**Option B — manual (three terminals)**
+
+**Terminal 1** — Python device server:
 ```bash
 python3 device_model/mmio_device_server.py
 ```
@@ -620,7 +632,11 @@ python3 device_model/mmio_device_server.py
 bash scripts/run_demo.sh
 ```
 
-Firmware character output (via TXDATA writes) appears in Terminal 1.
+**Terminal 3** — UART output terminal (optional, connect any time):
+```bash
+python3 scripts/uart_console.py
+# or: nc 127.0.0.1 7904
+```
 
 ## Firmware Demo Sequence
 
@@ -684,7 +700,8 @@ qemu_device/
 │   ├── linker.ld                     # Memory layout (FLASH @ 0x00000000, SRAM @ 0x20000000)
 │   └── Makefile                      # Runs gen_device_code.py then compiles
 ├── device_model/                     # Python device emulation layer
-│   ├── mmio_base.py                  # MMIODevice ABC; IRQController; MemChannel; RstController
+│   ├── mmio_base.py                  # MMIODevice ABC; IRQController; MemChannel;
+│   │                                 #   RstController; UartChannel;
 │   │                                 #   RegisterBank (+ RegAccess policies); IrqLine;
 │   │                                 #   VirtualClock; DmaRequestInterface
 │   ├── mmio_device_server.py         # MMIOBus + RWServer + IRQServer + TickServer + MemServer
@@ -700,8 +717,10 @@ qemu_device/
 ├── scripts/
 │   ├── build_qemu.sh                 # QEMU configure + ninja build
 │   ├── gen_device_code.py            # Code generator: spec/ → C header + Python consts
-│   ├── run_demo.sh                   # Interactive demo launcher
-│   ├── e2e_test.sh                   # Automated end-to-end smoke test
+│   ├── run_demo.sh                   # Launch QEMU (expects server already running)
+│   ├── run_interactive.sh            # One-command demo: server + QEMU + xterm UART window
+│   ├── uart_console.py               # UART terminal client (connect to port 7904)
+│   ├── e2e_test.sh                   # Automated end-to-end smoke test (incl. UART channel)
 │   └── qemu-fork/                    # Modified QEMU 8.1.0 source tree (build target)
 │       └── hw/
 │           ├── misc/mmio_sockdev.c   # Generic SysBus mmio-sockdev (chardev/irq/tick/mem/rst)

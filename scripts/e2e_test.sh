@@ -28,6 +28,8 @@ TIMEOUT=120        # polling iterations (0.5s each = 60s total) — WDT adds one
 LOG_DIR="$PROJECT_ROOT/build"
 SERVER_LOG="$LOG_DIR/e2e_server.log"
 QEMU_LOG="$LOG_DIR/e2e_qemu.log"
+UART_LOG="$LOG_DIR/e2e_uart.log"
+UART_TERM_PORT=7904
 
 # Colours
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -38,8 +40,9 @@ info() { echo -e "${YELLOW}[INFO]${NC} $*"; }
 
 cleanup() {
     info "Cleaning up background processes..."
-    [ -n "${QEMU_PID:-}" ]   && kill "$QEMU_PID"   2>/dev/null || true
-    [ -n "${SERVER_PID:-}" ] && kill "$SERVER_PID" 2>/dev/null || true
+    [ -n "${QEMU_PID:-}" ]    && kill "$QEMU_PID"    2>/dev/null || true
+    [ -n "${SERVER_PID:-}" ]  && kill "$SERVER_PID"  2>/dev/null || true
+    [ -n "${UART_PID:-}" ]    && kill "$UART_PID"    2>/dev/null || true
     wait 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -58,6 +61,14 @@ mkdir -p "$LOG_DIR"
 info "QEMU    : $QEMU_BIN"
 info "Firmware: $FIRMWARE_BIN"
 echo ""
+
+# -----------------------------------------------------------------------
+# Kill any leftover processes from a previous run that may hold our ports
+# -----------------------------------------------------------------------
+for PORT in 7890 7891 7892 7893 7894 7895 7896 7897 7898 7899 7900 7901 7902 7903 7904; do
+    fuser -k "${PORT}/tcp" 2>/dev/null || true
+done
+sleep 0.3
 
 # -----------------------------------------------------------------------
 # 1. Start Python device server
@@ -96,6 +107,32 @@ done
 # Avoid probing IRQ port directly: an active connect check would consume
 # the IRQ channel and perturb one-shot interrupt timing.
 sleep 0.3
+
+# -----------------------------------------------------------------------
+# 2b. Connect UART terminal client (captures firmware output via port 7904)
+# -----------------------------------------------------------------------
+info "Waiting for UART terminal port $UART_TERM_PORT..."
+TRIES=0
+while true; do
+    if nc -z 127.0.0.1 "$UART_TERM_PORT" 2>/dev/null; then
+        info "Port $UART_TERM_PORT (UART terminal) ready."
+        break
+    fi
+    TRIES=$((TRIES + 1))
+    if [ "$TRIES" -ge 40 ]; then
+        fail "Port $UART_TERM_PORT not ready after 8s. Server log:"
+        cat "$SERVER_LOG"
+        exit 1
+    fi
+    sleep 0.2
+done
+
+# Start nc as a passive terminal client; output goes to UART_LOG.
+# We use python3 uart_console.py if available for ANSI passthrough, but
+# plain nc is sufficient for log capture.
+nc 127.0.0.1 "$UART_TERM_PORT" > "$UART_LOG" 2>/dev/null &
+UART_PID=$!
+info "UART terminal client PID: $UART_PID  (log: $UART_LOG)"
 
 # -----------------------------------------------------------------------
 # 3. Start QEMU (background, capture to log)
@@ -203,6 +240,41 @@ for LINE in "${EXPECTED[@]}"; do
         pass "Found: \"$LINE\""
     else
         fail "Missing: \"$LINE\""
+        RESULT=1
+    fi
+done
+
+# -----------------------------------------------------------------------
+# 5b. Verify UART terminal channel (port 7904) received firmware output
+# -----------------------------------------------------------------------
+# Give nc a moment to flush buffered data before we kill it.
+sleep 0.3
+[ -n "${UART_PID:-}" ] && kill "$UART_PID" 2>/dev/null || true
+UART_PID=""
+
+echo ""
+echo "=========================== UART terminal output ============================"
+# Strip \r so the log prints cleanly on any terminal
+tr -d '\r' < "$UART_LOG" 2>/dev/null || true
+echo "============================================================================="
+echo ""
+
+# A subset of expected strings that must also arrive via the UART channel.
+# LF is translated to CRLF by UartChannel, but grep matches substrings so
+# \r at end-of-line does not break the match.
+UART_EXPECTED=(
+    "MMIO SockDev Interrupt Demo"
+    "UART interrupt handled"
+    "All tests done"
+    "Warm boot detected"
+    "WDT demo complete"
+)
+
+for LINE in "${UART_EXPECTED[@]}"; do
+    if grep -q "$LINE" "$UART_LOG" 2>/dev/null; then
+        pass "[UART] Found: \"$LINE\""
+    else
+        fail "[UART] Missing: \"$LINE\""
         RESULT=1
     fi
 done

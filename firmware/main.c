@@ -163,6 +163,7 @@ void main(void)
     mmio_write32(CTRL_REG, 0x1);
 
     send_string("=== MMIO SockDev Interrupt Demo ===\n");
+    send_string("=== KX6625, Hello World ===\n");
     send_string("[FW] Device enabled.\n");
 
     /* Initialise NVIC */
