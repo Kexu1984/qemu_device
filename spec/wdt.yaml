@@ -1,0 +1,68 @@
+# ============================================================================
+# WDT — Watchdog Timer register map
+# ============================================================================
+#
+# Referenced by spec/devices.yaml via  spec: wdt.yaml
+#
+# Two-level reset architecture
+# ----------------------------
+#   Watchdog reset  (WDT timeout):  resets CPU + most peripherals.
+#                                   Python server stays running;
+#                                   on_reset() clears volatile registers.
+#   Global reset    (power-on):     everything including retention registers.
+#
+# Retention registers (RESET_REASON, TIMEOUT_CNT) survive a watchdog reset
+# because they live in the Python device model instance, which persists
+# across QEMU system resets.  Only a full Python server restart (power-on
+# reset) clears them back to 0.
+#
+# Typical usage sequence:
+#   1. Boot: read RESET_REASON to detect warm boot vs. WDT reset.
+#   2. Write LOAD  — set timeout value in milliseconds.
+#   3. Write CTRL  — set ENABLE (bit0) to start the countdown.
+#   4. Periodically write any value to KICK to reload the countdown.
+#   5. If firmware stalls, KICK is not written and WDT fires after LOAD ms.
+#   6. On WDT reset: RESET_REASON = 1, TIMEOUT_CNT incremented by 1.
+
+registers:
+  - offset:      0x00
+    name:        LOAD
+    access:      RW
+    description: "Timeout load value in milliseconds (0 = no-op)"
+    reset_value: 0x00
+
+  - offset:      0x04
+    name:        VALUE
+    access:      R
+    description: "Remaining time in ms (virtual-clock based)"
+    reset_value: 0x00
+
+  - offset:      0x08
+    name:        CTRL
+    access:      RW
+    description: "Control: bit0=ENABLE, bit1=INT_ENABLE (IRQ before reset)"
+    reset_value: 0x00
+
+  - offset:      0x0C
+    name:        KICK
+    access:      W
+    description: "Write any value to reload countdown and clear STATUS.TIMEOUT"
+    reset_value: 0x00
+
+  - offset:      0x10
+    name:        STATUS
+    access:      R
+    description: "Status: bit0=TIMEOUT (set on expiry)"
+    reset_value: 0x00
+
+  - offset:      0x14
+    name:        RESET_REASON
+    access:      R
+    description: "Retention: 0=POR/global-reset  1=WDT-reset. Survives watchdog reset."
+    reset_value: 0x00
+
+  - offset:      0x18
+    name:        TIMEOUT_CNT
+    access:      R
+    description: "Retention: cumulative WDT timeout count since power-on."
+    reset_value: 0x00

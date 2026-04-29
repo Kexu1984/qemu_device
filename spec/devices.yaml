@@ -87,6 +87,17 @@ devices:
     rw_port:     7900
     spec:        crc.yaml    # register map → spec/crc.yaml
 
+  - name:        wdt
+    description: "Watchdog timer — countdown reset with retention registers (RESET_REASON, TIMEOUT_CNT)"
+    base_addr:   0x40009000
+    size:        0x1000
+    irq_num:     4           # External IRQ 4 on KX6625 (optional pre-reset warning IRQ)
+    irq_delay:   0.0
+    rw_port:     7901
+    irq_port:    7902
+    rst_port:    7903        # Python → QEMU system-reset channel (rst-chardev)
+    spec:        wdt.yaml    # register map → spec/wdt.yaml
+
 # ── Physical Memory Regions ──────────────────────────────────────────────────────────────────
 #
 # RAM regions visible to both firmware (CPU) and device models (via MemChannel).

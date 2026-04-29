@@ -23,7 +23,7 @@ SERVER_SCRIPT="$PROJECT_ROOT/device_model/mmio_device_server.py"
 RW_PORT=7890
 IRQ_PORT=7891
 IRQ_DELAY=2       # seconds before server fires first IRQ (UART)
-TIMEOUT=80        # polling iterations (0.5s each = 40s total)
+TIMEOUT=120        # polling iterations (0.5s each = 60s total) — WDT adds one boot cycle
 
 LOG_DIR="$PROJECT_ROOT/build"
 SERVER_LOG="$LOG_DIR/e2e_server.log"
@@ -122,6 +122,10 @@ info "Starting QEMU..."
     -device mmio-sockdev,chardev=demo_rw,irq-chardev=demo_irq,addr=0x40007000,irq-num=3 \
     -chardev socket,id=crc_rw,host=127.0.0.1,port=7900 \
     -device mmio-sockdev,chardev=crc_rw,addr=0x40008000 \
+    -chardev socket,id=wdt_rw,host=127.0.0.1,port=7901 \
+    -chardev socket,id=wdt_irq,host=127.0.0.1,port=7902 \
+    -chardev socket,id=wdt_rst,host=127.0.0.1,port=7903 \
+    -device mmio-sockdev,chardev=wdt_rw,irq-chardev=wdt_irq,rst-chardev=wdt_rst,addr=0x40009000,irq-num=4 \
     -kernel "${FIRMWARE_BIN%.bin}.elf" \
     </dev/null > "$QEMU_LOG" 2>&1 &
 QEMU_PID=$!
@@ -148,6 +152,13 @@ EXPECTED=(
     "DMA-CRC test"
     "DMA-CRC] Result 0xCBF43926 PASSED"
     "All tests done"
+    "Power-on reset (RESET_REASON=POR)"
+    "Kick 1"
+    "Kick 2"
+    "Waiting for WDT timeout"
+    "WDT] TIMEOUT"
+    "Warm boot detected: RESET_REASON=WDT"
+    "WDT demo complete"
 )
 
 info "Waiting up to ${TIMEOUT}s for expected firmware output (in SERVER_LOG)..."

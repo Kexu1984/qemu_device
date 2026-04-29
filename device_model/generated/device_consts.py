@@ -36,13 +36,15 @@ DMA_CH0_DST_ADDR_REG                     = 0x40005004  # offset 0x0004  RW  CH0 
 DMA_CH0_LENGTH_REG                       = 0x40005008  # offset 0x0008  RW  CH0 transfer length in bytes
 DMA_CH0_CTRL_REG                         = 0x4000500C  # offset 0x000C  RW  CH0 control: bit0=START, bit1=ENABLE
 DMA_CH0_STATUS_REG                       = 0x40005010  # offset 0x0010  R  CH0 status: bit0=BUSY, bit1=DONE
-DMA_CH0_MODE_REG                         = 0x40005014  # offset 0x0014  RW  CH0 transfer mode: bit0=DEST_FIXED (0=M2M both incr, 1=M2P fixed dest)
+DMA_CH0_SRC_MODE_REG                     = 0x40005014  # offset 0x0014  RW  CH0 source address mode: bit0=FIXED (0=increment after each byte, 1=hold fixed — P2x transfer)
+DMA_CH0_DST_MODE_REG                     = 0x40005018  # offset 0x0018  RW  CH0 destination address mode: bit0=FIXED (0=increment after each byte, 1=hold fixed — xP transfer)
 DMA_CH1_SRC_ADDR_REG                     = 0x40005020  # offset 0x0020  RW  CH1 DMA source address
 DMA_CH1_DST_ADDR_REG                     = 0x40005024  # offset 0x0024  RW  CH1 DMA destination address
 DMA_CH1_LENGTH_REG                       = 0x40005028  # offset 0x0028  RW  CH1 transfer length in bytes
 DMA_CH1_CTRL_REG                         = 0x4000502C  # offset 0x002C  RW  CH1 control: bit0=START, bit1=ENABLE
 DMA_CH1_STATUS_REG                       = 0x40005030  # offset 0x0030  R  CH1 status: bit0=BUSY, bit1=DONE
-DMA_CH1_MODE_REG                         = 0x40005034  # offset 0x0034  RW  CH1 transfer mode: bit0=DEST_FIXED (0=M2M both incr, 1=M2P fixed dest)
+DMA_CH1_SRC_MODE_REG                     = 0x40005034  # offset 0x0034  RW  CH1 source address mode: bit0=FIXED (0=increment after each byte, 1=hold fixed — P2x transfer)
+DMA_CH1_DST_MODE_REG                     = 0x40005038  # offset 0x0038  RW  CH1 destination address mode: bit0=FIXED (0=increment after each byte, 1=hold fixed — xP transfer)
 
 # ── TIMER0 ──────────────────────────────────────────────────────
 # Countdown timer — one-shot and periodic modes, ms resolution
@@ -89,6 +91,24 @@ CRC_RESULT_REG                           = 0x40008004  # offset 0x0004  R  Curre
 
 CRC_CTRL_REG                             = 0x40008008  # offset 0x0008  RW  Control register. bit0 = RESET — write 1 to clear the accumulator back to 0xFFFFFFFF. Writing 0 has no effect.  The bit reads back as 0.
 
+
+# ── WDT ─────────────────────────────────────────────────────────
+# Watchdog timer — countdown reset with retention registers (RESET_REASON, TIMEOUT_CNT)
+WDT_BASE         = 0x40009000
+WDT_SIZE         = 0x1000
+WDT_IRQ_INTID    = 4
+WDT_IRQ_DELAY_S  = 0.0
+WDT_IRQ_PORT     = 7902
+WDT_RW_PORT      = 7901
+
+# Registers
+WDT_LOAD_REG                             = 0x40009000  # offset 0x0000  RW  Timeout load value in milliseconds (0 = no-op)
+WDT_VALUE_REG                            = 0x40009004  # offset 0x0004  R  Remaining time in ms (virtual-clock based)
+WDT_CTRL_REG                             = 0x40009008  # offset 0x0008  RW  Control: bit0=ENABLE, bit1=INT_ENABLE (IRQ before reset)
+WDT_KICK_REG                             = 0x4000900C  # offset 0x000C  W  Write any value to reload countdown and clear STATUS.TIMEOUT
+WDT_STATUS_REG                           = 0x40009010  # offset 0x0010  R  Status: bit0=TIMEOUT (set on expiry)
+WDT_RESET_REASON_REG                     = 0x40009014  # offset 0x0014  R  Retention: 0=POR/global-reset  1=WDT-reset. Survives watchdog reset.
+WDT_TIMEOUT_CNT_REG                      = 0x40009018  # offset 0x0018  R  Retention: cumulative WDT timeout count since power-on.
 
 # ── SRAM memory region ────────────────────────────────────────────────────────
 # Scratchpad SRAM for device DMA transfers

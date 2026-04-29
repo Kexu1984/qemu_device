@@ -5,12 +5,12 @@ A framework for implementing custom ARM hardware devices in QEMU, with register 
 ## Overview
 
 This project implements:
-- **Custom QEMU Device** (`mmio-sockdev`): Generic SysBus proxy — 4 KB MMIO, IRQ line, optional virtual-clock tick channel, optional bus-master DMA memory channel. One instance per device on the QEMU command line.
+- **Custom QEMU Device** (`mmio-sockdev`): Generic SysBus proxy — 4 KB MMIO, IRQ line, optional virtual-clock tick channel, optional bus-master DMA memory channel, optional system-reset channel (`rst-chardev`). One instance per device on the QEMU command line.
 - **Python Device Server** (`device_model/mmio_device_server.py`): Transport + address dispatcher (`MMIOBus`). Each peripheral is a `MMIODevice` subclass with `read()`, `write()`, and an optional `on_tick()` override.
-- **Four modelled peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral.
+- **Six modelled peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT).
 - **KX6625 Custom SoC** (`scripts/qemu-fork/hw/arm/kx6625.c`): Cortex-M3 @ 48 MHz, 512 KB FLASH @ `0x00000000`, 128 KB SRAM @ `0x20000000`, NVIC with 16 external IRQs.
-- **Bare-Metal Cortex-M3 Firmware**: NVIC init, IRQ handlers, UART demo, DMA M2M copy demo, DMA peripheral DREQ/DACK demo.
-- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server, boots QEMU, exercises all four devices, asserts firmware output.
+- **Bare-Metal Cortex-M3 Firmware**: NVIC init, IRQ handlers, UART demo, DMA M2M copy demo, DMA peripheral DREQ/DACK demo, CRC-32 test, WDT countdown-reset demo with warm-boot detection.
+- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server, boots QEMU, exercises all six devices including a WDT-triggered system reset and warm-boot detection, asserts firmware output.
 
 ## Architecture
 
@@ -21,19 +21,19 @@ This project implements:
 │  QEMU  (KX6625 custom SoC — Cortex-M3 @ 48 MHz, NVIC, 16 external IRQs)                   │
 │                                                                                            │
 │  ┌──────────────┐    MMIO                ┌──────────────────────────────────────────────┐ │
-│  │  Firmware    │ ─── read/write ──────► │  mmio-sockdev (×4 instances)                 │ │
+│  │  Firmware    │ ─── read/write ──────► │  mmio-sockdev (×6 instances)                 │ │
 │  │  (Cortex-M3) │                        │                                              │ │
 │  │              │ ◄── IRQ (NVIC) ──────── │   chardev      ↔ R/W TCP channel             │ │
 │  └──────┬───────┘                        │   irq-chardev  ← IRQ TCP channel             │ │
 │         │                                │   tick-chardev → virtual-clock tick TCP      │ │
 │         │ read/write                     │   mem-chardev  ← DMA bus-master TCP (opt.)   │ │
-│         ▼                                └───────────┬──────────────────────────────────┘ │
-│  ┌────────────────────┐                              │ TCP channels                       │
-│  │  FLASH  512 KB     │                              │                                    │
+│         ▼                                │   rst-chardev  ← system-reset TCP (opt.)     │ │
+│  ┌────────────────────┐                  └───────────┬──────────────────────────────────┘ │
+│  │  FLASH  512 KB     │                              │ TCP channels                       │
 │  │  0x00000000        │ ◄── cpu_physical_memory_write (mem-chardev → QEMU phys mem)       │
-│  ├────────────────────┤                                                                   │
+│  ├────────────────────┤                              │                                    │
 │  │  SRAM   128 KB     │   QEMU_CLOCK_VIRTUAL fires QEMUTimer every tick-period-ms         │
-│  │  0x20000000        │                                                                   │
+│  │  0x20000000        │   Any byte on rst-chardev → qemu_system_reset_request()           │
 │  └────────────────────┘                                                                   │
 └────────────────────────────────────────────────────────────────────────────────────────────┘
                               │ TCP (per-channel connections)
@@ -41,25 +41,21 @@ This project implements:
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
 │  Python Device Server  (device_model/mmio_device_server.py)                                │
 │                                                                                            │
-│  RWServer               IRQServer              TickServer          MemServer               │
-│  :7890/:7892/:7894/:7898 :7891/:7893/:7895/:7899 :7896             :7897                   │
-│  QEMU ↔ Python          Python → QEMU          QEMU → Python       Python → QEMU           │
-│  (MMIO R/W ops)         (IRQ injection)        (virtual clock)     (bus-master DMA)        │
-│        │                      │                     │                   │                  │
-│        └──────────────┬───────┘          bus.tick_all(vtime_ns)   MemChannel               │
-│                       │                                            dma_read/dma_write()    │
-│                   MMIOBus                                               │                  │
-│       ┌───────────────┼────────────┬───────────────┐                   │                  │
-│       ▼               ▼            ▼               ▼                   │                  │
-│  ConsoleUart    DmaController  TimerDevice   DmaClientDemo             │                  │
-│  0x40004000     0x40005000     0x40006000    0x40007000                │                  │
-│  IRQ 0          CH0 M2M        on_tick():    IRQ 3                     │                  │
-│                 CH1 DREQ/DACK  elapsed check handle.transfer() ────────┘                  │
-│                 IRQ 1          IRQ 2         (DREQ→DACK→TC callback)                       │
-│                 on_tick()                                                                  │
-│                 dma_read/write ──────────────────────────────────────── → SRAM r/w         │
-│       │         fire IRQ 1                                                                 │
-│       └─ fire IRQ 0                                                                        │
+│  RWServer               IRQServer              TickServer          MemServer  RstServer    │
+│  :7890/:7892/:7894/:…   :7891/:7893/:7895/:…   :7896              :7897      :7903         │
+│  QEMU ↔ Python          Python → QEMU          QEMU → Python      Py→QEMU    Py→QEMU      │
+│  (MMIO R/W ops)         (IRQ injection)        (virtual clock)    (DMA)      (sys reset)  │
+│        │                      │                     │                │            │        │
+│        └──────────────┬───────┘          bus.tick_all(vtime_ns)  MemChannel  RstController│
+│                       │                                                                    │
+│                   MMIOBus                    SystemResetManager                            │
+│       ┌───────────────┼──────────┬────────────────┬──────┬──────┐   on WDT timeout:       │
+│       ▼               ▼          ▼                ▼      ▼      ▼   1. device.on_reset()  │
+│  ConsoleUart    DmaController TimerDevice DmaClientDemo CRC-32  WDT  (all devices)        │
+│  0x40004000     0x40005000    0x40006000  0x40007000   0x40008000 0x40009000               │
+│  IRQ 0          IRQ 1         on_tick()   IRQ 3         —       IRQ 4  2. RstCtrl.send()  │
+│                 on_tick()     IRQ 2       DREQ/DACK    data feed on_tick()   → TCP :7903  │
+│                 dma_read/write                                   timeout     → QEMU reset  │
 └────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -85,7 +81,9 @@ TickServer  ──► bus.tick_all(vtime_ns)
                    ├── ConsoleUartDevice.on_tick()   →  no-op (inherited)
                    ├── DmaController.on_tick()       →  advance every BUSY channel; DMA copy + IRQ on 0
                    ├── TimerDevice.on_tick()         →  check elapsed_ns ≥ load_ns; IRQ on expiry
-                   └── DmaClientDemoDevice.on_tick() →  no-op (inherited)
+                   ├── DmaClientDemoDevice.on_tick() →  no-op (inherited)
+                   ├── CrcDevice.on_tick()           →  no-op (inherited)
+                   └── WdtDevice.on_tick()           →  check elapsed_ms ≥ load_ms; trigger reset on expiry
 ```
 
 ### IRQ Flow
@@ -141,14 +139,16 @@ Peripheral path (CH1 / DmaClientDemoDevice):
 
 ### Memory Map
 
-| Region           | Base Address  | Size   | NVIC IRQ | R/W Port | IRQ Port | Tick Port | Mem Port |
-|------------------|---------------|--------|----------|----------|----------|-----------|----------|
-| Console UART     | `0x40004000`  | 4 KB   | 0        | 7890     | 7891     | —         | —        |
-| DMA Controller   | `0x40005000`  | 4 KB   | 1        | 7892     | 7893     | —         | 7897     |
-| Timer 0          | `0x40006000`  | 4 KB   | 2        | 7894     | 7895     | 7896      | —        |
-| DMA Client Demo  | `0x40007000`  | 4 KB   | 3        | 7898     | 7899     | —         | —        |
-| **FLASH**        | `0x00000000`  | 512 KB | —        | —        | —        | —         | —        |
-| **SRAM**         | `0x20000000`  | 128 KB | —        | —        | —        | —         | —        |
+| Region           | Base Address  | Size   | NVIC IRQ | R/W Port | IRQ Port | Tick Port | Mem Port | RST Port |
+|------------------|---------------|--------|----------|----------|----------|-----------|----------|----------|
+| Console UART     | `0x40004000`  | 4 KB   | 0        | 7890     | 7891     | —         | —        | —        |
+| DMA Controller   | `0x40005000`  | 4 KB   | 1        | 7892     | 7893     | —         | 7897     | —        |
+| Timer 0          | `0x40006000`  | 4 KB   | 2        | 7894     | 7895     | 7896      | —        | —        |
+| DMA Client Demo  | `0x40007000`  | 4 KB   | 3        | 7898     | 7899     | —         | —        | —        |
+| CRC-32 Engine    | `0x40008000`  | 4 KB   | —        | 7900     | —        | —         | —        | —        |
+| Watchdog Timer   | `0x40009000`  | 4 KB   | 4        | 7901     | 7902     | —         | —        | 7903     |
+| **FLASH**        | `0x00000000`  | 512 KB | —        | —        | —        | —         | —        | —        |
+| **SRAM**         | `0x20000000`  | 128 KB | —        | —        | —        | —         | —        | —        |
 
 The tick channel (`:7896`) is shared — a single `TickServer` broadcasts virtual-clock ticks from the timer's `mmio-sockdev` instance to **all** bus devices via `MMIOBus.tick_all()`.
 
@@ -200,7 +200,47 @@ A demo peripheral that uses the DMA controller's DREQ/DACK interface to perform 
 
 Firmware writes `CTRL.START`; the demo device calls `dma_handle.transfer()` (DREQ). On completion, `STATUS.DONE` is set and IRQ 3 is pulsed.
 
-### Timer 0 (`timer_model.py`)
+### CRC-32 Engine (`crc_device.py`)
+
+Hardware CRC-32/ISO-HDLC accelerator (IEEE 802.3 polynomial, used in Ethernet / ZIP / PNG).
+
+| Offset | Name   | Access | Description                                                         |
+|--------|--------|--------|---------------------------------------------------------------------|
+| 0x00   | DATA   | R/W    | Write: feed bytes into accumulator. Read: raw accumulator value     |
+| 0x04   | RESULT | R      | Final CRC-32 result (`accumulator ^ 0xFFFFFFFF`)                    |
+| 0x08   | CTRL   | R/W    | bit0 = RESET — write 1 to reset accumulator to `0xFFFFFFFF`        |
+
+Test vector: `CRC-32("123456789") = 0xCBF43926`. Supports byte and word writes; word writes feed four bytes in little-endian order. Compatible with firmware-driven direct writes and bus-master DMA M2P transfers (the DMA controller can feed data directly to offset `0x00`).
+
+### Watchdog Timer (`wdt_model.py`)
+
+A hardware watchdog that triggers a system reset if firmware stalls.
+
+| Offset | Name         | Access | Description                                                              |
+|--------|--------------|--------|--------------------------------------------------------------------------|
+| 0x00   | LOAD         | R/W    | Timeout value in milliseconds (0 = disabled)                             |
+| 0x04   | VALUE        | R      | Remaining time in ms (virtual-clock based)                               |
+| 0x08   | CTRL         | R/W    | bit0 = ENABLE, bit1 = INT_ENABLE (fire IRQ 4 before reset)               |
+| 0x0C   | KICK         | W      | Write any value to reload countdown; clears `STATUS.TIMEOUT`             |
+| 0x10   | STATUS       | R      | bit0 = TIMEOUT (set when countdown expires)                              |
+| 0x14   | RESET_REASON | R      | **Retention**: 0 = POR (power-on reset), 1 = WDT reset                  |
+| 0x18   | TIMEOUT_CNT  | R      | **Retention**: number of WDT timeouts since power-on                     |
+
+**Retention registers**: `RESET_REASON` and `TIMEOUT_CNT` survive a watchdog reset because they live in the Python device model instance, which persists across QEMU system resets. Only a full Python server restart (equivalent to power-on reset) clears them to 0.
+
+**Reset flow**: When the countdown reaches zero, `WdtDevice.on_tick()` sets `RESET_REASON = 1`, increments `TIMEOUT_CNT`, optionally pulses IRQ 4 (pre-reset warning), then calls `SystemResetManager.wdt_reset()`. The manager calls `on_reset()` on every bus device (clearing volatile state while preserving retention registers) and then sends one byte over the `rst-chardev` TCP channel to QEMU. QEMU receives the byte and calls `qemu_system_reset_request(SHUTDOWN_CAUSE_SUBSYSTEM_RESET)`, rebooting the firmware without exiting QEMU or closing TCP sockets.
+
+Firmware detects a warm boot by reading `RESET_REASON` at startup:
+
+```c
+uint32_t reason = *(volatile uint32_t *)WDT_RESET_REASON_REG;
+if (reason == WDT_REASON_POR) {
+    /* First boot: start watchdog */
+} else {
+    /* Warm boot after WDT reset */
+    uint32_t cnt = *(volatile uint32_t *)WDT_TIMEOUT_CNT_REG;
+}
+```
 
 | Offset | Name   | Access | Description                              |
 |--------|--------|--------|------------------------------------------|
@@ -258,6 +298,21 @@ DMA read:   'M'(1B) | 'R'(1B) | phys_addr(8B LE) | length(4B LE)
             QEMU responds: data(lengthB)
 ```
 
+### RST Channel — System Reset (Python → QEMU, optional)
+
+Allows a Python device model to trigger a subsystem-level QEMU system reset without exiting the emulator. Used by the WDT to reboot the firmware while keeping all TCP connections open.
+
+```
+Python → QEMU:  any single byte (e.g. 'R')
+QEMU action:    qemu_system_reset_request(SHUTDOWN_CAUSE_SUBSYSTEM_RESET)
+                — CPU resets, vector table re-fetched, firmware restarts.
+                — All chardev TCP sockets remain connected.
+                — Python device model instance continues running;
+                  volatile registers cleared by on_reset(), retention registers preserved.
+```
+
+The `rst-chardev` property is optional. If omitted, the device operates normally without reset capability.
+
 ## QEMU Command Line
 
 The Python device server binds all TCP ports first; QEMU connects to them as a client. Each device needs one `mmio-sockdev` instance. The timer instance also carries the shared tick channel:
@@ -284,6 +339,16 @@ The Python device server binds all TCP ports first; QEMU connects to them as a c
 -chardev socket,id=demo_rw,host=127.0.0.1,port=7898
 -chardev socket,id=demo_irq,host=127.0.0.1,port=7899
 -device  mmio-sockdev,chardev=demo_rw,irq-chardev=demo_irq,addr=0x40007000,irq-num=3
+
+# CRC-32 engine (no IRQ, no tick)
+-chardev socket,id=crc_rw,host=127.0.0.1,port=7900
+-device  mmio-sockdev,chardev=crc_rw,addr=0x40008000
+
+# Watchdog Timer (IRQ 4 pre-reset warning + rst-chardev for system reset)
+-chardev socket,id=wdt_rw,host=127.0.0.1,port=7901
+-chardev socket,id=wdt_irq,host=127.0.0.1,port=7902
+-chardev socket,id=wdt_rst,host=127.0.0.1,port=7903
+-device  mmio-sockdev,chardev=wdt_rw,irq-chardev=wdt_irq,rst-chardev=wdt_rst,addr=0x40009000,irq-num=4
 ```
 
 ## Quick Start
@@ -318,10 +383,10 @@ bash scripts/e2e_test.sh
 ```
 
 This single command:
-1. Starts the Python device server (all four devices)
+1. Starts the Python device server (all six devices)
 2. Waits for the UART port to be ready
-3. Starts QEMU (`-M kx6625`) with four `mmio-sockdev` instances and the firmware
-4. Polls firmware output in the server log for up to 80 s
+3. Starts QEMU (`-M kx6625`) with six `mmio-sockdev` instances and the firmware
+4. Polls firmware output in the server log for up to 120 s
 5. Asserts all expected log lines are present and prints PASS or FAIL
 
 Logs are written to `build/e2e_server.log` and `build/e2e_qemu.log` for post-mortem inspection.
@@ -341,6 +406,18 @@ Logs are written to `build/e2e_server.log` and `build/e2e_qemu.log` for post-mor
 [PASS] Found: "DMA client transfer started"
 [PASS] Found: "Transfer verified PASSED"
 [PASS] Found: "All demos complete"
+[PASS] Found: "CRC test"
+[PASS] Found: "0xCBF43926 PASSED"
+[PASS] Found: "DMA-CRC test"
+[PASS] Found: "DMA-CRC] Result 0xCBF43926 PASSED"
+[PASS] Found: "All tests done"
+[PASS] Found: "Power-on reset (RESET_REASON=POR)"
+[PASS] Found: "Kick 1"
+[PASS] Found: "Kick 2"
+[PASS] Found: "Waiting for WDT timeout"
+[PASS] Found: "WDT] TIMEOUT"
+[PASS] Found: "Warm boot detected: RESET_REASON=WDT"
+[PASS] Found: "WDT demo complete"
 
 [PASS] End-to-end IRQ test PASSED
 ```
@@ -370,11 +447,11 @@ Firmware character output (via TXDATA writes) appears in Terminal 1.
 
 ## Firmware Demo Sequence
 
-The firmware (`firmware/main.c`) executes three demos back-to-back:
+The firmware (`firmware/main.c`) executes five demos back-to-back:
 
 ### Phase 1 — UART IRQ
 
-1. Initialises NVIC (16 external IRQs armed, IRQs 0–3 enabled).
+1. Initialises NVIC (16 external IRQs armed, IRQs 0–4 enabled).
 2. Enables IRQs and waits (`WFI`) for IRQ 0.
 3. Python server fires the UART IRQ ~2 s after connecting; firmware acknowledges and prints `[FW] UART interrupt handled successfully!`.
 
@@ -394,6 +471,22 @@ The firmware (`firmware/main.c`) executes three demos back-to-back:
 4. Demo device sets `STATUS.DONE` and pulses IRQ 3.
 5. Firmware handles IRQ 3, verifies buffer, prints `[DMA] Transfer verified PASSED!` and `[FW] All demos complete.`
 
+### Phase 4 — CRC-32 Verification
+
+1. **Direct test**: firmware writes `CRC_CTRL=RESET`, then feeds the 9 bytes of `"123456789"` directly to `CRC_DATA`, reads `CRC_RESULT`. Asserts result equals `0xCBF43926`.
+2. **DMA-fed test**: firmware sets up a DMA M2P transfer from SRAM (containing `"123456789"`) to `CRC_DATA` offset `0x40008000`, starts the transfer, waits for IRQ 1, reads `CRC_RESULT`. Asserts result equals `0xCBF43926`.
+3. Prints `[CRC] Result 0xCBF43926 PASSED!`, `[DMA-CRC] Result 0xCBF43926 PASSED!`, and `[FW] All tests done.`
+
+### Phase 5 — Watchdog Timer Reset Demo
+
+1. **POR boot**: firmware reads `WDT_RESET_REASON_REG`; value = 0 (`REASON_POR`) → first boot path.
+2. Sets `WDT_LOAD = 200 ms`, prints `"Kick 1"` and `"Kick 2"` (two `KICK` register writes).
+3. Stops kicking, prints `"Waiting for WDT timeout"`. Python `WdtDevice.on_tick()` fires after 200 ms virtual time.
+4. Python calls `SystemResetManager.wdt_reset()`: all bus devices `on_reset()` called (volatile state cleared, retention registers preserved), then `RstController.send_reset()` sends one byte to QEMU over TCP `:7903`.
+5. QEMU receives the byte → `qemu_system_reset_request(SHUTDOWN_CAUSE_SUBSYSTEM_RESET)` — CPU reboots, TCP sockets stay open.
+6. **Warm boot**: firmware reads `WDT_RESET_REASON_REG` = 1 (`REASON_WDT`) → warm boot path.
+7. Reads `WDT_TIMEOUT_CNT_REG` (= 1), prints `"Warm boot detected: RESET_REASON=WDT"`, `"WDT demo complete"`, disables WDT.
+
 ## Project Structure
 
 ```
@@ -405,31 +498,35 @@ qemu_device/
 │   ├── uart.yaml                     # Console UART register map
 │   ├── dma.yaml                      # DMA controller CH0/CH1 register map
 │   ├── dma_client_demo.yaml          # DMA client demo register map
-│   └── timer.yaml                    # Timer 0 register map
+│   ├── timer.yaml                    # Timer 0 register map
+│   ├── crc.yaml                      # CRC-32 engine register map
+│   └── wdt.yaml                      # Watchdog Timer register map
 ├── firmware/                         # Bare-metal Cortex-M3 firmware
-│   ├── start.S                       # Vector table, Reset_Handler, IRQ dispatch
-│   ├── main.c                        # NVIC init + UART IRQ + DMA M2M + DMA client demo
+│   ├── start.S                       # Vector table, Reset_Handler, IRQ dispatch (IRQ0–IRQ4)
+│   ├── main.c                        # NVIC init + 5-phase demo (UART/DMA/CRC/WDT)
 │   ├── linker.ld                     # Memory layout (FLASH @ 0x00000000, SRAM @ 0x20000000)
 │   └── Makefile                      # Runs gen_device_code.py then compiles
 ├── device_model/                     # Python device emulation layer
-│   ├── mmio_base.py                  # MMIODevice ABC, IRQController, MemChannel, recv_exact()
-│   ├── mmio_device_server.py         # MMIOBus + RWServer + IRQServer + TickServer + MemServer + main()
+│   ├── mmio_base.py                  # MMIODevice ABC, IRQController, MemChannel, RstController
+│   ├── mmio_device_server.py         # MMIOBus + RWServer + IRQServer + TickServer + MemServer
+│   │                                 #   + RstServer + SystemResetManager + main()
 │   ├── uart_model.py                 # Console UART (character output + demo IRQ)
 │   ├── dma_controller.py             # DMA controller (multi-channel M2M + DREQ/DACK)
 │   ├── dma_client_demo.py            # DMA client demo peripheral (DREQ/DACK to DMA CH1)
 │   ├── timer_model.py                # Countdown timer (virtual-clock, one-shot + periodic)
+│   ├── crc_device.py                 # CRC-32/ISO-HDLC hardware accelerator
+│   ├── wdt_model.py                  # Watchdog Timer (countdown reset + retention registers)
 │   └── generated/                    # Auto-generated constants (make gen / make fw)
 │       └── device_consts.py          # Python constants mirroring mmio_devices.h
-├── qemu-fork/                        # Custom QEMU device sources
-│   └── hw/
-│       ├── misc/mmio_sockdev.c       # Generic SysBus mmio-sockdev (canonical source)
-│       └── arm/kx6625.c             # KX6625 custom SoC definition
 ├── scripts/
 │   ├── build_qemu.sh                 # QEMU configure + ninja build
 │   ├── gen_device_code.py            # Code generator: spec/ → C header + Python consts
 │   ├── run_demo.sh                   # Interactive demo launcher
 │   ├── e2e_test.sh                   # Automated end-to-end smoke test
 │   └── qemu-fork/                    # Modified QEMU 8.1.0 source tree (build target)
+│       └── hw/
+│           ├── misc/mmio_sockdev.c   # Generic SysBus mmio-sockdev (chardev/irq/tick/mem/rst)
+│           └── arm/kx6625.c          # KX6625 custom SoC definition
 └── build/                            # Build artifacts (gitignored)
     ├── firmware.elf / firmware.bin
     └── generated/
@@ -456,16 +553,17 @@ qemu_device/
 | DMA IRQ               | 1 (`irq-num=1`)                   |
 | Timer 0 IRQ           | 2 (`irq-num=2`)                   |
 | DMA Client Demo IRQ   | 3 (`irq-num=3`)                   |
+| WDT pre-reset IRQ     | 4 (`irq-num=4`)                   |
 
 IRQ pulse pattern: assert then immediately deassert to edge-trigger the NVIC without re-firing.
 
 ## Extending: Adding a New Device
 
 1. **Define the spec**: add an entry in `spec/devices.yaml` and create `spec/<name>.yaml` with the register map.
-2. **Write the model**: create `device_model/<name>_model.py` subclassing `MMIODevice`. Override `read()`, `write()`, and optionally `on_tick()` for timing behaviour. For bus-master DMA, use `MemChannel.dma_read/write()`. To use the DMA controller as a peripheral, obtain a `DmaClientHandle` from `DmaController.get_handle(ch)`.
+2. **Write the model**: create `device_model/<name>_model.py` subclassing `MMIODevice`. Override `read()`, `write()`, and optionally `on_tick()` for timing behaviour. For bus-master DMA, use `MemChannel.dma_read/write()`. To use the DMA controller as a peripheral, obtain a `DmaClientHandle` from `DmaController.get_handle(ch)`. For watchdog-style resets, instantiate a `RstController` and pass a `SystemResetManager.wdt_reset` callback.
 3. **Register on the bus**: add `bus.register(BASE, SIZE, YourDevice(...))` in `mmio_device_server.py`'s `main()`.
-4. **Add transport servers**: create `RWServer` and `IRQServer` instances as needed. Devices that need timing use the existing `TickServer` automatically. Devices that need bus-master DMA get a dedicated `MemServer` instance.
-5. **Extend the QEMU command line**: add a `mmio-sockdev` instance with `chardev`, `irq-chardev`, `addr`, `irq-num`. Add `mem-chardev` for DMA; `tick-chardev` for timer-style ticks.
+4. **Add transport servers**: create `RWServer` and `IRQServer` instances as needed. Devices that need timing use the existing `TickServer` automatically. Devices that need bus-master DMA get a dedicated `MemServer` instance. Devices that trigger system resets get an `RstServer` instance wired to a `RstController`.
+5. **Extend the QEMU command line**: add a `mmio-sockdev` instance with `chardev`, `irq-chardev`, `addr`, `irq-num`. Add `mem-chardev` for DMA; `tick-chardev` for timer-style ticks; `rst-chardev` for system-reset capability.
 6. Regenerate constants with `make gen`.
 
 ## Troubleshooting
@@ -477,6 +575,10 @@ IRQ pulse pattern: assert then immediately deassert to edge-trigger the NVIC wit
 | Firmware never prints | Verify `build/firmware.elf` exists (`make fw`) |
 | IRQ never fires | Check `build/e2e_server.log`; confirm IRQ port not blocked |
 | DMA never completes | Check `build/e2e_server.log` for `[MEM]` and `[TICK]` connection lines |
+| WDT timeout never fires | Confirm WDT CTRL.ENABLE is set; check `[TICK]` connection in server log |
+| QEMU never resets after WDT | Verify QEMU was rebuilt (`make qemu`) with `rst-chardev` support |
+| Warm boot not detected | Python server was restarted (clears retention registers); re-run the full test |
+| `"Property 'mmio-sockdev.rst-chardev' not found"` | QEMU binary is stale; run `make qemu` |
 | QEMU build fails | Install missing libs: `sudo apt install libglib2.0-dev libpixman-1-dev` |
 | ARM toolchain missing | `sudo apt install gcc-arm-none-eabi` |
 | `"Parameter 'driver' expects a pluggable device type"` | QEMU binary is stale; run `make qemu` |

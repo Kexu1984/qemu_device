@@ -50,12 +50,13 @@ from typing import Optional
 # Ensure project root is on sys.path for sibling package imports.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from device_model.mmio_base         import AddressSpace, IRQController, MemChannel, MMIODevice, recv_exact  # noqa: E402
+from device_model.mmio_base         import AddressSpace, IRQController, MemChannel, MMIODevice, RstController, recv_exact  # noqa: E402
 from device_model.uart_model        import ConsoleUartDevice                      # noqa: E402
 from device_model.timer_model       import TimerDevice                            # noqa: E402
 from device_model.dma_controller    import DmaController                          # noqa: E402
 from device_model.dma_client_demo   import DmaClientDemoDevice                    # noqa: E402
 from device_model.crc_device        import CrcDevice                              # noqa: E402
+from device_model.wdt_model         import WdtDevice                              # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +326,12 @@ _CRC_BASE        = 0x40008000
 _CRC_SIZE        = 0x1000
 _CRC_RW_PORT     = 7900
 
+_WDT_BASE        = 0x40009000
+_WDT_SIZE        = 0x1000
+_WDT_RW_PORT     = 7901
+_WDT_IRQ_PORT    = 7902
+_WDT_RST_PORT    = 7903   # Python → QEMU system-reset channel
+
 
 # ---------------------------------------------------------------------------
 # Transport: virtual-clock tick channel  (QEMU → Python)
@@ -476,6 +483,112 @@ class MemServer:
             self._sock = None
 
 
+# ---------------------------------------------------------------------------
+# Transport: system-reset channel  (Python → QEMU via rst-chardev)
+# ---------------------------------------------------------------------------
+
+class RstServer:
+    """
+    Accepts QEMU's rst-chardev TCP connection and hands the socket to the
+    shared ``RstController``.
+
+    When WdtDevice times out it calls SystemResetManager.wdt_reset(), which
+    calls RstController.send_reset(), which writes a byte here.  QEMU receives
+    the byte and calls qemu_system_reset_request(SHUTDOWN_CAUSE_SUBSYSTEM_RESET).
+    """
+
+    def __init__(self, port: int, rst_controller) -> None:
+        self.port  = port
+        self.ctrl  = rst_controller
+        self._sock: Optional[socket.socket] = None
+        self._running = False
+
+    def _handle_client(self, conn: socket.socket, addr) -> None:
+        print(f'[RST] QEMU rst-chardev connected from {addr}')
+        self.ctrl._on_connect(conn)
+        try:
+            conn.settimeout(1.0)
+            while self._running:
+                try:
+                    data = conn.recv(64)
+                    if not data:
+                        break
+                    print(f'[RST] unexpected data from QEMU: {data!r}',
+                          file=sys.stderr)
+                except socket.timeout:
+                    continue
+        except OSError:
+            pass
+        finally:
+            self.ctrl._on_disconnect()
+            conn.close()
+            print(f'[RST] QEMU rst-chardev disconnected from {addr}')
+
+    def start(self) -> None:
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(('127.0.0.1', self.port))
+        self._sock.listen(1)
+        self._running = True
+        print(f'[RST] Listening on port {self.port}')
+        try:
+            while self._running:
+                try:
+                    conn, addr = self._sock.accept()
+                    threading.Thread(
+                        target=self._handle_client,
+                        args=(conn, addr),
+                        daemon=True,
+                    ).start()
+                except OSError:
+                    if self._running:
+                        print('[RST] accept error', file=sys.stderr)
+                    break
+        finally:
+            self.stop()
+
+    def stop(self) -> None:
+        self._running = False
+        if self._sock:
+            self._sock.close()
+            self._sock = None
+
+
+# ---------------------------------------------------------------------------
+# System reset coordinator
+# ---------------------------------------------------------------------------
+
+class SystemResetManager:
+    """
+    Coordinates a watchdog reset across all Python device models.
+
+    On WDT timeout:
+      1. Calls ``on_reset()`` on every MMIODevice registered on the bus,
+         clearing volatile state while preserving retention registers.
+      2. Sends a byte via ``RstController`` → rst-chardev TCP channel →
+         QEMU ``qemu_system_reset_request(SHUTDOWN_CAUSE_SUBSYSTEM_RESET)``.
+
+    The TCP connections (RW / IRQ / MEM / RST) remain alive across the QEMU
+    system reset.  Firmware restarts from the reset vector and sees fresh
+    Python-side device state; WDT retention registers reflect the timeout.
+    """
+
+    def __init__(self, bus: 'MMIOBus', rst_ctrl) -> None:
+        self._bus      = bus
+        self._rst_ctrl = rst_ctrl
+
+    def wdt_reset(self) -> None:
+        """Called by WdtDevice when the watchdog countdown expires."""
+        print('[SYS] WDT reset: resetting all device volatile state...')
+        for _base, _size, device in self._bus._entries:
+            device.on_reset()
+        print('[SYS] Sending system-reset request to QEMU...')
+        if not self._rst_ctrl.send_reset():
+            print('[SYS] WARNING: rst-chardev not connected — '
+                  'QEMU reset not sent.',
+                  file=sys.stderr)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description='MMIO Device Server — transport + dispatch for all peripherals',
@@ -507,6 +620,10 @@ def main() -> None:
     dma_irq_ctrl   = IRQController()
     timer_irq_ctrl = IRQController()
     demo_irq_ctrl  = IRQController()
+    wdt_irq_ctrl   = IRQController()
+
+    # ── 1b. System-reset controller (WDT → QEMU) ─────────────────────────
+    wdt_rst_ctrl = RstController()
 
     # ── 2. DMA bus-master memory channel ─────────────────────────────────
     mem_channel = MemChannel()
@@ -541,6 +658,7 @@ def main() -> None:
             (_TIMER_BASE, _TIMER_SIZE),
             (_DEMO_BASE,  _DEMO_SIZE),
             (_CRC_BASE,   _CRC_SIZE),
+            (_WDT_BASE,   _WDT_SIZE),
         ],
     )
 
@@ -583,6 +701,19 @@ def main() -> None:
         CrcDevice(),
     )
 
+    # WDT — watchdog timer with retention registers + system-reset capability.
+    # SystemResetManager is constructed after the bus is fully populated so that
+    # wdt_reset() can iterate bus._entries.
+    sys_reset_mgr = SystemResetManager(bus=bus, rst_ctrl=wdt_rst_ctrl)
+    bus.register(
+        _WDT_BASE, _WDT_SIZE,
+        WdtDevice(
+            irq_controller=wdt_irq_ctrl,
+            irq_idx=0,
+            reset_callback=sys_reset_mgr.wdt_reset,
+        ),
+    )
+
     # ── 5. Transport servers ──────────────────────────────────────────────
     uart_irq_server = IRQServer(port=uart_irq_port, irq_controller=uart_irq_ctrl)
     threading.Thread(target=uart_irq_server.start, daemon=True).start()
@@ -617,6 +748,16 @@ def main() -> None:
     crc_rw_server = RWServer(port=_CRC_RW_PORT, bus=bus, base_addr=_CRC_BASE)
     threading.Thread(target=crc_rw_server.start, daemon=True).start()
 
+    # WDT transport servers: R/W, IRQ, and system-reset channels
+    wdt_irq_server = IRQServer(port=_WDT_IRQ_PORT, irq_controller=wdt_irq_ctrl)
+    threading.Thread(target=wdt_irq_server.start, daemon=True).start()
+
+    rst_server = RstServer(port=_WDT_RST_PORT, rst_controller=wdt_rst_ctrl)
+    threading.Thread(target=rst_server.start, daemon=True).start()
+
+    wdt_rw_server = RWServer(port=_WDT_RW_PORT, bus=bus, base_addr=_WDT_BASE)
+    threading.Thread(target=wdt_rw_server.start, daemon=True).start()
+
     uart_rw_server = RWServer(port=uart_rw_port, bus=bus, base_addr=_UART_BASE)
     try:
         uart_rw_server.start()
@@ -634,6 +775,9 @@ def main() -> None:
         demo_rw_server.stop()
         demo_irq_server.stop()
         crc_rw_server.stop()
+        wdt_rw_server.stop()
+        wdt_irq_server.stop()
+        rst_server.stop()
 
 
 if __name__ == '__main__':

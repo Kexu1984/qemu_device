@@ -13,6 +13,7 @@
  *   0x40005000  dma device          (mmio-sockdev, IRQ1)
  *   0x40006000  timer0 device       (mmio-sockdev, IRQ2)
  *   0x40008000  crc device          (mmio-sockdev, polled)
+ *   0x40009000  wdt device          (mmio-sockdev, IRQ4)
  */
 
 #include <stdint.h>
@@ -44,6 +45,12 @@
 
 #define CRC_CTRL_RESET     0x1U   /* bit0: reset accumulator to 0xFFFFFFFF */
 #define DMA_CRC_SRC        (SRAM_BASE + 0x5000U)  /* 16B source for DMA→CRC test */
+
+/* WDT register bit definitions */
+#define WDT_CTRL_ENABLE     0x1U
+#define WDT_CTRL_INT_ENABLE 0x2U
+#define WDT_REASON_POR      0x0U
+#define WDT_REASON_WDT      0x1U
 
 /* CRC-32 test vector: CRC-32("123456789") = 0xCBF43926  (ISO-HDLC / IEEE 802.3) */
 #define CRC_EXPECTED       0xCBF43926U
@@ -96,14 +103,14 @@ static void send_string(const char *str)
  * ----------------------------------------------------------------------- */
 static void nvic_init(void)
 {
-    /* 1. Clear any stale pending state for IRQ 0, 1, 2, 3 */
-    mmio_write32(NVIC_ICPR0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
+    /* 1. Clear any stale pending state for IRQ 0, 1, 2, 3, 4 */
+    mmio_write32(NVIC_ICPR0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4));
 
     /* 2. Set priority 0 (highest) for IRQ 0-3 */
     mmio_write32(NVIC_IPR0, 0x00000000U);
 
-    /* 3. Enable IRQ 0 (bit 0), IRQ 1 (bit 1), IRQ 2 (bit 2), IRQ 3 (bit 3) in ISER0 */
-    mmio_write32(NVIC_ISER0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3));
+    /* 3. Enable IRQ 0-4 in ISER0 */
+    mmio_write32(NVIC_ISER0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4));
 }
 
 /* -----------------------------------------------------------------------
@@ -114,6 +121,7 @@ static void nvic_init(void)
 volatile int irq_count          = 0;
 volatile int dma_irq_fired      = 0;
 volatile int dma_client_done    = 0;
+volatile int wdt_irq_fired      = 0;
 
 void uart_irq_handler(void)     /* vector table IRQ0 */
 {
@@ -136,6 +144,12 @@ void dma_client_irq_handler(void)  /* vector table IRQ3 */
 {
     dma_client_done++;
     send_string("[IRQ] DMA client done! INTID=3\n");
+}
+
+void wdt_irq_handler(void)         /* vector table IRQ4 */
+{
+    wdt_irq_fired++;
+    send_string("[IRQ] WDT pre-reset warning IRQ! INTID=4\n");
 }
 
 /* -----------------------------------------------------------------------
@@ -372,7 +386,64 @@ void main(void)
 
     send_string("[FW] All tests done.\n");
 
-    /* Idle forever */
+    /*
+     * ── Phase 5: Watchdog Timer demo ──────────────────────────────────────
+     *
+     * On the first boot  (RESET_REASON == 0 = POR):
+     *   1. Report it is a power-on reset.
+     *   2. Load the WDT with 200 ms, enable with INT_ENABLE.
+     *   3. KICK twice (at ~50 ms virtual intervals) to prove the reload works.
+     *   4. Stop kicking — the WDT fires after 200 ms of virtual time.
+     *   5. The WDT model: sets RESET_REASON=1, TIMEOUT_CNT++, then sends
+     *      a byte via rst-chardev → QEMU reset.
+     *
+     * On the second boot (RESET_REASON == 1 = WDT reset):
+     *   1. Detect the warm boot, print TIMEOUT_CNT.
+     *   2. Disable WDT so it does not reset again.
+     *   3. Print "WDT demo complete" and idle.
+     */
+    {
+        uint32_t reason = mmio_read32(WDT_RESET_REASON_REG);
+        if (reason == WDT_REASON_WDT) {
+            /* ── Second boot: we came back from a WDT reset ────────────── */
+            uint32_t cnt = mmio_read32(WDT_TIMEOUT_CNT_REG);
+            send_string("[WDT] Warm boot detected: RESET_REASON=WDT\n");
+            send_string("[WDT] timeout_cnt=");
+            /* Print decimal count (always small — just handle 0-9) */
+            send_char((char)('0' + (cnt % 10)));
+            send_string("\n");
+            send_string("[WDT] WDT demo complete.\n");
+            /* Disable WDT so we do not reset again */
+            mmio_write32(WDT_CTRL_REG, 0x0U);
+        } else {
+            /* ── First boot: power-on reset ────────────────────────────── */
+            send_string("[WDT] Power-on reset (RESET_REASON=POR)\n");
+            send_string("[WDT] Loading WDT 200 ms, kicking twice then letting it fire...\n");
+
+            /* Program the watchdog */
+            mmio_write32(WDT_LOAD_REG, 200U);
+            mmio_write32(WDT_CTRL_REG, WDT_CTRL_ENABLE | WDT_CTRL_INT_ENABLE);
+
+            /* Kick 1 — reload countdown */
+            mmio_write32(WDT_KICK_REG, 0x1U);
+            send_string("[WDT] Kick 1\n");
+
+            /* Spin a while (simulate useful work), then kick again */
+            for (volatile uint32_t d = 0; d < 50000U; d++) { }
+            mmio_write32(WDT_KICK_REG, 0x1U);
+            send_string("[WDT] Kick 2\n");
+
+            /* Now stop kicking — WDT will fire after 200 ms virtual time */
+            send_string("[WDT] Waiting for WDT timeout and system reset...\n");
+
+            /* Spin until WDT fires (QEMU system reset will interrupt this) */
+            while (1) {
+                __asm__ volatile ("wfi");
+            }
+        }
+    }
+
+    /* Idle forever (reached only on WDT warm-boot path after disabling WDT) */
     while (1) {
         __asm__ volatile ("wfi");
     }

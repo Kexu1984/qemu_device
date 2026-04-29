@@ -66,4 +66,16 @@ exec "$QEMU_BIN" \
     -chardev socket,id=timer_tick,host=127.0.0.1,port=7896 \
     -device mmio-sockdev,chardev=timer_rw,irq-chardev=timer_irq,tick-chardev=timer_tick,tick-period-ms=1,addr=0x40006000,irq-num=2 \
     \
+    -chardev socket,id=demo_rw,host=127.0.0.1,port=7898 \
+    -chardev socket,id=demo_irq,host=127.0.0.1,port=7899 \
+    -device mmio-sockdev,chardev=demo_rw,irq-chardev=demo_irq,addr=0x40007000,irq-num=3 \
+    \
+    -chardev socket,id=crc_rw,host=127.0.0.1,port=7900 \
+    -device mmio-sockdev,chardev=crc_rw,addr=0x40008000 \
+    \
+    -chardev socket,id=wdt_rw,host=127.0.0.1,port=7901 \
+    -chardev socket,id=wdt_irq,host=127.0.0.1,port=7902 \
+    -chardev socket,id=wdt_rst,host=127.0.0.1,port=7903 \
+    -device mmio-sockdev,chardev=wdt_rw,irq-chardev=wdt_irq,rst-chardev=wdt_rst,addr=0x40009000,irq-num=4 \
+    \
     -kernel "${FIRMWARE_BIN%.bin}.elf"

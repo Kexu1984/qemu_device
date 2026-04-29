@@ -327,3 +327,64 @@ class AddressSpace:
             self._bus.write(addr, len(data), data)
             return True
         return self._mem.dma_write(addr, data)
+
+
+# ---------------------------------------------------------------------------
+# System-reset controller  (Python → QEMU via rst-chardev)
+# ---------------------------------------------------------------------------
+
+class RstController:
+    """
+    Triggers a QEMU system reset over the rst-chardev TCP channel.
+
+    Python sends a single byte; QEMU's mmio_sockdev calls
+    ``qemu_system_reset_request(SHUTDOWN_CAUSE_SUBSYSTEM_RESET)``, which
+    reboots the firmware without exiting QEMU (even with -no-reboot).
+
+    The channel has the same connect/disconnect lifecycle as IRQController:
+    QEMU connects as client, Python holds the server-side socket and writes
+    to trigger the reset.
+    """
+
+    def __init__(self) -> None:
+        self._sock: Optional[socket.socket] = None
+        self._lock      = threading.Lock()
+        self._connected = threading.Event()
+
+    # -- called by RstServer ----------------------------------------------
+
+    def _on_connect(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._sock = sock
+        self._connected.set()
+        print('[RST] rst-chardev connected')
+
+    def _on_disconnect(self) -> None:
+        with self._lock:
+            self._sock = None
+        self._connected.clear()
+        print('[RST] rst-chardev disconnected')
+
+    # -- public API -----------------------------------------------------------
+
+    def wait_connected(self, timeout: Optional[float] = None) -> bool:
+        """Block until QEMU connects the rst channel (or ``timeout`` expires)."""
+        return self._connected.wait(timeout)
+
+    def send_reset(self) -> bool:
+        """
+        Send a single byte to trigger QEMU system reset.
+
+        Returns ``True`` on success, ``False`` if the channel is not open.
+        """
+        with self._lock:
+            if self._sock is None:
+                print('[RST] send_reset: no connection — reset not sent',
+                      file=sys.stderr)
+                return False
+            try:
+                self._sock.sendall(b'\x52')   # 'R' — any byte triggers reset
+                return True
+            except OSError as exc:
+                print(f'[RST] send_reset error: {exc}', file=sys.stderr)
+                return False
