@@ -32,6 +32,7 @@ from __future__ import annotations
 from typing import Optional
 
 from device_model.mmio_base import DmaRequestInterface, IRQController, IrqLine, MMIODevice, RegisterBank
+from device_model.tracer    import NULL_DEVICE_TRACER, DeviceTracer, Tracer
 
 
 class DmaClientDemoDevice(MMIODevice):
@@ -75,10 +76,12 @@ class DmaClientDemoDevice(MMIODevice):
         dma_handle: DmaRequestInterface,
         irq_controller: Optional[IRQController] = None,
         irq_idx: int = 0,
+        tracer: Optional[Tracer] = None,
     ) -> None:
         self._regs = RegisterBank(self._REGSIZE)
         self._dma  = dma_handle
         self._irq  = IrqLine(irq_controller, irq_idx)
+        self._tr: DeviceTracer = tracer.context(self.name) if tracer else NULL_DEVICE_TRACER
 
     @property
     def name(self) -> str:
@@ -98,6 +101,7 @@ class DmaClientDemoDevice(MMIODevice):
 
     def on_reset(self) -> None:
         self._regs.reset()
+        self._tr.emit('RESET')
 
     def on_tick(self, vtime_ns: int) -> None:
         # DMA timing is driven by DmaController; this device has no own tick.
@@ -118,6 +122,7 @@ class DmaClientDemoDevice(MMIODevice):
             f'src=0x{src:08x} dst=0x{dst:08x} len={length}',
             flush=True,
         )
+        self._tr.emit('START', src=src, dst=dst, length=length)
 
         ok = self._dma.transfer(src, dst, length, self._on_transfer_done)
         if not ok:
@@ -127,6 +132,7 @@ class DmaClientDemoDevice(MMIODevice):
             )
             with self._regs:
                 self._regs[self._STATUS] = 0   # clear BUSY, request dropped
+            self._tr.emit('NACK')
 
     def _on_transfer_done(self, success: bool) -> None:
         """DMA transfer-complete callback (TC) — called from DmaController thread."""
@@ -143,6 +149,8 @@ class DmaClientDemoDevice(MMIODevice):
             f'transfer {"DONE" if success else "FAILED"}',
             flush=True,
         )
+        self._tr.emit('DONE', ok=success)
 
         # Pulse IRQ: edge-trigger so NVIC does not re-fire on exception return.
         self._irq.pulse()
+        self._tr.emit('IRQ_PULSE', irq_idx=self._irq.idx)

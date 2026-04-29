@@ -43,6 +43,7 @@ import threading
 from typing import Callable, Optional
 
 from device_model.mmio_base import IRQController, IrqLine, MMIODevice, VirtualClock
+from device_model.tracer    import NULL_DEVICE_TRACER, DeviceTracer, Tracer
 
 
 class WdtDevice(MMIODevice):
@@ -75,11 +76,13 @@ class WdtDevice(MMIODevice):
         irq_controller: Optional[IRQController] = None,
         irq_idx: int = 0,
         reset_callback: Optional[Callable[[], None]] = None,
+        tracer: Optional[Tracer] = None,
     ) -> None:
         self._irq            = IrqLine(irq_controller, irq_idx)
         self._reset_callback = reset_callback   # SystemResetManager.wdt_reset
         self._clock          = VirtualClock()
         self._lock           = threading.Lock()
+        self._tr: DeviceTracer = tracer.context(self.name) if tracer else NULL_DEVICE_TRACER
 
         # ── Volatile registers (cleared by on_reset / watchdog reset) ────
         self._load_ms: int = 0
@@ -119,6 +122,7 @@ class WdtDevice(MMIODevice):
             if offset == self._LOAD:
                 self._load_ms = value
                 print(f'[WDT] LOAD = {value} ms')
+                self._tr.emit('LOAD', load_ms=value)
 
             elif offset == self._CTRL:
                 prev_enable = self._ctrl & self._CTRL_ENABLE
@@ -129,9 +133,11 @@ class WdtDevice(MMIODevice):
                     self._clock.arm()
                     self._status &= ~self._STATUS_TIMEOUT
                     print(f'[WDT] enabled, timeout = {self._load_ms} ms')
+                    self._tr.emit('ARM', load_ms=self._load_ms)
                 elif not (value & self._CTRL_ENABLE) and prev_enable:
                     self._clock.disarm()
                     print('[WDT] disabled')
+                    self._tr.emit('DISARM')
 
             elif offset == self._KICK:
                 # Reload countdown regardless of content written
@@ -139,6 +145,7 @@ class WdtDevice(MMIODevice):
                     self._clock.arm()
                     self._status &= ~self._STATUS_TIMEOUT
                     print('[WDT] kicked — countdown reloaded')
+                    self._tr.emit('KICK')
 
     # ── Reset handling ────────────────────────────────────────────────────
 
@@ -158,6 +165,8 @@ class WdtDevice(MMIODevice):
                 f'RESET_REASON={self._reset_reason}  '
                 f'TIMEOUT_CNT={self._timeout_cnt}'
             )
+        self._tr.emit('RESET', reset_reason=self._reset_reason,
+                      timeout_cnt=self._timeout_cnt)
 
     # ── Virtual-clock tick ────────────────────────────────────────────────
 
@@ -169,6 +178,7 @@ class WdtDevice(MMIODevice):
         Fires the optional warning IRQ and schedules a system reset when
         the countdown reaches zero.
         """
+        self._tr.tick(vtime_ns)
         self._clock.update(vtime_ns)
 
         fire_reset  = False
@@ -204,7 +214,9 @@ class WdtDevice(MMIODevice):
             # Pulse the pre-reset warning IRQ (edge-trigger)
             print(f'[WDT] IRQ {self._irq.idx} pulse (pre-reset warning)')
             self._irq.pulse()
+            self._tr.emit('IRQ_PULSE', irq_idx=self._irq.idx)
 
         if fire_reset and self._reset_callback is not None:
+            self._tr.emit('TIMEOUT', timeout_cnt=cnt)
             self._reset_callback()
 

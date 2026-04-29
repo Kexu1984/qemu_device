@@ -23,6 +23,7 @@ from typing import Optional
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from device_model.mmio_base import IRQController, IrqLine, MMIODevice, RegisterBank, UartChannel  # noqa: E402
+from device_model.tracer    import NULL_DEVICE_TRACER, DeviceTracer, Tracer                       # noqa: E402
 
 
 class ConsoleUartDevice(MMIODevice):
@@ -47,6 +48,7 @@ class ConsoleUartDevice(MMIODevice):
         irq_idx: int = 0,
         irq_delay: float = 2.0,
         uart_channel: Optional[UartChannel] = None,
+        tracer: Optional[Tracer] = None,
     ) -> None:
         _init = bytearray(self._REGSIZE)
         _init[self._CTRL] = 0x01           # ENABLE=1 by default
@@ -57,6 +59,7 @@ class ConsoleUartDevice(MMIODevice):
         self._irq_lock     = threading.Lock()
         self._line_buf     = ''
         self._uart_channel = uart_channel
+        self._tr: DeviceTracer = tracer.context(self.name) if tracer else NULL_DEVICE_TRACER
 
         if irq_controller is not None:
             threading.Thread(target=self._irq_task, daemon=True).start()
@@ -78,6 +81,9 @@ class ConsoleUartDevice(MMIODevice):
             # ── Terminal channel: forward raw bytes, LF → CRLF ───────────
             if self._uart_channel is not None:
                 self._uart_channel.send(b'\r\n' if ch == 0x0A else bytes([ch]))
+            # ── Trace ─────────────────────────────────────────────────────
+            self._tr.emit('TX', ch=ch,
+                          ascii=chr(ch) if 0x20 <= ch < 0x7F else None)
             # ── Stdout: line-buffer for e2e test compatibility ────────────
             if 32 <= ch <= 126:
                 self._line_buf += chr(ch)
@@ -98,6 +104,7 @@ class ConsoleUartDevice(MMIODevice):
             self._line_buf = ''
         if self._uart_channel is not None:
             self._uart_channel.send(b'\r\n\x1b[33m--- [UART RESET] ---\x1b[0m\r\n')
+        self._tr.emit('RESET')
 
     # -- IRQ injection (daemon thread) ------------------------------------
 
@@ -121,3 +128,4 @@ class ConsoleUartDevice(MMIODevice):
         # not re-fire (Cortex-M re-pends while level is still high).
         self._irq.deassert()
         print(f'[IRQ] IRQ {self._irq.idx} deasserted (level=0)')
+        self._tr.emit('IRQ_FIRE', irq_idx=self._irq.idx)

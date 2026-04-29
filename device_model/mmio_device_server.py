@@ -57,6 +57,7 @@ from device_model.dma_controller    import DmaController                        
 from device_model.dma_client_demo   import DmaClientDemoDevice                    # noqa: E402
 from device_model.crc_device        import CrcDevice                              # noqa: E402
 from device_model.wdt_model         import WdtDevice                              # noqa: E402
+from device_model.tracer            import Tracer                                  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +606,10 @@ def main() -> None:
                         help='Seconds before UART demo IRQ fires')
     parser.add_argument('--uart-term-port', type=int,   default=_UART_TERM_PORT,
                         help='UART terminal output TCP port (connect: nc 127.0.0.1 <port>)')
+    parser.add_argument('--trace-file', default='build/device_trace.jsonl',
+                        help='Path for device event trace output (JSONL format)')
+    parser.add_argument('--no-trace', action='store_true',
+                        help='Disable event tracing')
     # Legacy short aliases kept for backward compatibility with e2e_test.sh
     parser.add_argument('--port',      type=int,   default=None,
                         help='Alias for --uart-rw-port')
@@ -622,6 +627,12 @@ def main() -> None:
     # ── 0. UART terminal channel (optional external terminal connection) ───────
     uart_channel = UartChannel(port=args.uart_term_port)
     uart_channel.start()
+
+    # ── 0b. Event tracer ─────────────────────────────────────────────────
+    tracer: Tracer | None = None
+    if not args.no_trace:
+        tracer = Tracer(args.trace_file)
+        print(f'[tracer] recording to {args.trace_file}')
 
     # ── 1. Per-device IRQ controllers ────────────────────────────────────
     uart_irq_ctrl  = IRQController()
@@ -676,6 +687,7 @@ def main() -> None:
         irq_controller= dma_irq_ctrl,
         irq_idx       = 0,
         transfer_ticks= 10,
+        tracer        = tracer,
     )
 
     # ── 4. Address bus + device registration ─────────────────────────────
@@ -687,13 +699,14 @@ def main() -> None:
             irq_idx=0,
             irq_delay=uart_irq_delay,
             uart_channel=uart_channel,
+            tracer=tracer,
         ),
     )
     # DmaController IS the DMA MMIO device — no separate DmaDevice needed.
     bus.register(_DMA_BASE, _DMA_SIZE, dma_ctrl)
     bus.register(
         _TIMER_BASE, _TIMER_SIZE,
-        TimerDevice(irq_controller=timer_irq_ctrl, irq_idx=0),
+        TimerDevice(irq_controller=timer_irq_ctrl, irq_idx=0, tracer=tracer),
     )
     # DmaClientDemoDevice uses DMA CH1 via DmaClientHandle (DREQ/DACK).
     bus.register(
@@ -702,12 +715,13 @@ def main() -> None:
             dma_handle=dma_ctrl.get_handle(1),
             irq_controller=demo_irq_ctrl,
             irq_idx=0,
+            tracer=tracer,
         ),
     )
     # CRC-32 hardware accelerator — polled only, no IRQ.
     bus.register(
         _CRC_BASE, _CRC_SIZE,
-        CrcDevice(),
+        CrcDevice(tracer=tracer),
     )
 
     # WDT — watchdog timer with retention registers + system-reset capability.
@@ -720,6 +734,7 @@ def main() -> None:
             irq_controller=wdt_irq_ctrl,
             irq_idx=0,
             reset_callback=sys_reset_mgr.wdt_reset,
+            tracer=tracer,
         ),
     )
 
@@ -788,7 +803,8 @@ def main() -> None:
         wdt_irq_server.stop()
         rst_server.stop()
         uart_channel.stop()
-
+        if tracer:
+            tracer.close()
 
 if __name__ == '__main__':
     main()

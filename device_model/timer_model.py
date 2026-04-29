@@ -30,6 +30,7 @@ from __future__ import annotations
 from typing import Optional
 
 from device_model.mmio_base import IRQController, IrqLine, MMIODevice, RegAccess, RegisterBank, VirtualClock
+from device_model.tracer    import NULL_DEVICE_TRACER, DeviceTracer, Tracer
 
 
 class TimerDevice(MMIODevice):
@@ -59,6 +60,7 @@ class TimerDevice(MMIODevice):
         self,
         irq_controller: Optional[IRQController] = None,
         irq_idx: int = 0,
+        tracer: Optional[Tracer] = None,
     ) -> None:
         self._regs  = RegisterBank(
             self._REGSIZE,
@@ -73,6 +75,7 @@ class TimerDevice(MMIODevice):
         )
         self._irq   = IrqLine(irq_controller, irq_idx)
         self._clock = VirtualClock()
+        self._tr: DeviceTracer = tracer.context(self.name) if tracer else NULL_DEVICE_TRACER
 
     # ------------------------------------------------------------------ #
     # MMIODevice interface                                                 #
@@ -97,20 +100,25 @@ class TimerDevice(MMIODevice):
             ctrl = self._regs.get32(self._CTRL)
             if ctrl & self._CTRL_ENABLE:
                 self._clock.arm()
+                load_ms = self._regs.get32(self._LOAD)
                 print('[TMR] Timer armed')
+                self._tr.emit('ARM', load_ms=load_ms)
             else:
                 self._clock.disarm()
                 print('[TMR] Timer disarmed')
+                self._tr.emit('DISARM')
 
         if offset <= self._INTCLR < offset + size:
             self._regs.clear_bits(self._STATUS, self._STATUS_INT_PENDING)
             self._irq.deassert()
             print(f'[TMR] IRQ {self._irq.idx} deasserted (INTCLR)')
+            self._tr.emit('INTCLR', irq_idx=self._irq.idx)
 
     def on_reset(self) -> None:
         self._regs.reset()
         self._clock.disarm()
         print('[TMR] Reset')
+        self._tr.emit('RESET')
 
     # ------------------------------------------------------------------ #
     # Virtual-clock tick entry point                                       #
@@ -119,6 +127,7 @@ class TimerDevice(MMIODevice):
 
     def on_tick(self, vtime_ns: int) -> None:
         """Advance the virtual clock and check for timer expiry."""
+        self._tr.tick(vtime_ns)
         self._clock.update(vtime_ns)
 
         load_ms = self._regs.get32(self._LOAD)
@@ -138,3 +147,5 @@ class TimerDevice(MMIODevice):
             self._irq.assert_()
             print(f'[TMR] Timer expired at vtime={vtime_ns} ns '
                   f'— IRQ {self._irq.idx} asserted')
+            self._tr.emit('EXPIRE', load_ms=load_ms)
+            self._tr.emit('IRQ_ASSERT', irq_idx=self._irq.idx)

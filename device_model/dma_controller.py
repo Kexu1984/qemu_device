@@ -136,6 +136,7 @@ class DmaController(MMIODevice):
         irq_controller: Optional[IRQController] = None,
         irq_idx: int = 0,
         transfer_ticks: int = 10,
+        tracer: Optional[Tracer] = None,
     ) -> None:
         n = num_channels
         self._num_channels   = n
@@ -146,6 +147,7 @@ class DmaController(MMIODevice):
         self._addrspace      = address_space
         self._irq           = IrqLine(irq_controller, irq_idx)
         self._transfer_ticks = transfer_ticks
+        self._tr: DeviceTracer = tracer.context(self.name) if tracer else NULL_DEVICE_TRACER
 
     @property
     def name(self) -> str:
@@ -186,11 +188,13 @@ class DmaController(MMIODevice):
         self._regs[:] = bytearray(self._regsize)
         for ch in self._channels:
             ch.state = _DmaChannel.IDLE
+        self._tr.emit('RESET')
 
     # -- Tick observer interface ------------------------------------------
 
     def on_tick(self, vtime_ns: int) -> None:
         """Advance all BUSY channels by one tick."""
+        self._tr.tick(vtime_ns)
         for ch in self._channels:
             self._tick_channel(ch, vtime_ns)
 
@@ -240,6 +244,8 @@ class DmaController(MMIODevice):
             f'({self._transfer_ticks} ticks)',
             flush=True,
         )
+        self._tr.emit('CH_DREQ', ch=channel_id, src=src, dst=dst,
+                      length=length, mode=mode_str)
         return True
 
     def channel_busy(self, channel_id: int) -> bool:
@@ -276,6 +282,8 @@ class DmaController(MMIODevice):
             f'({self._transfer_ticks} ticks)',
             flush=True,
         )
+        self._tr.emit('CH_START', ch=ch_idx, src=src, dst=dst,
+                      length=length, mode=mode_str)
 
     def _arm_channel(
         self,
@@ -372,15 +380,19 @@ class DmaController(MMIODevice):
 
         # Notify peripheral callback (P2M/M2P path).
         if callback:
+            self._tr.emit('CH_DONE', ch=ch.idx, ok=success, path='peripheral')
             callback(success)
         else:
             # Firmware-triggered path: pulse the shared DMA IRQ.
             if self._irq is not None:
                 print(f'[DMA] CH{ch.idx}: transfer complete @{vtime_ns}ns — IRQ asserted', flush=True)
                 self._irq.pulse()
+                self._tr.emit('CH_DONE', ch=ch.idx, ok=success)
+                self._tr.emit('IRQ_PULSE', ch=ch.idx, irq_idx=self._irq.idx)
                 print(f'[DMA] CH{ch.idx}: IRQ deasserted', flush=True)
             else:
                 print(f'[DMA] CH{ch.idx}: transfer complete (no IRQ wired)', flush=True)
+                self._tr.emit('CH_DONE', ch=ch.idx, ok=success)
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ This project implements:
 - **KX6625 Custom SoC** (`scripts/qemu-fork/hw/arm/kx6625.c`): Cortex-M3 @ 48 MHz, 512 KB FLASH @ `0x00000000`, 128 KB SRAM @ `0x20000000`, NVIC with 16 external IRQs.
 - **Bare-Metal Cortex-M3 Firmware**: NVIC init, IRQ handlers, UART demo, DMA M2M copy demo, DMA peripheral DREQ/DACK demo, CRC-32 test, WDT countdown-reset demo with warm-boot detection.
 - **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server, boots QEMU, exercises all six devices including a WDT-triggered system reset and warm-boot detection, asserts firmware output.
+- **Event Tracer** (`device_model/tracer.py`): Non-blocking JSONL event trace for every device — records virtual time, wall time, and device-specific fields. Written by a background thread so device models never block on I/O.
 
 ## Architecture
 
@@ -270,6 +271,79 @@ remaining = self._clock.remaining_ms(load_ms)
 ```
 
 The clock is correct across QEMU debug pauses: virtual time stops, `update()` stops being called, `is_expired()` stays False.
+
+### `DeviceTracer` — Per-Device Event Trace Handle
+
+`device_model/tracer.py` provides lightweight, non-blocking event tracing for every Python device model. Records are written in **JSONL** format (one JSON object per line) by a background thread, so the device R/W and tick threads never block on file I/O.
+
+```python
+from device_model.tracer import Tracer, NULL_DEVICE_TRACER
+
+# In mmio_device_server.py main():
+tracer = Tracer('build/device_trace.jsonl')   # starts background writer thread
+
+# Each device gets a bound handle:
+self._tr = tracer.context(self.name)          # DeviceTracer
+
+# In on_tick() — update virtual-time context (call first):
+def on_tick(self, vtime_ns: int) -> None:
+    self._tr.tick(vtime_ns)                   # updates _vtime_ns context
+    ...
+
+# Anywhere in the device — emit an event:
+self._tr.emit('EXPIRE', load_ms=100)          # always non-blocking
+self._tr.emit('TX', ch=65, ascii='A')
+```
+
+**JSONL record format** (flat, compact, deterministic field order):
+
+```json
+{"seq":362,"t_wall_ns":1714400362000000000,"t_virt_ns":2007975928,"dev":"DmaController(2ch)","event":"CH_DONE","ch":0,"ok":true}
+{"seq":671,"t_wall_ns":1714400362050000000,"t_virt_ns":0,"dev":"CRC-32","event":"RESULT","crc32":"0xcbf43926"}
+{"seq":1219,"t_wall_ns":1714400362100000000,"t_virt_ns":2346054174,"dev":"wdt","event":"TIMEOUT","timeout_cnt":1}
+```
+
+The first record in every trace file is a `HEADER` sentinel:
+
+```json
+{"seq":0,"t_wall_ns":..."dev":"__tracer__","event":"HEADER","version":"1","pid":12345,"path":"build/device_trace.jsonl"}
+```
+
+**Events emitted per device:**
+
+| Device | Events |
+|--------|--------|
+| `ConsoleUart` | `TX` (ch, ascii), `IRQ_FIRE` (irq_idx), `RESET` |
+| `TimerDevice` | `ARM` (load_ms), `DISARM`, `EXPIRE` (load_ms), `IRQ_ASSERT` (irq_idx), `INTCLR` (irq_idx), `RESET` |
+| `WdtDevice` | `LOAD` (load_ms), `ARM` (load_ms), `DISARM`, `KICK`, `IRQ_PULSE` (irq_idx), `TIMEOUT` (timeout_cnt), `RESET` (reset_reason, timeout_cnt) |
+| `DmaController` | `CH_START` (ch, src, dst, length, mode), `CH_DREQ` (ch, src, dst, length, mode), `CH_DONE` (ch, ok[, path]), `IRQ_PULSE` (ch, irq_idx), `RESET` |
+| `DmaClientDemo` | `START` (src, dst, length), `NACK`, `DONE` (ok), `IRQ_PULSE` (irq_idx), `RESET` |
+| `CRC-32` | `DATA_WRITE` (length), `RESULT` (crc32), `RESET` |
+
+**CLI flags** (passed to `mmio_device_server.py`):
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--trace-file PATH` | `build/device_trace.jsonl` | Output file path |
+| `--no-trace` | off | Disable tracing entirely |
+
+**`NULL_DEVICE_TRACER`** is a module-level singleton where every method is a no-op. When tracing is disabled all devices silently receive `NULL_DEVICE_TRACER` — no conditional checks needed in device code.
+
+**Offline analysis examples:**
+
+```bash
+# Count events by type
+jq -r .event build/device_trace.jsonl | sort | uniq -c | sort -rn
+
+# Show all TIMEOUT events with virtual time
+jq 'select(.event == "TIMEOUT")' build/device_trace.jsonl
+
+# Plot TX byte timing
+jq 'select(.event == "TX") | [.seq, .t_virt_ns, .ascii]' build/device_trace.jsonl
+
+# IRQ latency: time between CH_DONE and IRQ_PULSE for DMA
+jq 'select(.event == "CH_DONE" or .event == "IRQ_PULSE")' build/device_trace.jsonl
+```
 
 ### `DmaRequestInterface` — Abstract DREQ/DACK Protocol
 
@@ -706,6 +780,8 @@ qemu_device/
 │   │                                 #   VirtualClock; DmaRequestInterface
 │   ├── mmio_device_server.py         # MMIOBus + RWServer + IRQServer + TickServer + MemServer
 │   │                                 #   + RstServer + SystemResetManager + main()
+│   ├── tracer.py                     # Non-blocking JSONL event tracer (Tracer, DeviceTracer,
+│   │                                 #   NULL_DEVICE_TRACER; background writer thread)
 │   ├── uart_model.py                 # Console UART (character output + demo IRQ)
 │   ├── dma_controller.py             # DMA controller (multi-channel M2M + DREQ/DACK)
 │   ├── dma_client_demo.py            # DMA client demo peripheral (DREQ/DACK to DMA CH1)
@@ -727,6 +803,7 @@ qemu_device/
 │           └── arm/kx6625.c          # KX6625 custom SoC definition
 └── build/                            # Build artifacts (gitignored)
     ├── firmware.elf / firmware.bin
+    ├── device_trace.jsonl            # Device event trace (JSONL; created at server runtime)
     └── generated/
         └── mmio_devices.h            # Auto-generated C header (make gen / make fw)
 ```
@@ -760,9 +837,10 @@ IRQ pulse pattern: assert then immediately deassert to edge-trigger the NVIC wit
 1. **Define the spec**: add an entry in `spec/devices.yaml` and create `spec/<name>.yaml` with the register map.
 2. **Write the model**: create `device_model/<name>_model.py` subclassing `MMIODevice`. Override `read()`, `write()`, and optionally `on_tick()` for timing behaviour. Use `RegisterBank` (with `RegAccess` policies) for register storage, `IrqLine` for interrupt injection, `VirtualClock` for countdown timing, and `DmaRequestInterface` for bus-master DMA requests. For watchdog-style resets, instantiate a `RstController` and pass a `SystemResetManager.wdt_reset` callback.
 3. **Register on the bus**: add `bus.register(BASE, SIZE, YourDevice(...))` in `mmio_device_server.py`'s `main()`.
-4. **Add transport servers**: create `RWServer` and `IRQServer` instances as needed. Devices that need timing use the existing `TickServer` automatically. Devices that need bus-master DMA get a dedicated `MemServer` instance. Devices that trigger system resets get an `RstServer` instance wired to a `RstController`.
-5. **Extend the QEMU command line**: add a `mmio-sockdev` instance with `chardev`, `irq-chardev`, `addr`, `irq-num`. Add `mem-chardev` for DMA; `tick-chardev` for timer-style ticks; `rst-chardev` for system-reset capability.
-6. Regenerate constants with `make gen`.
+4. **Wire the tracer**: accept `tracer: Optional[Tracer] = None` in `__init__`, assign `self._tr = tracer.context(self.name) if tracer else NULL_DEVICE_TRACER`, call `self._tr.tick(vtime_ns)` at the top of `on_tick()`, and emit events with `self._tr.emit('EVENT_NAME', **fields)`. Pass `tracer=tracer` when constructing the device in `mmio_device_server.py`.
+5. **Add transport servers**: create `RWServer` and `IRQServer` instances as needed. Devices that need timing use the existing `TickServer` automatically. Devices that need bus-master DMA get a dedicated `MemServer` instance. Devices that trigger system resets get an `RstServer` instance wired to a `RstController`.
+6. **Extend the QEMU command line**: add a `mmio-sockdev` instance with `chardev`, `irq-chardev`, `addr`, `irq-num`. Add `mem-chardev` for DMA; `tick-chardev` for timer-style ticks; `rst-chardev` for system-reset capability.
+7. Regenerate constants with `make gen`.
 
 ## Troubleshooting
 

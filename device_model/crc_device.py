@@ -33,8 +33,10 @@ from __future__ import annotations
 
 import struct
 import threading
+from typing import Optional
 
 from device_model.mmio_base import MMIODevice
+from device_model.tracer    import NULL_DEVICE_TRACER, DeviceTracer, Tracer
 
 
 # ---------------------------------------------------------------------------
@@ -75,9 +77,10 @@ class CrcDevice(MMIODevice):
     # CTRL bits
     _CTRL_RESET = 0x01
 
-    def __init__(self) -> None:
+    def __init__(self, tracer: Optional[Tracer] = None) -> None:
         self._lock      = threading.Lock()
         self._acc: int  = self._INIT       # running CRC accumulator
+        self._tr: DeviceTracer = tracer.context(self.name) if tracer else NULL_DEVICE_TRACER
 
     # -- MMIODevice interface -------------------------------------------------
 
@@ -93,6 +96,7 @@ class CrcDevice(MMIODevice):
             if offset == self._REG_RESULT:
                 # Finalised CRC: accumulator ^ 0xFFFFFFFF
                 result = (self._acc ^ 0xFFFFFFFF) & 0xFFFFFFFF
+                self._tr.emit('RESULT', crc32=hex(result))
                 return struct.pack('<I', result)[:size]
             if offset == self._REG_CTRL:
                 return b'\x00' * size
@@ -108,6 +112,7 @@ class CrcDevice(MMIODevice):
                         (self._acc >> 8)
                         ^ self._TABLE[(self._acc ^ byte) & 0xFF]
                     )
+                self._tr.emit('DATA_WRITE', length=size)
                 return
 
             if offset == self._REG_CTRL:
@@ -116,11 +121,13 @@ class CrcDevice(MMIODevice):
                 if val & self._CTRL_RESET:
                     self._acc = self._INIT
                     print('[CRC] accumulator reset to 0xFFFFFFFF')
+                    self._tr.emit('RESET')
                 return
 
     def on_reset(self) -> None:
         with self._lock:
             self._acc = self._INIT
+        self._tr.emit('RESET')
 
     # -- Diagnostic helpers ---------------------------------------------------
 
