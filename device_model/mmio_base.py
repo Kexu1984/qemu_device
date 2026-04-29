@@ -392,6 +392,163 @@ class RstController:
 
 
 # ---------------------------------------------------------------------------
+# UartChannel — TCP server that exposes the UART byte stream to a terminal
+# ---------------------------------------------------------------------------
+
+class UartChannel:
+    """
+    TCP server that forwards the firmware UART character stream to any number
+    of external terminal clients.
+
+    Placing this in ``mmio_base`` keeps it alongside the other TCP transport
+    primitives (``IRQController``, ``MemChannel``, ``RstController``).  The
+    device model calls ``send()``; the channel handles all client multiplexing
+    and disconnection detection transparently.
+
+    Architecture
+    ------------
+    ::
+
+        ConsoleUartDevice.write(TXDATA)
+             │ raw byte (LF → CRLF for terminal)
+             ▼
+        UartChannel.send(data)          — in device-model thread
+             │  (iterates client list under lock; removes dead sockets)
+             ├──► client socket 1  (e.g. nc 127.0.0.1 7904)
+             ├──► client socket 2  (e.g. uart_console.py)
+             └──► ...
+
+        UartChannel._accept_loop()      — daemon thread
+             │  accept new TCP connections on self._port
+             └──► spawns _watch_client(conn) daemon thread per client
+                  (detects clean close / RST from client side)
+
+    The channel is **write-only** from the device side.  Any bytes sent by a
+    connected terminal client are silently discarded (RX support can be added
+    later by wiring _watch_client data back to a UART RX FIFO).
+
+    Usage
+    -----
+    Server side (``mmio_device_server.py``)::
+
+        uart_ch = UartChannel(port=7904)
+        uart_ch.start()           # spawns daemon accept thread; non-blocking
+        uart_dev = ConsoleUartDevice(..., uart_channel=uart_ch)
+
+    Client side::
+
+        nc 127.0.0.1 7904
+        # or:
+        python3 scripts/uart_console.py
+    """
+
+    def __init__(self, port: int, host: str = '127.0.0.1') -> None:
+        self._host    = host
+        self._port    = port
+        self._clients: list[socket.socket] = []
+        self._lock    = threading.Lock()
+        self._server: Optional[socket.socket] = None
+        self._running = False
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """Bind and listen; spawn the accept loop in a daemon thread."""
+        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server.bind((self._host, self._port))
+        self._server.listen(4)
+        self._running = True
+        print(
+            f'[UART] Terminal server on port {self._port}'
+            f' — connect: nc {self._host} {self._port}'
+        )
+        threading.Thread(target=self._accept_loop, daemon=True).start()
+
+    def stop(self) -> None:
+        """Stop accepting new connections and close the server socket."""
+        self._running = False
+        if self._server:
+            self._server.close()
+            self._server = None
+
+    # ── Accept loop ───────────────────────────────────────────────────────
+
+    def _accept_loop(self) -> None:
+        while self._running:
+            try:
+                conn, addr = self._server.accept()
+            except OSError:
+                break
+            with self._lock:
+                self._clients.append(conn)
+            print(f'[UART] Terminal client connected from {addr}')
+            threading.Thread(
+                target=self._watch_client,
+                args=(conn, addr),
+                daemon=True,
+            ).start()
+
+    def _watch_client(self, conn: socket.socket, addr) -> None:
+        """
+        Detect client disconnection.
+
+        Blocks on recv() — returns empty bytes on clean close, raises OSError
+        on TCP RST.  Any data sent by the client (e.g. accidental keystrokes)
+        is discarded here; wire it to a RX FIFO to implement bidirectional UART.
+        """
+        try:
+            while True:
+                data = conn.recv(256)
+                if not data:
+                    break
+                # Future: deliver data to UART RX FIFO
+        except OSError:
+            pass
+        finally:
+            with self._lock:
+                try:
+                    self._clients.remove(conn)
+                except ValueError:
+                    pass
+            try:
+                conn.close()
+            except OSError:
+                pass
+            print(f'[UART] Terminal client disconnected from {addr}')
+
+    # ── Device-model API ──────────────────────────────────────────────────
+
+    def send(self, data: bytes) -> None:
+        """
+        Forward *data* to all connected terminal clients.
+
+        Called from the device-model write thread; must be fast.
+        Clients that have gone away are pruned from the list silently.
+        """
+        if not data:
+            return
+        with self._lock:
+            dead: list[socket.socket] = []
+            for client in self._clients:
+                try:
+                    client.sendall(data)
+                except OSError:
+                    dead.append(client)
+            for c in dead:
+                try:
+                    self._clients.remove(c)
+                except ValueError:
+                    pass
+
+    @property
+    def connected(self) -> bool:
+        """True if at least one terminal client is currently connected."""
+        with self._lock:
+            return bool(self._clients)
+
+
+# ---------------------------------------------------------------------------
 # RegAccess — per-register access-policy flags
 # ---------------------------------------------------------------------------
 

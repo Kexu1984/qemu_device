@@ -22,7 +22,7 @@ from typing import Optional
 # whether this module is imported as a package or run directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from device_model.mmio_base import IRQController, IrqLine, MMIODevice, RegisterBank  # noqa: E402
+from device_model.mmio_base import IRQController, IrqLine, MMIODevice, RegisterBank, UartChannel  # noqa: E402
 
 
 class ConsoleUartDevice(MMIODevice):
@@ -46,15 +46,17 @@ class ConsoleUartDevice(MMIODevice):
         irq_controller: Optional[IRQController] = None,
         irq_idx: int = 0,
         irq_delay: float = 2.0,
+        uart_channel: Optional[UartChannel] = None,
     ) -> None:
         _init = bytearray(self._REGSIZE)
         _init[self._CTRL] = 0x01           # ENABLE=1 by default
-        self._regs      = RegisterBank(self._REGSIZE, bytes(_init))
-        self._irq       = IrqLine(irq_controller, irq_idx)
-        self._irq_delay = irq_delay
-        self._irq_fired = False
-        self._irq_lock  = threading.Lock()
-        self._line_buf  = ''
+        self._regs         = RegisterBank(self._REGSIZE, bytes(_init))
+        self._irq          = IrqLine(irq_controller, irq_idx)
+        self._irq_delay    = irq_delay
+        self._irq_fired    = False
+        self._irq_lock     = threading.Lock()
+        self._line_buf     = ''
+        self._uart_channel = uart_channel
 
         if irq_controller is not None:
             threading.Thread(target=self._irq_task, daemon=True).start()
@@ -73,6 +75,10 @@ class ConsoleUartDevice(MMIODevice):
     def write(self, offset: int, size: int, data: bytes) -> None:
         if offset == self._TXDATA:
             ch = data[0] & 0xFF
+            # ── Terminal channel: forward raw bytes, LF → CRLF ───────────
+            if self._uart_channel is not None:
+                self._uart_channel.send(b'\r\n' if ch == 0x0A else bytes([ch]))
+            # ── Stdout: line-buffer for e2e test compatibility ────────────
             if 32 <= ch <= 126:
                 self._line_buf += chr(ch)
             elif ch == 0x0A:  # newline — flush accumulated line atomically
@@ -90,6 +96,8 @@ class ConsoleUartDevice(MMIODevice):
         if self._line_buf:
             print(self._line_buf, flush=True)
             self._line_buf = ''
+        if self._uart_channel is not None:
+            self._uart_channel.send(b'\r\n\x1b[33m--- [UART RESET] ---\x1b[0m\r\n')
 
     # -- IRQ injection (daemon thread) ------------------------------------
 

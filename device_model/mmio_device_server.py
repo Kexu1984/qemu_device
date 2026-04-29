@@ -50,7 +50,7 @@ from typing import Optional
 # Ensure project root is on sys.path for sibling package imports.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from device_model.mmio_base         import AddressSpace, IRQController, MemChannel, MMIODevice, RstController, recv_exact  # noqa: E402
+from device_model.mmio_base         import AddressSpace, IRQController, MemChannel, MMIODevice, RstController, UartChannel, recv_exact  # noqa: E402
 from device_model.uart_model        import ConsoleUartDevice                      # noqa: E402
 from device_model.timer_model       import TimerDevice                            # noqa: E402
 from device_model.dma_controller    import DmaController                          # noqa: E402
@@ -332,6 +332,8 @@ _WDT_RW_PORT     = 7901
 _WDT_IRQ_PORT    = 7902
 _WDT_RST_PORT    = 7903   # Python → QEMU system-reset channel
 
+_UART_TERM_PORT  = 7904   # Python → external terminal (firmware UART output)
+
 
 # ---------------------------------------------------------------------------
 # Transport: virtual-clock tick channel  (QEMU → Python)
@@ -601,6 +603,8 @@ def main() -> None:
                         help='UART IRQ channel TCP port')
     parser.add_argument('--uart-irq-delay', type=float, default=_UART_IRQ_DELAY,
                         help='Seconds before UART demo IRQ fires')
+    parser.add_argument('--uart-term-port', type=int,   default=_UART_TERM_PORT,
+                        help='UART terminal output TCP port (connect: nc 127.0.0.1 <port>)')
     # Legacy short aliases kept for backward compatibility with e2e_test.sh
     parser.add_argument('--port',      type=int,   default=None,
                         help='Alias for --uart-rw-port')
@@ -614,6 +618,10 @@ def main() -> None:
     uart_rw_port   = args.port      if args.port      is not None else args.uart_rw_port
     uart_irq_port  = args.irq_port  if args.irq_port  is not None else args.uart_irq_port
     uart_irq_delay = args.irq_delay if args.irq_delay is not None else args.uart_irq_delay
+
+    # ── 0. UART terminal channel (optional external terminal connection) ───────
+    uart_channel = UartChannel(port=args.uart_term_port)
+    uart_channel.start()
 
     # ── 1. Per-device IRQ controllers ────────────────────────────────────
     uart_irq_ctrl  = IRQController()
@@ -678,6 +686,7 @@ def main() -> None:
             irq_controller=uart_irq_ctrl,
             irq_idx=0,
             irq_delay=uart_irq_delay,
+            uart_channel=uart_channel,
         ),
     )
     # DmaController IS the DMA MMIO device — no separate DmaDevice needed.
@@ -778,6 +787,7 @@ def main() -> None:
         wdt_rw_server.stop()
         wdt_irq_server.stop()
         rst_server.stop()
+        uart_channel.stop()
 
 
 if __name__ == '__main__':

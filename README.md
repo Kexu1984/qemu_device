@@ -139,6 +139,36 @@ Peripheral path (CH1 / DmaClientDemoDevice):
 
 `device_model/mmio_base.py` provides the shared building blocks used by every Python device model. These helpers eliminate per-device boilerplate and encode common hardware access patterns as reusable, testable units.
 
+### `UartChannel` — Firmware UART Terminal Server
+
+A TCP server that forwards the firmware UART byte stream to external terminal clients. It multiplexes over any number of simultaneously connected clients and handles disconnection transparently.
+
+```
+ConsoleUartDevice.write(TXDATA)
+     │ raw byte (LF → CRLF for terminal)
+     ▼
+UartChannel.send(data)          — called in device R/W thread
+     ├──► client socket 1  (e.g. nc 127.0.0.1 7904)
+     └──► client socket 2  (e.g. python3 scripts/uart_console.py)
+```
+
+`UartChannel` is transport-layer infrastructure (like `IRQController`, `MemChannel`, `RstController`), not a device model. It lives in `mmio_base.py` and is wired by `mmio_device_server.py`:
+
+```python
+uart_channel = UartChannel(port=7904)
+uart_channel.start()    # starts daemon accept thread; non-blocking
+uart_dev = ConsoleUartDevice(..., uart_channel=uart_channel)
+```
+
+| Method | Description |
+|--------|-------------|
+| `start()` | Bind port, start accept-loop daemon thread |
+| `stop()` | Close server socket |
+| `send(data: bytes)` | Broadcast to all connected clients; removes dead connections |
+| `connected` | `True` if at least one client is connected |
+
+The `send()` call is fire-and-forget with non-blocking `sendall` — a slow or disconnected client never blocks the device model thread.
+
 ### `RegisterBank` — Thread-Safe Register Storage
 
 Replaces the raw `bytearray + threading.Lock + manual bounds-check` pattern that every device would otherwise repeat.
@@ -269,16 +299,16 @@ Abstract members: `transfer(src, dst, length, callback, *, src_fixed, dst_fixed)
 
 ### Memory Map
 
-| Region           | Base Address  | Size   | NVIC IRQ | R/W Port | IRQ Port | Tick Port | Mem Port | RST Port |
-|------------------|---------------|--------|----------|----------|----------|-----------|----------|----------|
-| Console UART     | `0x40004000`  | 4 KB   | 0        | 7890     | 7891     | —         | —        | —        |
-| DMA Controller   | `0x40005000`  | 4 KB   | 1        | 7892     | 7893     | —         | 7897     | —        |
-| Timer 0          | `0x40006000`  | 4 KB   | 2        | 7894     | 7895     | 7896      | —        | —        |
-| DMA Client Demo  | `0x40007000`  | 4 KB   | 3        | 7898     | 7899     | —         | —        | —        |
-| CRC-32 Engine    | `0x40008000`  | 4 KB   | —        | 7900     | —        | —         | —        | —        |
-| Watchdog Timer   | `0x40009000`  | 4 KB   | 4        | 7901     | 7902     | —         | —        | 7903     |
-| **FLASH**        | `0x00000000`  | 512 KB | —        | —        | —        | —         | —        | —        |
-| **SRAM**         | `0x20000000`  | 128 KB | —        | —        | —        | —         | —        | —        |
+| Region           | Base Address  | Size   | NVIC IRQ | R/W Port | IRQ Port | Tick Port | Mem Port | RST Port | Term Port |
+|------------------|---------------|--------|----------|----------|----------|-----------|----------|----------|-----------|
+| Console UART     | `0x40004000`  | 4 KB   | 0        | 7890     | 7891     | —         | —        | —        | **7904**  |
+| DMA Controller   | `0x40005000`  | 4 KB   | 1        | 7892     | 7893     | —         | 7897     | —        | —         |
+| Timer 0          | `0x40006000`  | 4 KB   | 2        | 7894     | 7895     | 7896      | —        | —        | —         |
+| DMA Client Demo  | `0x40007000`  | 4 KB   | 3        | 7898     | 7899     | —         | —        | —        | —         |
+| CRC-32 Engine    | `0x40008000`  | 4 KB   | —        | 7900     | —        | —         | —        | —        | —         |
+| Watchdog Timer   | `0x40009000`  | 4 KB   | 4        | 7901     | 7902     | —         | —        | 7903     | —         |
+| **FLASH**        | `0x00000000`  | 512 KB | —        | —        | —        | —         | —        | —        | —         |
+| **SRAM**         | `0x20000000`  | 128 KB | —        | —        | —        | —         | —        | —        | —         |
 
 The tick channel (`:7896`) is shared — a single `TickServer` broadcasts virtual-clock ticks from the timer's `mmio-sockdev` instance to **all** bus devices via `MMIOBus.tick_all()`.
 
@@ -291,6 +321,33 @@ The tick channel (`:7896`) is shared — a single `TickServer` broadcasts virtua
 | 0x08   | CTRL    | R/W    | bit0 = ENABLE                       |
 
 Fires a one-shot demo IRQ ~2 s after the IRQ channel connects. Does not use `on_tick()`. Characters are line-buffered in Python (flushed on `\n`) to prevent interleaving with other device thread output.
+
+#### UART Terminal Channel
+
+Every byte written to `TXDATA` is **tee'd** to a `UartChannel` TCP server running on port **7904** in addition to the Python process `stdout`. This separates clean firmware output from Python device-model debug logs (DMA/IRQ/tick messages).
+
+```
+Firmware write TXDATA
+    ├──► Python stdout (line-buffered, for e2e test capture)
+    └──► UartChannel TCP server :7904
+              ├──► terminal client 1  (nc / uart_console.py)
+              └──► terminal client N  (multiple clients supported)
+```
+
+LF (`0x0A`) is translated to CRLF (`0x0D 0x0A`) on the terminal channel so a standard terminal emulator wraps lines correctly.
+
+**Connecting a terminal:**
+
+```bash
+# Option 1 — included Python script (recommended; handles ANSI escape codes)
+python3 scripts/uart_console.py
+python3 scripts/uart_console.py 127.0.0.1 7904   # explicit host/port
+
+# Option 2 — netcat (no dependencies)
+nc 127.0.0.1 7904
+```
+
+The `uart_console.py` script reconnects at any time while the device server is running. A coloured `--- [UART RESET] ---` banner is sent on every system reset (WDT timeout) so warm-boot events are clearly visible in the terminal.
 
 ### DMA Controller (`dma_controller.py`)
 
