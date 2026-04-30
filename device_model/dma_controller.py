@@ -79,6 +79,7 @@ from device_model.mmio_base import (
     AddressSpace, DmaRequestInterface, IRQController, IrqLine, MMIODevice,
     HCLK_HZ, NS_PER_HCLK, NS_PER_PCLK,
 )
+from device_model.tracer import NULL_DEVICE_TRACER, DeviceTracer, Tracer  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

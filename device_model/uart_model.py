@@ -57,12 +57,14 @@ class ConsoleUartDevice(MMIODevice):
 
     def __init__(
         self,
+        name: str = 'uart0',
         irq_controller: Optional[IRQController] = None,
         irq_idx: int = 0,
         irq_delay: float = 2.0,
         uart_channel: Optional[UartChannel] = None,
         tracer: Optional[Tracer] = None,
     ) -> None:
+        self._name         = name
         _init = bytearray(self._REGSIZE)
         _init[self._CTRL] = 0x01           # ENABLE=1 by default
         self._regs         = RegisterBank(self._REGSIZE, bytes(_init))
@@ -87,7 +89,7 @@ class ConsoleUartDevice(MMIODevice):
 
     @property
     def name(self) -> str:
-        return 'ConsoleUart'
+        return self._name
 
     # -- RX data path ------------------------------------------------------
 

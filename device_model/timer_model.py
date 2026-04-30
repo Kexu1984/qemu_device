@@ -38,7 +38,7 @@ class TimerDevice(MMIODevice):
 
     @property
     def name(self) -> str:
-        return 'timer0'
+        return self._name
 
     # Register offsets
     _LOAD   = 0x00
@@ -58,10 +58,12 @@ class TimerDevice(MMIODevice):
 
     def __init__(
         self,
+        name: str = 'timer0',
         irq_controller: Optional[IRQController] = None,
         irq_idx: int = 0,
         tracer: Optional[Tracer] = None,
     ) -> None:
+        self._name  = name
         self._regs  = RegisterBank(
             self._REGSIZE,
             policies={

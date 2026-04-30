@@ -633,193 +633,26 @@ def main() -> None:
     uart_irq_port  = args.irq_port  if args.irq_port  is not None else args.uart_irq_port
     uart_irq_delay = args.irq_delay if args.irq_delay is not None else args.uart_irq_delay
 
-    # ── 0. UART terminal channel (optional external terminal connection) ───────
-    uart_channel = UartChannel(port=args.uart_term_port)
-    uart_channel.start()
-
-    # ── 0b. Event tracer ─────────────────────────────────────────────────
+    # ── Event tracer ─────────────────────────────────────────────────────
     tracer: Tracer | None = None
     if not args.no_trace:
         tracer = Tracer(args.trace_file)
         print(f'[tracer] recording to {args.trace_file}')
 
-    # ── 1. Per-device IRQ controllers ────────────────────────────────────
-    uart_irq_ctrl  = IRQController()
-    dma_irq_ctrl   = IRQController()
-    timer_irq_ctrl = IRQController()
-    demo_irq_ctrl  = IRQController()
-    wdt_irq_ctrl   = IRQController()
+    # ── SoCTop: KX6625 default topology ──────────────────────────────────
+    # Function-level import avoids the circular-import that would arise from
+    # a top-level import: soc_top imports transport classes from this module,
+    # so this module must not import soc_top at the top level.
+    from device_model.soc_top import kx6625_default  # noqa: PLC0415
 
-    # ── 1b. System-reset controller (WDT → QEMU) ─────────────────────────
-    wdt_rst_ctrl = RstController()
-
-    # ── 2. DMA bus-master memory channel ─────────────────────────────────
-    mem_channel = MemChannel()
-
-    # ── 3. DMA controller — the MMIO-mapped engine ───────────────────────
-    #
-    # DmaController is the single DMA IP on the SoC.  It is registered on
-    # the bus at _DMA_BASE so firmware can read/write its channel registers
-    # directly (M2M transfers).  Peripherals that need DMA obtain a
-    # DmaClientHandle via get_handle() for the DREQ/DACK interface (P2M/M2P).
-    #
-    # AddressSpace routes DMA reads/writes by address:
-    #   - MMIO region [0x40000000, 0x50000000): dispatched directly to the
-    #     Python MMIOBus in-process — no TCP round-trip, no ordering race.
-    #   - All other addresses (SRAM, flash): forwarded to QEMU physical memory
-    #     via MemChannel (cpu_physical_memory_read/write over TCP).
-    #
-    # The bus reference in AddressSpace is live — devices can be registered
-    # on the bus after addr_space is created; transfers happen at runtime when
-    # the bus is already fully populated.
-    #
-    #   CH0 @ _DMA_BASE+0x000 — firmware-programmed (IRQ=dma_irq_ctrl)
-    #   CH1 @ _DMA_BASE+0x020 — DmaClientDemoDevice via DmaClientHandle
-    bus = MMIOBus()
-
-    addr_space = AddressSpace(
-        mem_channel  = mem_channel,
-        mmio_bus     = bus,
-        mmio_regions = [
-            (_UART_BASE,  _UART_SIZE),
-            (_DMA_BASE,   _DMA_SIZE),
-            (_TIMER_BASE, _TIMER_SIZE),
-            (_DEMO_BASE,  _DEMO_SIZE),
-            (_CRC_BASE,   _CRC_SIZE),
-            (_WDT_BASE,   _WDT_SIZE),
-        ],
+    soc = kx6625_default(
+        uart_rw_port   = uart_rw_port,
+        uart_irq_port  = uart_irq_port,
+        uart_irq_delay = uart_irq_delay,
+        uart_term_port = args.uart_term_port,
+        tracer         = tracer,
     )
-
-    dma_ctrl = DmaController(
-        num_channels  = 2,
-        address_space = addr_space,
-        irq_controller= dma_irq_ctrl,
-        irq_idx       = 0,
-        tracer        = tracer,
-    )
-
-    # ── 4. Address bus + device registration ─────────────────────────────
-
-    bus.register(
-        _UART_BASE, _UART_SIZE,
-        ConsoleUartDevice(
-            irq_controller=uart_irq_ctrl,
-            irq_idx=0,
-            irq_delay=uart_irq_delay,
-            uart_channel=uart_channel,
-            tracer=tracer,
-        ),
-    )
-    # DmaController IS the DMA MMIO device — no separate DmaDevice needed.
-    bus.register(_DMA_BASE, _DMA_SIZE, dma_ctrl)
-    bus.register(
-        _TIMER_BASE, _TIMER_SIZE,
-        TimerDevice(irq_controller=timer_irq_ctrl, irq_idx=0, tracer=tracer),
-    )
-    # DmaClientDemoDevice uses DMA CH1 via DmaClientHandle (DREQ/DACK).
-    bus.register(
-        _DEMO_BASE, _DEMO_SIZE,
-        DmaClientDemoDevice(
-            dma_handle=dma_ctrl.get_handle(1),
-            irq_controller=demo_irq_ctrl,
-            irq_idx=0,
-            tracer=tracer,
-        ),
-    )
-    # CRC-32 hardware accelerator — polled only, no IRQ.
-    bus.register(
-        _CRC_BASE, _CRC_SIZE,
-        CrcDevice(tracer=tracer),
-    )
-
-    # WDT — watchdog timer with retention registers + system-reset capability.
-    # SystemResetManager is constructed after the bus is fully populated so that
-    # wdt_reset() can iterate bus._entries.
-    sys_reset_mgr = SystemResetManager(bus=bus, rst_ctrl=wdt_rst_ctrl)
-    bus.register(
-        _WDT_BASE, _WDT_SIZE,
-        WdtDevice(
-            irq_controller=wdt_irq_ctrl,
-            irq_idx=0,
-            reset_callback=sys_reset_mgr.wdt_reset,
-            tracer=tracer,
-        ),
-    )
-
-    # ── 5. Transport servers ──────────────────────────────────────────────
-    uart_irq_server = IRQServer(port=uart_irq_port, irq_controller=uart_irq_ctrl)
-    threading.Thread(target=uart_irq_server.start, daemon=True).start()
-
-    dma_irq_server = IRQServer(port=_DMA_IRQ_PORT, irq_controller=dma_irq_ctrl)
-    threading.Thread(target=dma_irq_server.start, daemon=True).start()
-
-    # DMA bus-master memory channel: Python → QEMU physical memory
-    mem_server = MemServer(port=_DMA_MEM_PORT, mem_channel=mem_channel)
-    threading.Thread(target=mem_server.start, daemon=True).start()
-
-    dma_rw_server = RWServer(port=_DMA_RW_PORT, bus=bus, base_addr=_DMA_BASE)
-    threading.Thread(target=dma_rw_server.start, daemon=True).start()
-
-    # Virtual-clock tick server: broadcasts to ALL registered bus devices.
-    tick_server = TickServer(port=_TIMER_TICK_PORT, tick_fn=bus.tick_all)
-    threading.Thread(target=tick_server.start, daemon=True).start()
-
-    # DES tick server for DMA: fires at exactly arm_vtime + transfer_ns.
-    # tick-period-ms=0 on the QEMU side means this is a one-shot timer armed
-    # only by the DMA write() response (next_event_ns = transfer_ns).
-    dma_tick_server = TickServer(port=_DMA_TICK_PORT, tick_fn=dma_ctrl.on_tick)
-    threading.Thread(target=dma_tick_server.start, daemon=True).start()
-
-    timer_irq_server = IRQServer(port=_TIMER_IRQ_PORT, irq_controller=timer_irq_ctrl)
-    threading.Thread(target=timer_irq_server.start, daemon=True).start()
-
-    timer_rw_server = RWServer(port=_TIMER_RW_PORT, bus=bus, base_addr=_TIMER_BASE)
-    threading.Thread(target=timer_rw_server.start, daemon=True).start()
-
-    # DmaClientDemoDevice transport servers
-    demo_irq_server = IRQServer(port=_DEMO_IRQ_PORT, irq_controller=demo_irq_ctrl)
-    threading.Thread(target=demo_irq_server.start, daemon=True).start()
-
-    demo_rw_server = RWServer(port=_DEMO_RW_PORT, bus=bus, base_addr=_DEMO_BASE)
-    threading.Thread(target=demo_rw_server.start, daemon=True).start()
-
-    crc_rw_server = RWServer(port=_CRC_RW_PORT, bus=bus, base_addr=_CRC_BASE)
-    threading.Thread(target=crc_rw_server.start, daemon=True).start()
-
-    # WDT transport servers: R/W, IRQ, and system-reset channels
-    wdt_irq_server = IRQServer(port=_WDT_IRQ_PORT, irq_controller=wdt_irq_ctrl)
-    threading.Thread(target=wdt_irq_server.start, daemon=True).start()
-
-    rst_server = RstServer(port=_WDT_RST_PORT, rst_controller=wdt_rst_ctrl)
-    threading.Thread(target=rst_server.start, daemon=True).start()
-
-    wdt_rw_server = RWServer(port=_WDT_RW_PORT, bus=bus, base_addr=_WDT_BASE)
-    threading.Thread(target=wdt_rw_server.start, daemon=True).start()
-
-    uart_rw_server = RWServer(port=uart_rw_port, bus=bus, base_addr=_UART_BASE)
-    try:
-        uart_rw_server.start()
-    except KeyboardInterrupt:
-        print('\n[main] Shutting down...')
-    finally:
-        uart_rw_server.stop()
-        dma_rw_server.stop()
-        uart_irq_server.stop()
-        dma_irq_server.stop()
-        mem_server.stop()
-        timer_rw_server.stop()
-        timer_irq_server.stop()
-        tick_server.stop()
-        dma_tick_server.stop()
-        demo_rw_server.stop()
-        demo_irq_server.stop()
-        crc_rw_server.stop()
-        wdt_rw_server.stop()
-        wdt_irq_server.stop()
-        rst_server.stop()
-        uart_channel.stop()
-        if tracer:
-            tracer.close()
+    soc.start()
 
 if __name__ == '__main__':
     main()
