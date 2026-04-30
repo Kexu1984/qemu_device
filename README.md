@@ -651,10 +651,10 @@ python3 device_model/mmio_device_server.py
 
 **Terminal 2** — QEMU:
 ```bash
-bash scripts/run_demo.sh
+bash scripts/run_interactive.sh
 ```
 
-**Terminal 3** — UART output terminal (optional, connect any time):
+**Terminal 3** — UART terminal (type commands at the `#` prompt):
 ```bash
 python3 scripts/uart_console.py
 # or: nc 127.0.0.1 7904
@@ -742,9 +742,8 @@ qemu_device/
 ├── scripts/
 │   ├── build_qemu.sh                 # QEMU configure + ninja build
 │   ├── gen_device_code.py            # Code generator: spec/ → C header + Python consts
-│   ├── run_demo.sh                   # Launch QEMU (expects server already running)
-│   ├── run_interactive.sh            # One-command demo: server + QEMU + xterm UART window
-│   ├── uart_console.py               # UART terminal client (connect to port 7904)
+│   ├── run_interactive.sh            # One-command demo: server + QEMU + UART console
+│   ├── uart_console.py               # Bidirectional UART terminal client (port 7904)
 │   ├── visualize_trace.py            # Generate self-contained HTML trace report from JSONL
 │   ├── e2e_test.sh                   # Automated end-to-end smoke test → trace_report.html
 │   └── qemu-fork/                    # Modified QEMU 8.1.0 source tree (build target)
