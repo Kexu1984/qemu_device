@@ -31,22 +31,22 @@ Defining a custom SoC topology::
     soc = SoCTop(
         uarts=[
             UartCfg('uart0', base_addr=0x40004000, rw_port=7890, irq_port=7891,
-                    irq_idx=0, term_port=7904),
+                    nvic_irq=0, term_port=7904),
             UartCfg('uart1', base_addr=0x4000A000, rw_port=7910, irq_port=7911,
-                    irq_idx=5, term_port=7912),
+                    nvic_irq=5, term_port=7912),
         ],
         timers=[
-            TimerCfg('timer0', base_addr=0x40006000, rw_port=7894, irq_port=7895, irq_idx=2),
-            TimerCfg('timer1', base_addr=0x4000B000, rw_port=7914, irq_port=7915, irq_idx=6),
-            TimerCfg('timer2', base_addr=0x4000C000, rw_port=7918, irq_port=7919, irq_idx=7),
+            TimerCfg('timer0', base_addr=0x40006000, rw_port=7894, irq_port=7895, nvic_irq=2),
+            TimerCfg('timer1', base_addr=0x4000B000, rw_port=7914, irq_port=7915, nvic_irq=6),
+            TimerCfg('timer2', base_addr=0x4000C000, rw_port=7918, irq_port=7919, nvic_irq=7),
         ],
         dma=DmaCfg(base_addr=0x40005000, rw_port=7892, irq_port=7893,
-                   irq_idx=1, mem_port=7897, tick_port=7905),
+                   nvic_irq=1, mem_port=7897, tick_port=7905),
         dma_client_demo=DmaClientDemoCfg(base_addr=0x40007000, rw_port=7898,
-                                         irq_port=7899, irq_idx=3),
+                                         irq_port=7899, nvic_irq=3),
         crc=CrcCfg(base_addr=0x40008000, rw_port=7900),
         wdt=WdtCfg(base_addr=0x40009000, rw_port=7901, irq_port=7902,
-                   irq_idx=4, rst_port=7903),
+                   nvic_irq=4, rst_port=7903)
         tick_port=7896,
     )
     soc.start()
@@ -113,7 +113,10 @@ class UartCfg:
     base_addr  : Physical MMIO base address (must match QEMU addr= property).
     rw_port    : TCP port for the MMIO R/W chardev channel (QEMU → Python).
     irq_port   : TCP port for the IRQ injection channel   (Python → QEMU).
-    irq_idx    : NVIC external IRQ line index (0-based).
+    irq_idx    : NVIC external IRQ line number (maps to QEMU ``irq-num=N``).
+                 Metadata only — used for documentation and QEMU cmdline
+                 generation.  The Python IRQ output index within each
+                 mmio-sockdev is always 0 (each device has one IRQ line).
     term_port  : TCP port for the external terminal server (nc/uart_console.py).
     irq_delay  : Seconds after the IRQ channel connects before the TX-ready IRQ fires.
     size       : MMIO region size in bytes.
@@ -122,7 +125,7 @@ class UartCfg:
     base_addr: int
     rw_port:   int
     irq_port:  int
-    irq_idx:   int
+    nvic_irq:  int
     term_port: int
     irq_delay: float = 2.0
     size:      int   = 0x1000
@@ -141,14 +144,15 @@ class TimerCfg:
     base_addr  : Physical MMIO base address.
     rw_port    : TCP port for the MMIO R/W chardev channel.
     irq_port   : TCP port for the IRQ injection channel.
-    irq_idx    : NVIC external IRQ line index.
+    irq_idx    : NVIC external IRQ line number (maps to QEMU ``irq-num=N``).
+                 The Python IRQ output index is always 0.
     size       : MMIO region size in bytes.
     """
     name:      str
     base_addr: int
     rw_port:   int
     irq_port:  int
-    irq_idx:   int
+    nvic_irq:  int
     size:      int = 0x1000
 
 
@@ -161,7 +165,8 @@ class DmaCfg:
     base_addr    : Physical MMIO base address.
     rw_port      : TCP port for the MMIO R/W chardev channel.
     irq_port     : TCP port for the IRQ injection channel.
-    irq_idx      : NVIC external IRQ line index.
+    irq_idx      : NVIC external IRQ line number (maps to QEMU ``irq-num=N``).
+                   The Python IRQ output index is always 0.
     mem_port     : TCP port for the bus-master memory channel (Python → QEMU RAM).
     tick_port    : TCP port for the DES one-shot tick channel (QEMU → Python).
     num_channels : Number of DMA channels to instantiate.
@@ -170,7 +175,7 @@ class DmaCfg:
     base_addr:    int
     rw_port:      int
     irq_port:     int
-    irq_idx:      int
+    nvic_irq:     int
     mem_port:     int
     tick_port:    int
     num_channels: int = 2
@@ -188,14 +193,15 @@ class DmaClientDemoCfg:
     base_addr   : Physical MMIO base address.
     rw_port     : TCP port for the MMIO R/W chardev channel.
     irq_port    : TCP port for the IRQ injection channel.
-    irq_idx     : NVIC external IRQ line index.
+    irq_idx     : NVIC external IRQ line number (maps to QEMU ``irq-num=N``).
+                  The Python IRQ output index is always 0.
     dma_channel : Which ``DmaController`` channel to use (0-based).
     size        : MMIO region size in bytes.
     """
     base_addr:   int
     rw_port:     int
     irq_port:    int
-    irq_idx:     int
+    nvic_irq:    int
     dma_channel: int = 1
     size:        int = 0x1000
 
@@ -224,14 +230,15 @@ class WdtCfg:
     base_addr : Physical MMIO base address.
     rw_port   : TCP port for the MMIO R/W chardev channel.
     irq_port  : TCP port for the IRQ injection channel.
-    irq_idx   : NVIC external IRQ line index.
+    irq_idx   : NVIC external IRQ line number (maps to QEMU ``irq-num=N``).
+                The Python IRQ output index is always 0.
     rst_port  : TCP port for the system-reset channel (Python → QEMU rst-chardev).
     size      : MMIO region size in bytes.
     """
     base_addr: int
     rw_port:   int
     irq_port:  int
-    irq_idx:   int
+    nvic_irq:  int
     rst_port:  int
     size:      int = 0x1000
 
@@ -317,7 +324,7 @@ class SoCTop:
                 num_channels   = dma.num_channels,
                 address_space  = addr_space,
                 irq_controller = dma_irq_ctrl,
-                irq_idx        = dma.irq_idx,
+                irq_idx        = 0,   # device IRQ output index (always 0)
                 tracer         = tracer,
             )
             bus.register(dma.base_addr, dma.size, dma_ctrl)
@@ -337,7 +344,7 @@ class SoCTop:
             dev = ConsoleUartDevice(
                 name           = u.name,
                 irq_controller = uart_irq_ctrl,
-                irq_idx        = u.irq_idx,
+                irq_idx        = 0,   # device IRQ output index (always 0)
                 irq_delay      = u.irq_delay,
                 uart_channel   = uart_ch,
                 tracer         = tracer,
@@ -354,7 +361,7 @@ class SoCTop:
             dev = TimerDevice(
                 name           = t.name,
                 irq_controller = timer_irq_ctrl,
-                irq_idx        = t.irq_idx,
+                irq_idx        = 0,   # device IRQ output index (always 0)
                 tracer         = tracer,
             )
             bus.register(t.base_addr, t.size, dev)
@@ -370,7 +377,7 @@ class SoCTop:
             dev = DmaClientDemoDevice(
                 dma_handle     = dma_ctrl.get_handle(dma_client_demo.dma_channel),
                 irq_controller = demo_irq_ctrl,
-                irq_idx        = dma_client_demo.irq_idx,
+                irq_idx        = 0,   # device IRQ output index (always 0)
                 tracer         = tracer,
             )
             bus.register(dma_client_demo.base_addr, dma_client_demo.size, dev)
@@ -391,7 +398,7 @@ class SoCTop:
             sys_reset_mgr = SystemResetManager(bus=bus, rst_ctrl=wdt_rst_ctrl)
             wdt_dev = WdtDevice(
                 irq_controller = wdt_irq_ctrl,
-                irq_idx        = wdt.irq_idx,
+                irq_idx        = 0,   # device IRQ output index (always 0)
                 reset_callback = sys_reset_mgr.wdt_reset,
                 tracer         = tracer,
             )
@@ -475,12 +482,12 @@ def kx6625_default(
 
     The topology matches ``spec/devices.yaml`` exactly::
 
-        uart0   @ 0x40004000  rw=7890 irq=7891 irq_idx=0 term=7904
-        dma     @ 0x40005000  rw=7892 irq=7893 irq_idx=1 mem=7897 tick=7905
-        timer0  @ 0x40006000  rw=7894 irq=7895 irq_idx=2  (shared tick=7896)
-        demo    @ 0x40007000  rw=7898 irq=7899 irq_idx=3
+        uart0   @ 0x40004000  rw=7890 irq=7891 nvic_irq=0 term=7904
+        dma     @ 0x40005000  rw=7892 irq=7893 nvic_irq=1 mem=7897 tick=7905
+        timer0  @ 0x40006000  rw=7894 irq=7895 nvic_irq=2  (shared tick=7896)
+        demo    @ 0x40007000  rw=7898 irq=7899 nvic_irq=3
         crc     @ 0x40008000  rw=7900
-        wdt     @ 0x40009000  rw=7901 irq=7902 irq_idx=4 rst=7903
+        wdt     @ 0x40009000  rw=7901 irq=7902 nvic_irq=4 rst=7903
     """
     return SoCTop(
         uarts=[
@@ -489,7 +496,7 @@ def kx6625_default(
                 base_addr = 0x40004000,
                 rw_port   = uart_rw_port,
                 irq_port  = uart_irq_port,
-                irq_idx   = 0,
+                nvic_irq  = 0,
                 term_port = uart_term_port,
                 irq_delay = uart_irq_delay,
             ),
@@ -500,14 +507,14 @@ def kx6625_default(
                 base_addr = 0x40006000,
                 rw_port   = 7894,
                 irq_port  = 7895,
-                irq_idx   = 2,
+                nvic_irq  = 2,
             ),
         ],
         dma=DmaCfg(
             base_addr    = 0x40005000,
             rw_port      = 7892,
             irq_port     = 7893,
-            irq_idx      = 1,
+            nvic_irq     = 1,
             mem_port     = 7897,
             tick_port    = 7905,
         ),
@@ -515,7 +522,7 @@ def kx6625_default(
             base_addr   = 0x40007000,
             rw_port     = 7898,
             irq_port    = 7899,
-            irq_idx     = 3,
+            nvic_irq    = 3,
             dma_channel = 1,
         ),
         crc=CrcCfg(
@@ -526,7 +533,7 @@ def kx6625_default(
             base_addr = 0x40009000,
             rw_port   = 7901,
             irq_port  = 7902,
-            irq_idx   = 4,
+            nvic_irq  = 4,
             rst_port  = 7903,
         ),
         tick_port = 7896,
