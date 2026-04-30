@@ -29,6 +29,14 @@ RW_PORT=7890
 IRQ_PORT=7891
 IRQ_DELAY=2
 
+# Optional: ICOUNT_SHIFT=N enables icount mode (-icount shift=N,sleep=off,align=off)
+ICOUNT_SHIFT="${ICOUNT_SHIFT:-}"
+if [ -n "$ICOUNT_SHIFT" ]; then
+    ICOUNT_OPTS="-icount shift=${ICOUNT_SHIFT},sleep=off,align=off"
+else
+    ICOUNT_OPTS=""
+fi
+
 LOG_DIR="$PROJECT_ROOT/build"
 SERVER_LOG="$LOG_DIR/interactive_server.log"
 QEMU_LOG="$LOG_DIR/interactive_qemu.log"
@@ -182,11 +190,13 @@ ok "Terminal window PID $TERM_PID"
 
 # ── 3. Start QEMU ─────────────────────────────────────────────────────────────
 info "Starting QEMU..."
+[ -n "$ICOUNT_OPTS" ] && info "icount mode: $ICOUNT_OPTS"
 "$QEMU_BIN" \
     -M kx6625 \
     -nographic \
     -monitor none \
     -no-reboot \
+    ${ICOUNT_OPTS:+$ICOUNT_OPTS} \
     -chardev socket,id=uart_rw,host=127.0.0.1,port=7890 \
     -chardev socket,id=uart_irq,host=127.0.0.1,port=7891 \
     -device mmio-sockdev,chardev=uart_rw,irq-chardev=uart_irq,addr=0x40004000,irq-num=0 \

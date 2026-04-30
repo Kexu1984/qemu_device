@@ -25,6 +25,16 @@ IRQ_PORT=7891
 IRQ_DELAY=2       # seconds before server fires first IRQ (UART)
 TIMEOUT=120        # polling iterations (0.5s each = 60s total) — WDT adds one boot cycle
 
+# Optional: set ICOUNT_SHIFT=N to enable icount mode (-icount shift=N,sleep=off,align=off)
+# E.g.  ICOUNT_SHIFT=5  bash scripts/e2e_test.sh
+# shift=5 → 1 instr=32ns vtime, matching HCLK=48MHz CPI=2 (real=41.6ns/instr)
+ICOUNT_SHIFT="${ICOUNT_SHIFT:-}"
+if [ -n "$ICOUNT_SHIFT" ]; then
+    ICOUNT_OPTS="-icount shift=${ICOUNT_SHIFT},sleep=off,align=off"
+else
+    ICOUNT_OPTS=""
+fi
+
 LOG_DIR="$PROJECT_ROOT/build"
 SERVER_LOG="$LOG_DIR/e2e_server.log"
 QEMU_LOG="$LOG_DIR/e2e_qemu.log"
@@ -138,11 +148,13 @@ info "UART terminal client PID: $UART_PID  (log: $UART_LOG)"
 # 3. Start QEMU (background, capture to log)
 # -----------------------------------------------------------------------
 info "Starting QEMU..."
+[ -n "$ICOUNT_OPTS" ] && info "icount mode: $ICOUNT_OPTS"
 "$QEMU_BIN" \
     -M kx6625 \
     -nographic \
     -monitor none \
     -no-reboot \
+    ${ICOUNT_OPTS:+$ICOUNT_OPTS} \
     -chardev socket,id=uart_rw,host=127.0.0.1,port=7890 \
     -chardev socket,id=uart_irq,host=127.0.0.1,port=7891 \
     -device mmio-sockdev,chardev=uart_rw,irq-chardev=uart_irq,addr=0x40004000,irq-num=0 \
@@ -286,4 +298,29 @@ if [ "$RESULT" -eq 0 ]; then
 else
     fail "End-to-end IRQ test FAILED"
 fi
+
+# -----------------------------------------------------------------------
+# 6. Generate HTML trace report
+# -----------------------------------------------------------------------
+TRACE_FILE="$LOG_DIR/device_trace.jsonl"
+TRACE_HTML="$LOG_DIR/trace_report.html"
+VISUALIZE="$SCRIPT_DIR/visualize_trace.py"
+
+echo ""
+info "Generating HTML trace report..."
+if [ ! -f "$TRACE_FILE" ]; then
+    info "No trace file found at $TRACE_FILE — skipping report."
+elif [ ! -f "$VISUALIZE" ]; then
+    info "visualize_trace.py not found — skipping report."
+else
+    ICOUNT_LABEL=""
+    [ -n "${ICOUNT_SHIFT:-}" ] && ICOUNT_LABEL=" (icount shift=${ICOUNT_SHIFT})"
+    python3 "$VISUALIZE" \
+        "$TRACE_FILE" \
+        -o "$TRACE_HTML" \
+        --title "KX6625 Device Trace${ICOUNT_LABEL}" \
+    && pass "Trace report: $TRACE_HTML" \
+    || info "Trace report generation failed (non-fatal)."
+fi
+
 exit $RESULT
