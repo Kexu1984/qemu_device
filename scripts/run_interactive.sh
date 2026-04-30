@@ -108,10 +108,10 @@ _open_gnome() {
 }
 
 _open_inline() {
-    warn "No graphical terminal found — running uart_console.py inline."
-    warn "Press Ctrl-C to stop the simulation."
-    python3 "$CONSOLE_SCRIPT" 127.0.0.1 "$UART_TERM_PORT" &
-    TERM_PID=$!
+    warn "No graphical terminal found — running uart_console.py in this terminal."
+    warn "Press Ctrl-C or Ctrl-] to disconnect and stop the simulation."
+    INLINE_MODE=1
+    TERM_PID=0   # no background PID; foreground run happens at end of script
 }
 
 if   command -v xterm          &>/dev/null; then TERM_OPEN=_open_xterm
@@ -126,13 +126,14 @@ fi
 QEMU_PID=""
 SERVER_PID=""
 TERM_PID=""
+INLINE_MODE=0
 
 cleanup() {
     echo ""
     info "Shutting down simulation..."
-    [[ -n "${TERM_PID:-}"   ]] && kill "$TERM_PID"   2>/dev/null || true
-    [[ -n "${QEMU_PID:-}"   ]] && kill "$QEMU_PID"   2>/dev/null || true
-    [[ -n "${SERVER_PID:-}" ]] && kill "$SERVER_PID" 2>/dev/null || true
+    [[ "${TERM_PID:-0}" -gt 0 ]] && kill "$TERM_PID"   2>/dev/null || true
+    [[ -n "${QEMU_PID:-}"      ]] && kill "$QEMU_PID"   2>/dev/null || true
+    [[ -n "${SERVER_PID:-}"    ]] && kill "$SERVER_PID" 2>/dev/null || true
     wait 2>/dev/null || true
     ok "All processes stopped."
 }
@@ -232,9 +233,16 @@ echo ""
 info "Close the UART terminal window to stop the simulation."
 echo ""
 
-# ── 4. Wait for the terminal window to be closed ──────────────────────────────
-# This is the main blocking wait.  When the user closes xterm, TERM_PID exits
-# and this wait returns, triggering the cleanup trap.
-wait "$TERM_PID" 2>/dev/null || true
-TERM_PID=""   # already gone; don't kill again in cleanup
-info "Terminal window closed — stopping simulation."
+# ── 4. Wait for the terminal window to be closed (or run inline) ─────────────
+if [[ "$INLINE_MODE" -eq 1 ]]; then
+    # Foreground: uart_console.py takes over this terminal.
+    # Ctrl-C or Ctrl-] exits it, then cleanup trap fires.
+    python3 "$CONSOLE_SCRIPT" 127.0.0.1 "$UART_TERM_PORT" || true
+    TERM_PID=0
+    info "Console session ended — stopping simulation."
+else
+    # GUI: block until the user closes the terminal window.
+    wait "$TERM_PID" 2>/dev/null || true
+    TERM_PID=""   # already gone; don't kill again in cleanup
+    info "Terminal window closed — stopping simulation."
+fi
