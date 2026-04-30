@@ -19,8 +19,14 @@ MEMORY
     RAM   (rwx) : ORIGIN = 0x20000000, LENGTH = 128K
 }
 
-/* Initial Main Stack Pointer — top of RAM */
-_stack_top = ORIGIN(RAM) + LENGTH(RAM);
+/*
+ * Stack layout (top of 128 KB SRAM, both stacks grow downward):
+ *   0x20020000 <- _cpu1_stack_top  CPU1 stack (4 KB, grows down to 0x2001F000)
+ *   0x2001F000 <- _stack_top       CPU0 stack (grows down)
+ *   0x2001E000                     IPC area start (fixed in ipc.h)
+ */
+_stack_top      = ORIGIN(RAM) + LENGTH(RAM) - 4K;   /* 0x2001F000 — CPU0 initial MSP */
+_cpu1_stack_top = ORIGIN(RAM) + LENGTH(RAM);         /* 0x20020000 — CPU1 switches here */
 
 SECTIONS
 {

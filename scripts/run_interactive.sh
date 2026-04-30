@@ -194,6 +194,7 @@ info "Starting QEMU..."
 [ -n "$ICOUNT_OPTS" ] && info "icount mode: $ICOUNT_OPTS"
 "$QEMU_BIN" \
     -M kx6625 \
+    -smp 2 \
     -nographic \
     -monitor none \
     -no-reboot \

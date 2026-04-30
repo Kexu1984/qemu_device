@@ -220,7 +220,7 @@ class DmaController(MMIODevice):
 
     # -- MMIODevice interface (firmware register access) ------------------
 
-    def read(self, offset: int, size: int) -> bytes:
+    def read(self, offset: int, size: int, master_id: int = 0) -> bytes:
         end = offset + size
         if end <= self._regsize:
             ch_idx = offset // _CH_STRIDE
@@ -228,7 +228,7 @@ class DmaController(MMIODevice):
                 return bytes(self._regs[offset:end])
         return b'\x00' * size
 
-    def write(self, offset: int, size: int, data: bytes) -> int:
+    def write(self, offset: int, size: int, data: bytes, master_id: int = 0) -> int:
         end = offset + size
         if end > self._regsize:
             return 0

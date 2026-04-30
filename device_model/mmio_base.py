@@ -75,10 +75,10 @@ class MMIODevice(ABC):
         """Human-readable device name (used in log messages)."""
 
     @abstractmethod
-    def read(self, offset: int, size: int) -> bytes:
+    def read(self, offset: int, size: int, master_id: int = 0) -> bytes:
         """Return ``size`` bytes of register data at ``offset``."""
 
-    def write(self, offset: int, size: int, data: bytes) -> int:
+    def write(self, offset: int, size: int, data: bytes, master_id: int = 0) -> int:
         """
         Write ``data`` to the register at ``offset``.
 

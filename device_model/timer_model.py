@@ -83,7 +83,7 @@ class TimerDevice(MMIODevice):
     # MMIODevice interface                                                 #
     # ------------------------------------------------------------------ #
 
-    def read(self, offset: int, size: int) -> bytes:
+    def read(self, offset: int, size: int, master_id: int = 0) -> bytes:
         if offset == self._VALUE:
             # VALUE is computed from the virtual clock, not from stored bytes.
             load_ms = self._regs.get32(self._LOAD)
@@ -92,7 +92,7 @@ class TimerDevice(MMIODevice):
         # INTCLR → WRITE_ONLY policy returns 0; STATUS → READ_ONLY returns stored.
         return self._regs.read(offset, size)
 
-    def write(self, offset: int, size: int, data: bytes) -> int:
+    def write(self, offset: int, size: int, data: bytes, master_id: int = 0) -> int:
         # STATUS (READ_ONLY) and VALUE (READ_ONLY): policy silently drops writes.
         # INTCLR (WRITE_ONLY): policy stores the value, but we intercept below
         # to trigger the side effect (clear STATUS.INT_PENDING, deassert IRQ).

@@ -10,7 +10,7 @@ LDFLAGS = -T linker.ld
 
 BUILD_DIR  = ../build
 GEN_HEADER = $(BUILD_DIR)/generated/mmio_devices.h
-SOURCES    = start.S main.c
+SOURCES    = start.S main.c cpu1_main.c
 OBJECTS    = $(SOURCES:%.c=$(BUILD_DIR)/%.o)
 OBJECTS   := $(OBJECTS:%.S=$(BUILD_DIR)/%.o)
 

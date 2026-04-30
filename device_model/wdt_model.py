@@ -96,7 +96,7 @@ class WdtDevice(MMIODevice):
 
     # ── MMIODevice interface ──────────────────────────────────────────────
 
-    def read(self, offset: int, size: int) -> bytes:
+    def read(self, offset: int, size: int, master_id: int = 0) -> bytes:
         with self._lock:
             val = self._read_locked(offset, size)
         return val.to_bytes(size, 'little')
@@ -116,7 +116,7 @@ class WdtDevice(MMIODevice):
             return self._timeout_cnt
         return 0
 
-    def write(self, offset: int, size: int, data: bytes) -> None:
+    def write(self, offset: int, size: int, data: bytes, master_id: int = 0) -> None:
         value = int.from_bytes(data[:size], 'little')
         with self._lock:
             if offset == self._LOAD:

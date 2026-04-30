@@ -151,6 +151,7 @@ info "Starting QEMU..."
 [ -n "$ICOUNT_OPTS" ] && info "icount mode: $ICOUNT_OPTS"
 "$QEMU_BIN" \
     -M kx6625 \
+    -smp 2 \
     -nographic \
     -monitor none \
     -no-reboot \
@@ -204,6 +205,7 @@ EXPECTED=(
     "DMA-CRC test"
     "DMA-CRC] Result 0xCBF43926 PASSED"
     "All tests done"
+    "Dual-CPU IPC PASS"
     "Power-on reset (RESET_REASON=POR)"
     "Kick 1"
     "Kick 2"

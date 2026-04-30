@@ -88,7 +88,7 @@ class CrcDevice(MMIODevice):
     def name(self) -> str:
         return "CRC-32"
 
-    def read(self, offset: int, size: int) -> bytes:
+    def read(self, offset: int, size: int, master_id: int = 0) -> bytes:
         with self._lock:
             if offset == self._REG_DATA:
                 # Raw accumulator (before final XOR)
@@ -102,7 +102,7 @@ class CrcDevice(MMIODevice):
                 return b'\x00' * size
         return b'\x00' * size
 
-    def write(self, offset: int, size: int, data: bytes) -> None:
+    def write(self, offset: int, size: int, data: bytes, master_id: int = 0) -> None:
         with self._lock:
             if offset == self._REG_DATA:
                 # Feed every byte in the payload through the CRC engine.

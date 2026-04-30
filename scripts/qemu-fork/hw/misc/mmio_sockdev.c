@@ -5,9 +5,10 @@
  * Copyright (c) 2024
  *
  * R/W Protocol (main chardev, QEMU -> Python):
- * - Read:  'R' (1B) | addr(4B LE) | size(1B) -> Python returns data(sizeB)
- * - Write: 'W' (1B) | addr(4B LE) | size(1B) | data(sizeB)
+ * - Read:  'R' (1B) | master_id(1B) | addr(4B LE) | size(1B) -> Python returns data(sizeB)
+ * - Write: 'W' (1B) | master_id(1B) | addr(4B LE) | size(1B) | data(sizeB)
  *          -> Python returns next_event_ns(8B LE)
+ * master_id: cpu_index of the CPU that triggered the MMIO access (0=CPU0, 1=CPU1, ...)
  *   next_event_ns == 0: no scheduled event (e.g. a simple config write)
  *   next_event_ns  > 0: QEMU reschedules this device's tick timer to fire
  *                       at now + next_event_ns (Discrete Event Simulation)
@@ -61,6 +62,7 @@
 #include "qemu/timer.h"
 #include "exec/cpu-common.h"    /* cpu_physical_memory_write/read */
 #include "sysemu/runstate.h"    /* qemu_system_reset_request / ShutdownCause */
+#include "hw/core/cpu.h"        /* current_cpu, CPUState */
 
 #define TYPE_MMIO_SOCKDEV "mmio-sockdev"
 OBJECT_DECLARE_SIMPLE_TYPE(MMIOSockDevState, MMIO_SOCKDEV)
@@ -135,7 +137,8 @@ typedef struct MMIOSockDevState {
 static uint64_t mmio_sockdev_read(void *opaque, hwaddr offset, unsigned size)
 {
     MMIOSockDevState *s = MMIO_SOCKDEV(opaque);
-    uint8_t req[6] = { 'R' };  /* 'R' + addr(4B) + size(1B) */
+    /* 'R'(1B) | master_id(1B) | addr(4B LE) | size(1B) = 7 bytes */
+    uint8_t req[7];
     uint64_t value = 0;
     uint8_t buf[8] = {0};
     int ret;
@@ -143,8 +146,10 @@ static uint64_t mmio_sockdev_read(void *opaque, hwaddr offset, unsigned size)
     qemu_mutex_lock(&s->lock);
 
     /* Build request packet */
-    stl_le_p(req + 1, (uint32_t)offset);
-    req[5] = (uint8_t)size;
+    req[0] = 'R';
+    req[1] = current_cpu ? (uint8_t)current_cpu->cpu_index : 0;
+    stl_le_p(req + 2, (uint32_t)offset);
+    req[6] = (uint8_t)size;
 
     /* Send request */
     ret = qemu_chr_fe_write_all(&s->chr, req, sizeof(req));
@@ -184,27 +189,29 @@ unlock:
 static void mmio_sockdev_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
 {
     MMIOSockDevState *s = MMIO_SOCKDEV(opaque);
-    uint8_t req[14];  /* 'W' + addr(4B) + size(1B) + data(8B max) */
-    int packet_size = 6 + size;
+    /* 'W'(1B) | master_id(1B) | addr(4B LE) | size(1B) | data(8B max) = 15 bytes max */
+    uint8_t req[15];
+    int packet_size = 7 + size;
     int ret;
 
     qemu_mutex_lock(&s->lock);
 
     /* Build request packet */
     req[0] = 'W';
-    stl_le_p(req + 1, (uint32_t)offset);
-    req[5] = (uint8_t)size;
+    req[1] = current_cpu ? (uint8_t)current_cpu->cpu_index : 0;
+    stl_le_p(req + 2, (uint32_t)offset);
+    req[6] = (uint8_t)size;
 
     /* Add data in little-endian format */
     switch (size) {
     case 1:
-        req[6] = (uint8_t)value;
+        req[7] = (uint8_t)value;
         break;
     case 2:
-        stw_le_p(req + 6, (uint16_t)value);
+        stw_le_p(req + 7, (uint16_t)value);
         break;
     case 4:
-        stl_le_p(req + 6, (uint32_t)value);
+        stl_le_p(req + 7, (uint32_t)value);
         break;
     default:
         error_report("mmio-sockdev: invalid write size %u", size);

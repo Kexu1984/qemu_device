@@ -18,6 +18,7 @@
 
 #include <stdint.h>
 #include "mmio_devices.h"   /* auto-generated from spec/devices.yaml */
+#include "ipc.h"             /* IPC + SYSCTRL for dual-CPU demo */
 
 /* -----------------------------------------------------------------------
  * Convenience aliases — map logical names to generated symbolic names.
@@ -328,6 +329,36 @@ static void test_crc(void)
     send_string("[FW] All tests done.\n");
 }
 
+/* Test 6: Dual-CPU IPC — CPU0 posts a request; CPU1 processes it */
+static void test_dual_cpu(void)
+{
+    const uint32_t arg    = 0xDEADBEEFU;
+    const uint32_t expect = arg ^ 0xCAFEBABEU;   /* = 0x14537451 */
+
+    send_string("[IPC] Dual-CPU IPC test: CPU0 -> CPU1 XOR 0xDEADBEEF ^ 0xCAFEBABE\n");
+
+    /* Ensure args are visible before posting the PENDING flag. */
+    IPC_ARG0 = arg;
+    IPC_REQ  = IPC_REQ_ECHO_XOR;
+    __asm__ volatile ("dsb" ::: "memory");
+    IPC_STATUS = IPC_STATUS_PENDING;  /* CPU1 will see this and start */
+
+    /* Spin until CPU1 writes DONE.
+     * ISB forces a TCG TB exit every iteration so the load is fresh. */
+    while (IPC_STATUS != IPC_STATUS_DONE) {
+        __asm__ volatile ("isb" ::: "memory");
+    }
+
+    uint32_t resp = IPC_RESP;
+    IPC_STATUS    = IPC_STATUS_IDLE;  /* reset for next round */
+
+    if (resp == expect) {
+        send_string("[IPC] Dual-CPU IPC PASS: CPU1 responded correctly\n");
+    } else {
+        send_string("[IPC] Dual-CPU IPC FAIL: unexpected response\n");
+    }
+}
+
 /* Test 5: Watchdog Timer (handles warm-boot detection internally) */
 static void test_wdt(void)
 {
@@ -376,6 +407,10 @@ void main(void)
     /* Enable IRQs globally */
     __asm__ volatile ("cpsie i" ::: "memory");
 
+    /* Release CPU1 from reset — it will start polling IPC immediately */
+    SYSCTRL_CPU1RST = 1U;
+    send_string("[FW] CPU1 released from reset.\n");
+
     /* WDT warm-boot fast-path: if we came back from WDT reset, run test 5
      * immediately to print the warm-boot message, then show the menu. */
     if (mmio_read32(WDT_RESET_REASON_REG) == WDT_REASON_WDT) {
@@ -399,6 +434,7 @@ void main(void)
         send_string(" 3) DMA client\n");
         send_string(" 4) CRC-32\n");
         send_string(" 5) WDT reset\n");
+        send_string(" 6) Dual-CPU IPC\n");
         send_string(" a) All tests\n");
         send_string("# ");
 
@@ -416,16 +452,19 @@ void main(void)
         } else if (cmd == '5') {
             test_wdt();
             /* test_wdt() with POR path resets QEMU — never returns */
+        } else if (cmd == '6') {
+            test_dual_cpu();
         } else if (cmd == 'a') {
             irq_count = 0;
             test_uart_irq();
             test_dma_m2m();
             test_dma_client();
             test_crc();
+            test_dual_cpu();
             test_wdt();
             /* If WDT path causes reset, we return here on warm boot */
         } else {
-            send_string("[FW] Unknown command. Enter 1-5 or 'a'.\n");
+            send_string("[FW] Unknown command. Enter 1-6 or 'a'.\n");
         }
     }
 }

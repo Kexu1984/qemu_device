@@ -108,7 +108,7 @@ class ConsoleUartDevice(MMIODevice):
 
     # -- MMIODevice interface ----------------------------------------------
 
-    def read(self, offset: int, size: int) -> bytes:
+    def read(self, offset: int, size: int, master_id: int = 0) -> bytes:
         if offset == self._STATUS:
             with self._rx_lock:
                 rx_ready = 1 if self._rx_fifo else 0
@@ -120,7 +120,7 @@ class ConsoleUartDevice(MMIODevice):
             return byte.to_bytes(size, 'little')
         return self._regs.read(offset, size)
 
-    def write(self, offset: int, size: int, data: bytes) -> int:
+    def write(self, offset: int, size: int, data: bytes, master_id: int = 0) -> int:
         if offset == self._TXDATA:
             ch = data[0] & 0xFF
             # ── Terminal channel: forward raw bytes, LF → CRLF ───────────

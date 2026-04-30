@@ -28,9 +28,8 @@ Adding a new device
 3. Add a matching ``-chardev``/``-device`` pair to the QEMU command line.
 
 R/W Protocol  (QEMU → Python, per mmio-sockdev instance)
-  Read:   'R'(1B) | offset(4B LE) | size(1B)  →  data(sizeB LE)
-  Write:  'W'(1B) | offset(4B LE) | size(1B) | data(sizeB LE)
-
+  Read:   'R'(1B) | master_id(1B) | offset(4B LE) | size(1B)  →  data(sizeB LE)
+  Write:  'W'(1B) | master_id(1B) | offset(4B LE) | size(1B) | data(sizeB LE)
 IRQ Protocol  (Python → QEMU, shared irq-chardev)
   'I'(1B) | irq_idx(1B) | level(1B)
   irq_idx: index of the IRQ output line on the mmio-sockdev (0-based)
@@ -103,19 +102,19 @@ class MMIOBus:
                 return device, addr - base
         return None, 0
 
-    def read(self, addr: int, size: int) -> bytes:
+    def read(self, addr: int, size: int, master_id: int = 0) -> bytes:
         device, offset = self._find(addr)
         if device is None:
             print(f'[BUS] unmapped read  0x{addr:08x} size={size}', file=sys.stderr)
             return b'\x00' * size
-        return device.read(offset, size)
+        return device.read(offset, size, master_id)
 
-    def write(self, addr: int, size: int, data: bytes) -> int:
+    def write(self, addr: int, size: int, data: bytes, master_id: int = 0) -> int:
         device, offset = self._find(addr)
         if device is None:
             print(f'[BUS] unmapped write 0x{addr:08x} size={size}', file=sys.stderr)
             return 0
-        result = device.write(offset, size, data)
+        result = device.write(offset, size, data, master_id)
         # Device may return int (DES next_event_ns) or None (legacy devices).
         return result if isinstance(result, int) else 0
 
@@ -173,18 +172,20 @@ class RWServer:
                 op = op_byte[0]
 
                 if op == ord('R'):
-                    hdr    = recv_exact(conn, 5)       # offset(4B LE) + size(1B)
-                    offset = struct.unpack('<I', hdr[:4])[0]
-                    size   = hdr[4]
-                    data   = self.bus.read(self.base_addr + offset, size)
+                    hdr       = recv_exact(conn, 6)    # master_id(1B) + offset(4B LE) + size(1B)
+                    master_id = hdr[0]
+                    offset    = struct.unpack('<I', hdr[1:5])[0]
+                    size      = hdr[5]
+                    data      = self.bus.read(self.base_addr + offset, size, master_id)
                     conn.sendall(data)
 
                 elif op == ord('W'):
-                    hdr     = recv_exact(conn, 5)      # offset(4B LE) + size(1B)
-                    offset  = struct.unpack('<I', hdr[:4])[0]
-                    size    = hdr[4]
-                    payload = recv_exact(conn, size)
-                    next_event_ns = self.bus.write(self.base_addr + offset, size, payload)
+                    hdr           = recv_exact(conn, 6)    # master_id(1B) + offset(4B LE) + size(1B)
+                    master_id     = hdr[0]
+                    offset        = struct.unpack('<I', hdr[1:5])[0]
+                    size          = hdr[5]
+                    payload       = recv_exact(conn, size)
+                    next_event_ns = self.bus.write(self.base_addr + offset, size, payload, master_id)
                     # DES protocol: always send 8-byte little-endian response.
                     # QEMU reads this and schedules a precise tick if > 0.
                     conn.sendall(struct.pack('<Q', next_event_ns))

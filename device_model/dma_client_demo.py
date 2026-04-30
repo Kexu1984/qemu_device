@@ -89,10 +89,10 @@ class DmaClientDemoDevice(MMIODevice):
 
     # -- MMIODevice interface ---------------------------------------------
 
-    def read(self, offset: int, size: int) -> bytes:
+    def read(self, offset: int, size: int, master_id: int = 0) -> bytes:
         return self._regs.read(offset, size)
 
-    def write(self, offset: int, size: int, data: bytes) -> None:
+    def write(self, offset: int, size: int, data: bytes, master_id: int = 0) -> None:
         self._regs.write(offset, size, data)
         if offset <= self._CTRL < offset + size:
             if self._regs.get32(self._CTRL) & self._CTRL_START:
