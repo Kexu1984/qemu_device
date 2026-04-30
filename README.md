@@ -9,6 +9,7 @@ Time in this simulator is **chip virtual time**, not wall-clock time. QEMU is ru
 This project implements:
 - **Custom QEMU Device** (`mmio-sockdev`): Generic SysBus proxy — 4 KB MMIO, IRQ line, optional virtual-clock tick channel, optional bus-master DMA memory channel, optional system-reset channel (`rst-chardev`). One instance per device on the QEMU command line.
 - **Python Device Server** (`device_model/mmio_device_server.py`): Transport + address dispatcher (`MMIOBus`). Each peripheral is a `MMIODevice` subclass with `read()`, `write()`, and an optional `on_tick()` override.
+- **SoC Topology** (`device_model/soc_top.py`): Typed config dataclasses (`UartCfg`, `TimerCfg`, `DmaCfg`, …) and `SoCTop` — the top-level wiring class. `SoCTop` instantiates any number of each device type, assigns each its own `IRQController` / transport servers, and exposes `start()` / `stop()`. `kx6625_default()` returns the canonical KX6625 device map.
 - **Six modelled peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT). See [`spec/README.md`](spec/README.md) for register maps.
 - **KX6625 Custom SoC** (`scripts/qemu-fork/hw/arm/kx6625.c`): Cortex-M3 @ 48 MHz, 512 KB FLASH @ `0x00000000`, 128 KB SRAM @ `0x20000000`, NVIC with 16 external IRQs.
 - **Bare-Metal Cortex-M3 Firmware**: NVIC init, IRQ handlers, UART demo, DMA M2M copy demo, DMA peripheral DREQ/DACK demo, CRC-32 test, WDT countdown-reset demo with warm-boot detection.
@@ -220,7 +221,7 @@ UartChannel.send(data)          — called in device R/W thread
      └──► client socket 2  (e.g. python3 scripts/uart_console.py)
 ```
 
-`UartChannel` is transport-layer infrastructure (like `IRQController`, `MemChannel`, `RstController`), not a device model. It lives in `mmio_base.py` and is wired by `mmio_device_server.py`:
+`UartChannel` is transport-layer infrastructure (like `IRQController`, `MemChannel`, `RstController`), not a device model. It lives in `mmio_base.py` and is wired by `SoCTop` (via `UartCfg.term_port`). You can also wire it manually:
 
 ```python
 uart_channel = UartChannel(port=7904)
@@ -729,6 +730,9 @@ qemu_device/
 │   │                                 #   VirtualClock; DmaRequestInterface
 │   ├── mmio_device_server.py         # MMIOBus + RWServer + IRQServer + TickServer + MemServer
 │   │                                 #   + RstServer + SystemResetManager + main()
+│   ├── soc_top.py                    # SoCTop: typed per-device configs (UartCfg, TimerCfg, …)
+│   │                                 #   + wiring (bus, IRQControllers, transport servers)
+│   │                                 #   + kx6625_default() factory; supports multi-instance
 │   ├── tracer.py                     # Non-blocking JSONL event tracer (Tracer, DeviceTracer,
 │   │                                 #   NULL_DEVICE_TRACER; background writer thread)
 │   ├── uart_model.py                 # Console UART (character output + demo IRQ)
@@ -786,9 +790,9 @@ IRQ pulse pattern: assert then immediately deassert to edge-trigger the NVIC wit
 
 1. **Define the spec**: add an entry in `spec/devices.yaml` and create `spec/<name>.yaml` with the register map.
 2. **Write the model**: create `device_model/<name>_model.py` subclassing `MMIODevice`. Override `read()`, `write()`, and optionally `on_tick()` for timing behaviour. Use `RegisterBank` (with `RegAccess` policies) for register storage, `IrqLine` for interrupt injection, `VirtualClock` for countdown timing, and `DmaRequestInterface` for bus-master DMA requests. For watchdog-style resets, instantiate a `RstController` and pass a `SystemResetManager.wdt_reset` callback.
-3. **Register on the bus**: add `bus.register(BASE, SIZE, YourDevice(...))` in `mmio_device_server.py`'s `main()`.
-4. **Wire the tracer**: accept `tracer: Optional[Tracer] = None` in `__init__`, assign `self._tr = tracer.context(self.name) if tracer else NULL_DEVICE_TRACER`, call `self._tr.tick(vtime_ns)` at the top of `on_tick()`, and emit events with `self._tr.emit('EVENT_NAME', **fields)`. Pass `tracer=tracer` when constructing the device in `mmio_device_server.py`.
-5. **Add transport servers**: create `RWServer` and `IRQServer` instances as needed. Devices that need timing use the existing `TickServer` automatically. Devices that need bus-master DMA get a dedicated `MemServer` instance. Devices that trigger system resets get an `RstServer` instance wired to a `RstController`.
+3. **Register via SoCTop**: add a new config dataclass (subclass one of the existing ones, or extend `SoCTop.__init__`) and add a `bus.register(...)` call. For simple polled devices (no IRQ, no tick), you can also just add a `RWServer` + `bus.register` pair directly in `mmio_device_server.py`'s `main()`.
+4. **Wire the tracer**: accept `tracer: Optional[Tracer] = None` in `__init__`, assign `self._tr = tracer.context(self.name) if tracer else NULL_DEVICE_TRACER`, call `self._tr.tick(vtime_ns)` at the top of `on_tick()`, and emit events with `self._tr.emit('EVENT_NAME', **fields)`. Pass `tracer=tracer` when constructing the device.
+5. **Add transport servers**: `SoCTop` handles this automatically for devices added to its config list. For manual wiring, create `RWServer` and `IRQServer` instances as needed. Devices that need timing use the existing `TickServer` automatically. Devices that need bus-master DMA get a dedicated `MemServer` instance. Devices that trigger system resets get an `RstServer` instance wired to a `RstController`.
 6. **Extend the QEMU command line**: add a `mmio-sockdev` instance with `chardev`, `irq-chardev`, `addr`, `irq-num`. Add `mem-chardev` for DMA; `tick-chardev` for timer-style ticks; `rst-chardev` for system-reset capability.
 7. Regenerate constants with `make gen`.
 
