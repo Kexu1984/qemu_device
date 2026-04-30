@@ -90,19 +90,23 @@ class TimerDevice(MMIODevice):
         # INTCLR → WRITE_ONLY policy returns 0; STATUS → READ_ONLY returns stored.
         return self._regs.read(offset, size)
 
-    def write(self, offset: int, size: int, data: bytes) -> None:
+    def write(self, offset: int, size: int, data: bytes) -> int:
         # STATUS (READ_ONLY) and VALUE (READ_ONLY): policy silently drops writes.
         # INTCLR (WRITE_ONLY): policy stores the value, but we intercept below
         # to trigger the side effect (clear STATUS.INT_PENDING, deassert IRQ).
         self._regs.write(offset, size, data)
 
+        next_event_ns = 0
         if offset <= self._CTRL < offset + size:
             ctrl = self._regs.get32(self._CTRL)
             if ctrl & self._CTRL_ENABLE:
                 self._clock.arm()
                 load_ms = self._regs.get32(self._LOAD)
-                print('[TMR] Timer armed')
+                expire_ns = load_ms * 1_000_000
+                print(f'[TMR] Timer armed — load={load_ms}ms expire_ns={expire_ns}')
                 self._tr.emit('ARM', load_ms=load_ms)
+                # DES: return expire_ns so QEMU schedules a precise tick
+                next_event_ns = expire_ns
             else:
                 self._clock.disarm()
                 print('[TMR] Timer disarmed')
@@ -113,6 +117,8 @@ class TimerDevice(MMIODevice):
             self._irq.deassert()
             print(f'[TMR] IRQ {self._irq.idx} deasserted (INTCLR)')
             self._tr.emit('INTCLR', irq_idx=self._irq.idx)
+
+        return next_event_ns
 
     def on_reset(self) -> None:
         self._regs.reset()
@@ -125,14 +131,14 @@ class TimerDevice(MMIODevice):
     # Called by TickServer on every 'T' message received from QEMU.       #
     # ------------------------------------------------------------------ #
 
-    def on_tick(self, vtime_ns: int) -> None:
+    def on_tick(self, vtime_ns: int) -> int:
         """Advance the virtual clock and check for timer expiry."""
         self._tr.tick(vtime_ns)
         self._clock.update(vtime_ns)
 
         load_ms = self._regs.get32(self._LOAD)
         if not self._clock.is_expired(load_ms):
-            return
+            return 0
 
         # ---- Expired ----
         self._regs.set_bits(self._STATUS, self._STATUS_INT_PENDING)
@@ -149,3 +155,4 @@ class TimerDevice(MMIODevice):
                   f'— IRQ {self._irq.idx} asserted')
             self._tr.emit('EXPIRE', load_ms=load_ms)
             self._tr.emit('IRQ_ASSERT', irq_idx=self._irq.idx)
+        return 0

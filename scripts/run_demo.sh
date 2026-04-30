@@ -59,7 +59,8 @@ exec "$QEMU_BIN" \
     -chardev socket,id=dma_rw,host=127.0.0.1,port=7892 \
     -chardev socket,id=dma_irq,host=127.0.0.1,port=7893 \
     -chardev socket,id=dma_mem,host=127.0.0.1,port=7897 \
-    -device mmio-sockdev,chardev=dma_rw,irq-chardev=dma_irq,mem-chardev=dma_mem,addr=0x40005000,irq-num=1 \
+    -chardev socket,id=dma_tick,host=127.0.0.1,port=7905 \
+    -device mmio-sockdev,chardev=dma_rw,irq-chardev=dma_irq,mem-chardev=dma_mem,tick-chardev=dma_tick,tick-period-ms=0,addr=0x40005000,irq-num=1 \
     \
     -chardev socket,id=timer_rw,host=127.0.0.1,port=7894 \
     -chardev socket,id=timer_irq,host=127.0.0.1,port=7895 \

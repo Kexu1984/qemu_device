@@ -65,7 +65,7 @@ echo ""
 # -----------------------------------------------------------------------
 # Kill any leftover processes from a previous run that may hold our ports
 # -----------------------------------------------------------------------
-for PORT in 7890 7891 7892 7893 7894 7895 7896 7897 7898 7899 7900 7901 7902 7903 7904; do
+for PORT in 7890 7891 7892 7893 7894 7895 7896 7897 7898 7899 7900 7901 7902 7903 7904 7905; do
     fuser -k "${PORT}/tcp" 2>/dev/null || true
 done
 sleep 0.3
@@ -149,7 +149,8 @@ info "Starting QEMU..."
     -chardev socket,id=dma_rw,host=127.0.0.1,port=7892 \
     -chardev socket,id=dma_irq,host=127.0.0.1,port=7893 \
     -chardev socket,id=dma_mem,host=127.0.0.1,port=7897 \
-    -device mmio-sockdev,chardev=dma_rw,irq-chardev=dma_irq,mem-chardev=dma_mem,addr=0x40005000,irq-num=1 \
+    -chardev socket,id=dma_tick,host=127.0.0.1,port=7905 \
+    -device mmio-sockdev,chardev=dma_rw,irq-chardev=dma_irq,mem-chardev=dma_mem,tick-chardev=dma_tick,tick-period-ms=0,addr=0x40005000,irq-num=1 \
     -chardev socket,id=timer_rw,host=127.0.0.1,port=7894 \
     -chardev socket,id=timer_irq,host=127.0.0.1,port=7895 \
     -chardev socket,id=timer_tick,host=127.0.0.1,port=7896 \

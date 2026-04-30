@@ -47,19 +47,26 @@ Transfer modes
 
 Timing model
 ------------
-QEMU sends virtual-time ticks via tick-chardev every ``tick-period-ms=1`` of
-virtual time.  The RW channel (firmware register writes) carries NO vtime_ns,
-so Python only learns the current virtual time at tick boundaries.
+In the DES (Discrete Event Simulation) architecture, transfers are driven by
+precise virtual-time ticks rather than periodic 1 ms ticks:
 
-  tick_period = 1 ms = 1,000,000 ns
-  DMA transfer = 512 ns (32 B M2M at HCLK=48MHz)
+  1. Firmware writes CH.CTRL.START.
+  2. Python's write() handler arms the channel and returns transfer_ns.
+  3. QEMU reads the 8-byte response and calls timer_mod(now + transfer_ns)
+     on this device's dedicated tick timer (DMA tick-chardev, port 7905).
+  4. At exactly now + transfer_ns, QEMU fires the tick.
+  5. Python's on_tick() is called in the DMA TickServer thread; it executes
+     the bus-master copy synchronously and fires the completion IRQ.
 
-Because tick_period >> transfer_ns for all practical transfers, waiting for
-the *next* tick to fire the completion would add ~1 ms of artificial latency
-(≈2000× the modelled 512 ns).  To avoid this, transfers are executed
-immediately in a background thread when armed.  The on_tick() path remains
-as a safety-net for any transfer that somehow did not complete before the
-next tick (e.g. if the background thread was slow).
+Because on_tick() does physical-memory I/O via the MEM chardev (TCP port
+7897), the tick is fire-and-forget on the QEMU side: QEMU does NOT block
+waiting for a response.  This avoids the deadlock that would arise if QEMU's
+main-loop thread blocked while Python's on_tick() needed the same thread to
+service the MEM chardev receive callback.
+
+The DREQ/DACK peripheral path (e.g. DmaClientDemoDevice → DmaClientHandle)
+continues to execute transfers in a background thread because the triggering
+write arrives on the DEMO device's RW channel, not the DMA device's channel.
 """
 
 from __future__ import annotations
@@ -220,10 +227,10 @@ class DmaController(MMIODevice):
                 return bytes(self._regs[offset:end])
         return b'\x00' * size
 
-    def write(self, offset: int, size: int, data: bytes) -> None:
+    def write(self, offset: int, size: int, data: bytes) -> int:
         end = offset + size
         if end > self._regsize:
-            return
+            return 0
         ch_idx    = offset // _CH_STRIDE
         ch_base   = ch_idx * _CH_STRIDE
         ctrl_abs  = ch_base + _CH_CTRL
@@ -236,7 +243,9 @@ class DmaController(MMIODevice):
             if self._regs[ctrl_abs] & _CTRL_START:
                 with self._locks[ch_idx]:
                     self._regs[ctrl_abs] &= ~_CTRL_START   # clear START (write-once)
-                self._firmware_start(ch_idx)
+                # DES: return transfer_ns so QEMU schedules a precise tick
+                return self._firmware_start(ch_idx)
+        return 0
 
     def on_reset(self) -> None:
         for lock in self._locks:
@@ -249,21 +258,31 @@ class DmaController(MMIODevice):
 
     # -- Tick observer interface ------------------------------------------
 
-    def on_tick(self, vtime_ns: int) -> None:
-        """Update virtual clock; execute any transfers that are still pending.
+    def on_tick(self, vtime_ns: int) -> int:
+        """Execute any transfers that are pending (DES: called at exact transfer time).
 
-        For normal operation, transfers already completed synchronously when
-        armed (see _arm_and_execute).  This path is a safety-net for any
-        channel still BUSY at tick time (e.g. transfer thread delayed).
+        In DES mode this is called by the dedicated DMA tick server (port 7905)
+        at exactly arm_vtime + transfer_ns.  It may also be called by the shared
+        1 ms tick server as a safety-net if the DES tick was somehow missed.
+
+        The transfer is executed synchronously in the calling thread.  MEM-chardev
+        I/O (cpu_physical_memory_read/write over TCP port 7897) happens here;
+        QEMU's tick is fire-and-forget so the main loop is free to service the
+        MEM responses without deadlock.
         """
         with self._vtime_lock:
             self._vtime_ns = vtime_ns
         self._tr.tick(vtime_ns)
         for ch in self._channels:
+            arm_vt = -1
+            should_exec = False
             with self._locks[ch.idx]:
                 if ch.state == _DmaChannel.BUSY:
-                    # Transfer thread is still running — let it finish.
-                    pass
+                    should_exec = True
+                    arm_vt = ch.arm_vtime_ns if ch.arm_vtime_ns >= 0 else vtime_ns
+            if should_exec:
+                self._execute_transfer(ch, arm_vt)
+        return 0
 
     # -- Peripheral DREQ/DACK interface -----------------------------------
 
@@ -330,8 +349,14 @@ class DmaController(MMIODevice):
 
     # -- Internal helpers -------------------------------------------------
 
-    def _firmware_start(self, ch_idx: int) -> None:
-        """Firmware wrote CTRL.START — read registers and arm channel."""
+    def _firmware_start(self, ch_idx: int) -> int:
+        """Firmware wrote CTRL.START — read registers, arm channel, return transfer_ns.
+
+        Returns the transfer latency in nanoseconds for DES scheduling.
+        QEMU will fire a virtual-time tick at now + return_value so that
+        on_tick() executes the transfer at the correct virtual time.
+        Returns 0 if the channel is already BUSY (START ignored).
+        """
         ch      = self._channels[ch_idx]
         base    = ch_idx * _CH_STRIDE
         lock    = self._locks[ch_idx]
@@ -346,7 +371,7 @@ class DmaController(MMIODevice):
             dst_fixed  = bool(dst_mode & _MODE_FIXED)
             if ch.state == _DmaChannel.BUSY:
                 print(f'[DMA] CH{ch_idx}: START ignored — channel already BUSY', flush=True)
-                return
+                return 0
             with self._vtime_lock:
                 now_ns = self._vtime_ns
             self._arm_channel(ch, src, dst, length, on_complete=None,
@@ -364,11 +389,9 @@ class DmaController(MMIODevice):
         )
         self._tr.emit('CH_START', ch=ch_idx, src=src, dst=dst,
                       length=length, mode=mode_str, latency_ns=latency_ns)
-        # Execute immediately: transfer_ns (sub-µs) << tick_period (1 ms)
-        threading.Thread(
-            target=self._execute_transfer, args=(ch, now_ns),
-            daemon=True, name=f'dma-ch{ch_idx}',
-        ).start()
+        # DES: return transfer_ns so QEMU schedules tick at now + transfer_ns.
+        # on_tick() will execute the actual transfer at the precise virtual time.
+        return latency_ns
 
     def _arm_channel(
         self,
@@ -397,9 +420,10 @@ class DmaController(MMIODevice):
     def _execute_transfer(self, ch: _DmaChannel, arm_vtime_ns: int) -> None:
         """Perform the actual bus-master copy and fire completion signals.
 
-        Called immediately after arming (in a background thread) so that
-        sub-microsecond transfers are not artificially delayed to the next
-        1 ms tick boundary.  The per-channel lock is NOT held on entry.
+        Called synchronously from on_tick() (DES firmware path) or from a
+        background thread (_peripheral_request / DREQ path).  Safe to call
+        from either context because MEM I/O is done outside the per-channel
+        lock and the state is snapshotted atomically before the I/O.
 
         The virtual time reported for DONE is the arm time plus the modelled
         AHB+PCLK latency — giving firmware a correct picture of when the

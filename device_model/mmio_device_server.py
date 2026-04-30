@@ -110,12 +110,14 @@ class MMIOBus:
             return b'\x00' * size
         return device.read(offset, size)
 
-    def write(self, addr: int, size: int, data: bytes) -> None:
+    def write(self, addr: int, size: int, data: bytes) -> int:
         device, offset = self._find(addr)
         if device is None:
             print(f'[BUS] unmapped write 0x{addr:08x} size={size}', file=sys.stderr)
-            return
-        device.write(offset, size, data)
+            return 0
+        result = device.write(offset, size, data)
+        # Device may return int (DES next_event_ns) or None (legacy devices).
+        return result if isinstance(result, int) else 0
 
     def add_tick_observer(self, observer: object) -> None:
         """Register an object that should receive on_tick() calls.
@@ -126,17 +128,19 @@ class MMIOBus:
         """
         self._tick_observers.append(observer)
 
-    def tick_all(self, vtime_ns: int) -> None:
+    def tick_all(self, vtime_ns: int) -> int:
         """Broadcast a virtual-clock tick to every registered device and
         every tick observer registered via add_tick_observer().
 
         Each device's ``on_tick()`` is called in registration order.
         Devices with no timing needs use the default no-op from MMIODevice.
+        Returns 0 (tick responses are not used for the shared tick channel).
         """
         for _base, _size, device in self._entries:
             device.on_tick(vtime_ns)
         for observer in self._tick_observers:
             observer.on_tick(vtime_ns)
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +184,10 @@ class RWServer:
                     offset  = struct.unpack('<I', hdr[:4])[0]
                     size    = hdr[4]
                     payload = recv_exact(conn, size)
-                    self.bus.write(self.base_addr + offset, size, payload)
+                    next_event_ns = self.bus.write(self.base_addr + offset, size, payload)
+                    # DES protocol: always send 8-byte little-endian response.
+                    # QEMU reads this and schedules a precise tick if > 0.
+                    conn.sendall(struct.pack('<Q', next_event_ns))
 
                 else:
                     print(f'[RW]  unknown opcode 0x{op:02x}', file=sys.stderr)
@@ -333,6 +340,8 @@ _WDT_RW_PORT     = 7901
 _WDT_IRQ_PORT    = 7902
 _WDT_RST_PORT    = 7903   # Python → QEMU system-reset channel
 
+_DMA_TICK_PORT   = 7905   # QEMU → Python DES tick channel for DMA (tick-period-ms=0)
+
 _UART_TERM_PORT  = 7904   # Python → external terminal (firmware UART output)
 
 
@@ -342,30 +351,30 @@ _UART_TERM_PORT  = 7904   # Python → external terminal (firmware UART output)
 
 class TickServer:
     """
-    Accepts QEMU's tick-chardev TCP connection and broadcasts virtual-clock
-    ticks to every device registered on the bus.
+    Accepts QEMU's tick-chardev TCP connection and dispatches virtual-clock
+    ticks to a device or the whole bus.
 
-    QEMU sends  'T'(1B) | vtime_ns(8B LE)  every ``tick-period-ms`` of
-    virtual time.  On each message this server calls ``bus.tick_all(vtime_ns)``
-    which dispatches to every registered ``MMIODevice.on_tick()`` in order.
-
-    This keeps the tick mechanism fully generic — any device (timer, DMA,
-    future peripherals) simply overrides ``on_tick()`` to react to virtual
-    time.  Devices with no timing needs use the inherited no-op.
+    QEMU sends  'T'(1B) | vtime_ns(8B LE)  on every tick.  This server
+    calls ``tick_fn(vtime_ns)`` synchronously for each message.  The tick is
+    fire-and-forget on the QEMU side (no response expected), so on_tick()
+    may do blocking I/O (e.g. DMA memory transfers) without deadlocking.
 
     Usage::
 
-        tick_srv = TickServer(port=7896, bus=bus)
-        threading.Thread(target=tick_srv.start, daemon=True).start()
+        # Shared 1 ms periodic tick for all bus devices:
+        tick_server = TickServer(port=7896, tick_fn=bus.tick_all)
+
+        # Dedicated DES tick for DMA (tick_period_ms=0, one-shot):
+        dma_tick = TickServer(port=7905, tick_fn=dma_ctrl.on_tick)
     """
 
     _TICK_MSG_SIZE = 9   # 'T'(1B) + vtime_ns(8B LE)
 
-    def __init__(self, port: int, bus: MMIOBus) -> None:
-        self.port     = port
-        self._bus     = bus
+    def __init__(self, port: int, tick_fn) -> None:
+        self.port      = port
+        self._tick_fn  = tick_fn
         self._sock: Optional[socket.socket] = None
-        self._running = False
+        self._running  = False
 
     def _handle_client(self, conn: socket.socket, addr) -> None:
         print(f'[TICK] QEMU tick-chardev connected from {addr}')
@@ -377,7 +386,7 @@ class TickServer:
                           file=sys.stderr)
                     continue
                 vtime_ns = int.from_bytes(hdr[1:9], 'little')
-                self._bus.tick_all(vtime_ns)
+                self._tick_fn(vtime_ns)
         except (ConnectionError, OSError) as exc:
             if self._running:
                 print(f'[TICK] {addr}: {exc}', file=sys.stderr)
@@ -752,8 +761,14 @@ def main() -> None:
     threading.Thread(target=dma_rw_server.start, daemon=True).start()
 
     # Virtual-clock tick server: broadcasts to ALL registered bus devices.
-    tick_server = TickServer(port=_TIMER_TICK_PORT, bus=bus)
+    tick_server = TickServer(port=_TIMER_TICK_PORT, tick_fn=bus.tick_all)
     threading.Thread(target=tick_server.start, daemon=True).start()
+
+    # DES tick server for DMA: fires at exactly arm_vtime + transfer_ns.
+    # tick-period-ms=0 on the QEMU side means this is a one-shot timer armed
+    # only by the DMA write() response (next_event_ns = transfer_ns).
+    dma_tick_server = TickServer(port=_DMA_TICK_PORT, tick_fn=dma_ctrl.on_tick)
+    threading.Thread(target=dma_tick_server.start, daemon=True).start()
 
     timer_irq_server = IRQServer(port=_TIMER_IRQ_PORT, irq_controller=timer_irq_ctrl)
     threading.Thread(target=timer_irq_server.start, daemon=True).start()
@@ -795,6 +810,7 @@ def main() -> None:
         timer_rw_server.stop()
         timer_irq_server.stop()
         tick_server.stop()
+        dma_tick_server.stop()
         demo_rw_server.stop()
         demo_irq_server.stop()
         crc_rw_server.stop()

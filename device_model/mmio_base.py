@@ -78,14 +78,25 @@ class MMIODevice(ABC):
     def read(self, offset: int, size: int) -> bytes:
         """Return ``size`` bytes of register data at ``offset``."""
 
-    @abstractmethod
-    def write(self, offset: int, size: int, data: bytes) -> None:
-        """Write ``data`` to the register at ``offset``."""
+    def write(self, offset: int, size: int, data: bytes) -> int:
+        """
+        Write ``data`` to the register at ``offset``.
+
+        Returns the nanoseconds until the next device event (DES protocol).
+        Return 0 for ordinary config writes with no scheduled event.
+        Return N > 0 to ask QEMU to deliver a virtual-time tick exactly
+        N ns in the future (e.g. DMA transfer completion, timer expiry).
+
+        QEMU reads this 8-byte little-endian value after every write and,
+        if > 0, calls ``timer_mod(tick_timer, now + N)`` so the device's
+        ``on_tick()`` fires at the precise virtual time.
+        """
+        return 0
 
     def on_reset(self) -> None:
         """Optional: called when the system is reset."""
 
-    def on_tick(self, vtime_ns: int) -> None:
+    def on_tick(self, vtime_ns: int) -> int:
         """
         Optional: called on every virtual-clock tick from QEMU.
 
@@ -93,7 +104,11 @@ class MMIODevice(ABC):
         Devices that need timing (timers, DMA latency, etc.) override this
         method to advance their internal state.  The default is a no-op so
         that devices without timing requirements need not implement it.
+
+        Returns 0 (no further scheduled events).  Future DES extensions may
+        use a non-zero return to request the next tick interval.
         """
+        return 0
 
 
 # ---------------------------------------------------------------------------
