@@ -187,6 +187,8 @@ info "QEMU PID: $QEMU_PID  (log: $QEMU_LOG)"
 EXPECTED=(
     "MMIO SockDev Interrupt Demo"
     "NVIC initialised"
+    "KX6625 Test Menu"
+    "UART IRQ demo"
     "IRQs enabled"
     "UART interrupt handled"
     "DMA demo"
@@ -212,6 +214,30 @@ EXPECTED=(
 )
 
 info "Waiting up to ${TIMEOUT}s for expected firmware output (in SERVER_LOG)..."
+
+# -----------------------------------------------------------------------
+# 4a. Wait for the menu prompt '# ' then inject command 'a' (all tests)
+# -----------------------------------------------------------------------
+info "Waiting for firmware menu prompt '# '..."
+PROMPT_TRIES=0
+while true; do
+    if grep -q "KX6625 Test Menu" "$SERVER_LOG" 2>/dev/null; then
+        info "Menu prompt detected. Injecting command 'a' (all tests)..."
+        # Give the firmware a moment to be ready for RX, then send 'a\n'
+        sleep 0.2
+        printf 'a\n' | nc -q1 127.0.0.1 "$UART_TERM_PORT" 2>/dev/null || true
+        info "Command 'a' injected into UART RX (port $UART_TERM_PORT)."
+        break
+    fi
+    PROMPT_TRIES=$((PROMPT_TRIES + 1))
+    if [ "$PROMPT_TRIES" -ge 60 ]; then
+        fail "Menu prompt not seen after 15s. Server log:"
+        cat "$SERVER_LOG"
+        exit 1
+    fi
+    sleep 0.25
+done
+
 ELAPSED=0
 while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     ALL_FOUND=1
@@ -277,6 +303,7 @@ echo ""
 # \r at end-of-line does not break the match.
 UART_EXPECTED=(
     "MMIO SockDev Interrupt Demo"
+    "KX6625 Test Menu"
     "UART interrupt handled"
     "All tests done"
     "Warm boot detected"

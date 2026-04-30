@@ -475,13 +475,15 @@ class UartChannel:
         python3 scripts/uart_console.py
     """
 
-    def __init__(self, port: int, host: str = '127.0.0.1') -> None:
+    def __init__(self, port: int, host: str = '127.0.0.1',
+                 rx_callback: Optional[Callable[[bytes], None]] = None) -> None:
         self._host    = host
         self._port    = port
         self._clients: list[socket.socket] = []
         self._lock    = threading.Lock()
         self._server: Optional[socket.socket] = None
         self._running = False
+        self._rx_callback = rx_callback   # called with received bytes from any client
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -524,18 +526,19 @@ class UartChannel:
 
     def _watch_client(self, conn: socket.socket, addr) -> None:
         """
-        Detect client disconnection.
+        Detect client disconnection and deliver RX data.
 
         Blocks on recv() — returns empty bytes on clean close, raises OSError
-        on TCP RST.  Any data sent by the client (e.g. accidental keystrokes)
-        is discarded here; wire it to a RX FIFO to implement bidirectional UART.
+        on TCP RST.  Any data sent by the client is forwarded to rx_callback
+        if one was provided (UART RX FIFO).
         """
         try:
             while True:
                 data = conn.recv(256)
                 if not data:
                     break
-                # Future: deliver data to UART RX FIFO
+                if self._rx_callback is not None:
+                    self._rx_callback(data)
         except OSError:
             pass
         finally:

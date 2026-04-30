@@ -25,6 +25,15 @@
 #define TXDATA_REG        CONSOLE_UART_TXDATA_REG
 #define STATUS_REG        CONSOLE_UART_STATUS_REG
 #define CTRL_REG          CONSOLE_UART_CTRL_REG
+#define RXDATA_REG        CONSOLE_UART_RXDATA_REG
+
+/* STATUS register bits */
+#define UART_STATUS_TXREADY  (1u << 0)
+#define UART_STATUS_RXREADY  (1u << 1)
+
+/* CTRL register bits */
+#define UART_CTRL_ENABLE     (1u << 0)
+#define UART_CTRL_RX_IRQ_EN  (1u << 1)
 
 /* SRAM layout for DMA demo (SRAM_BASE from generated mmio_devices.h)
  * Buffers placed at +0x1000/+0x2000 to avoid overlap with .bss globals
@@ -90,6 +99,36 @@ static void send_string(const char *str)
     }
 }
 
+/* Read one character from UART RX FIFO.
+ * Enables RX_IRQ so WFI can be woken by the IRQ, then polls RXREADY. */
+static char read_char(void)
+{
+    /* Enable RX IRQ so WFI wakes on incoming bytes */
+    mmio_write32(CTRL_REG, UART_CTRL_ENABLE | UART_CTRL_RX_IRQ_EN);
+    while (!(mmio_read32(STATUS_REG) & UART_STATUS_RXREADY)) {
+        __asm__ volatile ("wfi");
+    }
+    return (char)(mmio_read32(RXDATA_REG) & 0x7F);
+}
+
+/* Read a line into buf (up to len-1 chars), terminated by '\n'.
+ * Echoes each character back to terminal. Returns number of chars read. */
+static int recv_line(char *buf, int len)
+{
+    int n = 0;
+    while (n < len - 1) {
+        char c = read_char();
+        if (c == '\n' || c == '\r') {
+            send_string("\n");  /* echo newline */
+            break;
+        }
+        send_char(c);           /* local echo */
+        buf[n++] = c;
+    }
+    buf[n] = '\0';
+    return n;
+}
+
 /* -----------------------------------------------------------------------
  * Cortex-M3 NVIC initialisation
  *
@@ -153,73 +192,44 @@ void wdt_irq_handler(void)         /* vector table IRQ4 */
 }
 
 /* -----------------------------------------------------------------------
- * Firmware entry point
+ * Individual test functions (called from the command menu)
  * ----------------------------------------------------------------------- */
-void main(void)
+
+/* Test 1: UART IRQ demo */
+static void test_uart_irq(void)
 {
-    uint32_t i;
-
-    /* Enable the device */
-    mmio_write32(CTRL_REG, 0x1);
-
-    send_string("=== MMIO SockDev Interrupt Demo ===\n");
-    send_string("=== KX6625, Hello World ===\n");
-    send_string("[FW] Device enabled.\n");
-
-    /* Initialise NVIC */
-    nvic_init();
-    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer).\n");
-
-    /* Enable IRQs globally (clear PRIMASK) */
-    __asm__ volatile ("cpsie i" ::: "memory");
     send_string("[FW] IRQs enabled. Waiting for UART interrupt from Python server...\n");
     send_string("[FW] (Python server will assert IRQ ~2 s after connection)\n");
-
-    /*
-     * ── Phase 1: UART IRQ demo ────────────────────────────────────────────
-     * Cortex-M hardware calls uart_irq_handler() automatically.
-     * We just spin on WFI until the handler increments irq_count.
-     */
     while (irq_count == 0) {
         __asm__ volatile ("wfi");
     }
-
     send_string("[FW] UART interrupt handled successfully!\n");
+}
 
-    /*
-     * ── Phase 2: DMA memory-to-memory copy demo ───────────────────────────
-     *
-     * 1. Firmware fills SRAM source buffer with 0x01..0x20.
-     * 2. Writes DMA registers: SRC=0x20000000, DST=0x20000200, LEN=32.
-     * 3. Sets CTRL.START to kick off the transfer.
-     * 4. DMA device (Python) reads SRAM via mem-chardev, writes to DST.
-     * 5. DMA asserts IRQ33 when done — dma_irq_handler() is called.
-     * 6. Firmware verifies DST matches SRC.
-     */
+/* Test 2: DMA memory-to-memory copy */
+static void test_dma_m2m(void)
+{
+    uint32_t i;
     send_string("[FW] Starting DMA demo: SRAM 0x20001000 -> 0x20002000, 32 bytes.\n");
 
-    /* 1. Fill source buffer */
     {
         volatile uint8_t *src = (volatile uint8_t *)DMA_DEMO_SRC;
         volatile uint8_t *dst = (volatile uint8_t *)DMA_DEMO_DST;
         for (i = 0; i < DMA_DEMO_LEN; i++) src[i] = (uint8_t)(i + 1);
-        for (i = 0; i < DMA_DEMO_LEN; i++) dst[i] = 0xFF;  /* poison dst */
+        for (i = 0; i < DMA_DEMO_LEN; i++) dst[i] = 0xFF;
     }
 
-    /* 2+3. Program DMA CH0 and start */
+    dma_irq_fired = 0;
     mmio_write32(DMA_CH0_SRC_ADDR_REG, (uint32_t)DMA_DEMO_SRC);
     mmio_write32(DMA_CH0_DST_ADDR_REG, (uint32_t)DMA_DEMO_DST);
     mmio_write32(DMA_CH0_LENGTH_REG,   DMA_DEMO_LEN);
-    mmio_write32(DMA_CH0_CTRL_REG,     0x3u);  /* START | ENABLE */
+    mmio_write32(DMA_CH0_CTRL_REG,     0x3u);
 
     send_string("[FW] DMA started. Waiting for IRQ7 (DMA done)...\n");
-
-    /* 4. Wait for DMA IRQ — handler sets dma_irq_fired */
     while (!dma_irq_fired) {
         __asm__ volatile ("wfi");
     }
 
-    /* 5. Verify */
     {
         volatile uint8_t *src = (volatile uint8_t *)DMA_DEMO_SRC;
         volatile uint8_t *dst = (volatile uint8_t *)DMA_DEMO_DST;
@@ -229,46 +239,33 @@ void main(void)
         }
         send_string(ok ? "[DMA] Verification PASSED!\n" : "[DMA] Verification FAILED!\n");
     }
-
     send_string("[FW] Demo complete.\n");
+}
 
-    /*
-     * ── Phase 3: DMA client interface demo ───────────────────────────────
-     *
-     * Demonstrates the DMA client (DREQ/DACK) architecture:
-     *   1. Firmware fills SRAM source buffer.
-     *   2. Programs DmaClientDemoDevice registers (same as DMA, but the
-     *      device internally uses DmaClientHandle — no direct MemChannel).
-     *   3. Writes CTRL.START → device asserts DREQ → DmaController accepts
-     *      (DACK) → copies data after transfer_ticks virtual ticks.
-     *   4. DmaController calls device callback → device sets STATUS.DONE
-     *      and pulses IRQ3.
-     *   5. Firmware verifies DST == SRC.
-     */
+/* Test 3: DMA client interface */
+static void test_dma_client(void)
+{
+    uint32_t i;
     send_string("[FW] DMA client test: SRAM 0x20003000 -> 0x20004000, 32 bytes.\n");
 
-    /* 1. Fill source buffer */
     {
         volatile uint8_t *src = (volatile uint8_t *)DMA_CLIENT_SRC;
         volatile uint8_t *dst = (volatile uint8_t *)DMA_CLIENT_DST;
         for (i = 0; i < DMA_CLIENT_LEN; i++) src[i] = (uint8_t)(0xA0 + i);
-        for (i = 0; i < DMA_CLIENT_LEN; i++) dst[i] = 0xFF;  /* poison dst */
+        for (i = 0; i < DMA_CLIENT_LEN; i++) dst[i] = 0xFF;
     }
 
-    /* 2+3. Program DmaClientDemoDevice and start */
+    dma_client_done = 0;
     mmio_write32(DMA_CLIENT_DEMO_SRC_ADDR_REG, (uint32_t)DMA_CLIENT_SRC);
     mmio_write32(DMA_CLIENT_DEMO_DST_ADDR_REG, (uint32_t)DMA_CLIENT_DST);
     mmio_write32(DMA_CLIENT_DEMO_LENGTH_REG,   DMA_CLIENT_LEN);
-    mmio_write32(DMA_CLIENT_DEMO_CTRL_REG,     0x1u);  /* START */
+    mmio_write32(DMA_CLIENT_DEMO_CTRL_REG,     0x1u);
 
     send_string("[FW] DMA client transfer started. Waiting for IRQ3...\n");
-
-    /* 4. Wait for DMA client IRQ */
     while (!dma_client_done) {
         __asm__ volatile ("wfi");
     }
 
-    /* 5. Verify */
     {
         volatile uint8_t *src = (volatile uint8_t *)DMA_CLIENT_SRC;
         volatile uint8_t *dst = (volatile uint8_t *)DMA_CLIENT_DST;
@@ -279,74 +276,31 @@ void main(void)
         send_string(ok ? "[DMA-CLIENT] Transfer verified PASSED!\n"
                        : "[DMA-CLIENT] Transfer verified FAILED!\n");
     }
-
     send_string("[FW] All demos complete.\n");
+}
 
-    /*
-     * ── Phase 4: CRC-32 hardware accelerator test ─────────────────────────────────────
-     *
-     * Test vector: CRC-32("123456789") = 0xCBF43926
-     * Algorithm  : CRC-32/ISO-HDLC (Ethernet / ZIP / PNG polynomial)
-     *
-     * Firmware sequence:
-     *   1. Write CTRL = 0x1 to reset the accumulator to 0xFFFFFFFF.
-     *   2. Write each byte of the test string one at a time to DATA.
-     *   3. Read RESULT to obtain the final CRC.
-     *   4. Compare against the known reference value 0xCBF43926.
-     */
-    /*
-     * ── Phase 4a: CRC-32 direct-write test ────────────────────────────────────
-     *
-     * Test vector: CRC-32("123456789") = 0xCBF43926
-     * Algorithm  : CRC-32/ISO-HDLC (Ethernet / ZIP / PNG polynomial)
-     *
-     * Firmware sequence:
-     *   1. Write CTRL = 0x1 to reset the accumulator to 0xFFFFFFFF.
-     *   2. Write each byte of the test string one at a time to DATA.
-     *   3. Read RESULT to obtain the final CRC.
-     *   4. Compare against the known reference value 0xCBF43926.
-     */
+/* Test 4: CRC-32 hardware accelerator (direct + DMA→CRC) */
+static void test_crc(void)
+{
+    uint32_t i;
+
+    /* 4a: direct write */
     send_string("[FW] CRC test: computing CRC-32 of \"123456789\".\n");
-
-    /* 1. Reset the CRC accumulator */
     mmio_write32(CRC_CTRL_REG, CRC_CTRL_RESET);
-
-    /* 2. Feed each byte of \"123456789\" (ASCII 0x31..0x39) */
     {
         static const uint8_t crc_data[] = {
             0x31U, 0x32U, 0x33U, 0x34U, 0x35U, 0x36U, 0x37U, 0x38U, 0x39U
         };
-        for (i = 0; i < 9U; i++) {
-            mmio_write8(CRC_DATA_REG, crc_data[i]);
-        }
+        for (i = 0; i < 9U; i++) mmio_write8(CRC_DATA_REG, crc_data[i]);
     }
-
-    /* 3. Read result and verify */
     {
-        uint32_t crc_result = mmio_read32(CRC_RESULT_REG);
-        if (crc_result == CRC_EXPECTED) {
-            send_string("[CRC] Result 0xCBF43926 PASSED!\n");
-        } else {
-            send_string("[CRC] Result FAILED!\n");
-        }
+        uint32_t r = mmio_read32(CRC_RESULT_REG);
+        send_string(r == CRC_EXPECTED ? "[CRC] Result 0xCBF43926 PASSED!\n"
+                                      : "[CRC] Result FAILED!\n");
     }
 
-    /*
-     * ── Phase 4b: DMA → CRC (M2P, fixed destination) ─────────────────────
-     *
-     * Demonstrates decoupled M2P DMA: the CRC device has no interface to
-     * the DMA controller.  The DMA engine reads from SRAM (incr src addr)
-     * and writes each byte to CRC_DATA_REG (fixed dest addr), feeding
-     * the CRC accumulator byte-by-byte via the memory bus.
-     *
-     *   DMA CH0 MODE.DEST_FIXED = 1  →  M2P transfer:
-     *     src: 0x20005000 (SRAM, incremented each byte)
-     *     dst: CRC_DATA_REG (0x40008000, fixed)
-     *     len: 9 bytes
-     */
+    /* 4b: DMA → CRC */
     send_string("[FW] DMA-CRC test: M2P DMA feeding CRC-32 engine.\n");
-
-    /* 1. Prepare source data in SRAM @ DMA_CRC_SRC */
     {
         static const uint8_t crc_data[] = {
             0x31U, 0x32U, 0x33U, 0x34U, 0x35U, 0x36U, 0x37U, 0x38U, 0x39U
@@ -354,98 +308,124 @@ void main(void)
         volatile uint8_t *buf = (volatile uint8_t *)(uintptr_t)DMA_CRC_SRC;
         for (i = 0; i < 9U; i++) buf[i] = crc_data[i];
     }
-
-    /* 2. Reset CRC accumulator before the DMA feed */
     mmio_write32(CRC_CTRL_REG, CRC_CTRL_RESET);
-
-    /* 3. Program DMA CH0: src=SRAM, dst=CRC_DATA_REG (fixed), len=9 */
     mmio_write32(DMA_CH0_SRC_ADDR_REG, (uint32_t)DMA_CRC_SRC);
     mmio_write32(DMA_CH0_DST_ADDR_REG, (uint32_t)CRC_DATA_REG);
     mmio_write32(DMA_CH0_LENGTH_REG,   9U);
-    mmio_write32(DMA_CH0_SRC_MODE_REG, DMA_ADDR_INCR);  /* src increments (SRAM) */
-    mmio_write32(DMA_CH0_DST_MODE_REG, DMA_ADDR_FIXED); /* dst fixed (CRC_DATA_REG) */
-
-    /* 4. Arm DMA done flag then start transfer */
+    mmio_write32(DMA_CH0_SRC_MODE_REG, DMA_ADDR_INCR);
+    mmio_write32(DMA_CH0_DST_MODE_REG, DMA_ADDR_FIXED);
     dma_irq_fired = 0;
-    mmio_write32(DMA_CH0_CTRL_REG, 0x1u);  /* START */
+    mmio_write32(DMA_CH0_CTRL_REG, 0x1u);
     send_string("[FW] DMA-CRC started. Waiting for DMA done IRQ...\n");
-
-    /* 5. Wait for DMA completion IRQ (same IRQ1 as Phase 2) */
     while (!dma_irq_fired) {
         __asm__ volatile ("wfi");
     }
-
-    /* 6. Read CRC result (accumulator fed by DMA) and verify */
     {
-        uint32_t dma_crc = mmio_read32(CRC_RESULT_REG);
-        if (dma_crc == CRC_EXPECTED) {
-            send_string("[DMA-CRC] Result 0xCBF43926 PASSED!\n");
-        } else {
-            send_string("[DMA-CRC] Result FAILED!\n");
-        }
+        uint32_t r = mmio_read32(CRC_RESULT_REG);
+        send_string(r == CRC_EXPECTED ? "[DMA-CRC] Result 0xCBF43926 PASSED!\n"
+                                      : "[DMA-CRC] Result FAILED!\n");
     }
-
     send_string("[FW] All tests done.\n");
+}
 
-    /*
-     * ── Phase 5: Watchdog Timer demo ──────────────────────────────────────
-     *
-     * On the first boot  (RESET_REASON == 0 = POR):
-     *   1. Report it is a power-on reset.
-     *   2. Load the WDT with 200 ms, enable with INT_ENABLE.
-     *   3. KICK twice (at ~50 ms virtual intervals) to prove the reload works.
-     *   4. Stop kicking — the WDT fires after 200 ms of virtual time.
-     *   5. The WDT model: sets RESET_REASON=1, TIMEOUT_CNT++, then sends
-     *      a byte via rst-chardev → QEMU reset.
-     *
-     * On the second boot (RESET_REASON == 1 = WDT reset):
-     *   1. Detect the warm boot, print TIMEOUT_CNT.
-     *   2. Disable WDT so it does not reset again.
-     *   3. Print "WDT demo complete" and idle.
-     */
-    {
-        uint32_t reason = mmio_read32(WDT_RESET_REASON_REG);
-        if (reason == WDT_REASON_WDT) {
-            /* ── Second boot: we came back from a WDT reset ────────────── */
-            uint32_t cnt = mmio_read32(WDT_TIMEOUT_CNT_REG);
-            send_string("[WDT] Warm boot detected: RESET_REASON=WDT\n");
-            send_string("[WDT] timeout_cnt=");
-            /* Print decimal count (always small — just handle 0-9) */
-            send_char((char)('0' + (cnt % 10)));
-            send_string("\n");
-            send_string("[WDT] WDT demo complete.\n");
-            /* Disable WDT so we do not reset again */
-            mmio_write32(WDT_CTRL_REG, 0x0U);
-        } else {
-            /* ── First boot: power-on reset ────────────────────────────── */
-            send_string("[WDT] Power-on reset (RESET_REASON=POR)\n");
-            send_string("[WDT] Loading WDT 200 ms, kicking twice then letting it fire...\n");
+/* Test 5: Watchdog Timer (handles warm-boot detection internally) */
+static void test_wdt(void)
+{
+    uint32_t reason = mmio_read32(WDT_RESET_REASON_REG);
+    if (reason == WDT_REASON_WDT) {
+        uint32_t cnt = mmio_read32(WDT_TIMEOUT_CNT_REG);
+        send_string("[WDT] Warm boot detected: RESET_REASON=WDT\n");
+        send_string("[WDT] timeout_cnt=");
+        send_char((char)('0' + (cnt % 10)));
+        send_string("\n");
+        send_string("[WDT] WDT demo complete.\n");
+        mmio_write32(WDT_CTRL_REG, 0x0U);
+    } else {
+        send_string("[WDT] Power-on reset (RESET_REASON=POR)\n");
+        send_string("[WDT] Loading WDT 200 ms, kicking twice then letting it fire...\n");
+        mmio_write32(WDT_LOAD_REG, 200U);
+        mmio_write32(WDT_CTRL_REG, WDT_CTRL_ENABLE | WDT_CTRL_INT_ENABLE);
+        mmio_write32(WDT_KICK_REG, 0x1U);
+        send_string("[WDT] Kick 1\n");
+        for (volatile uint32_t d = 0; d < 50000U; d++) { }
+        mmio_write32(WDT_KICK_REG, 0x1U);
+        send_string("[WDT] Kick 2\n");
+        send_string("[WDT] Waiting for WDT timeout and system reset...\n");
+        while (1) { __asm__ volatile ("wfi"); }
+    }
+}
 
-            /* Program the watchdog */
-            mmio_write32(WDT_LOAD_REG, 200U);
-            mmio_write32(WDT_CTRL_REG, WDT_CTRL_ENABLE | WDT_CTRL_INT_ENABLE);
+/* -----------------------------------------------------------------------
+ * Firmware entry point
+ * ----------------------------------------------------------------------- */
+void main(void)
+{
+    char cmd_buf[4];
 
-            /* Kick 1 — reload countdown */
-            mmio_write32(WDT_KICK_REG, 0x1U);
-            send_string("[WDT] Kick 1\n");
+    /* Enable UART (TX-only until menu loop enables RX IRQ) */
+    mmio_write32(CTRL_REG, UART_CTRL_ENABLE);
 
-            /* Spin a while (simulate useful work), then kick again */
-            for (volatile uint32_t d = 0; d < 50000U; d++) { }
-            mmio_write32(WDT_KICK_REG, 0x1U);
-            send_string("[WDT] Kick 2\n");
+    send_string("=== MMIO SockDev Interrupt Demo ===\n");
+    send_string("=== KX6625, Hello World ===\n");
+    send_string("[FW] Device enabled.\n");
 
-            /* Now stop kicking — WDT will fire after 200 ms virtual time */
-            send_string("[WDT] Waiting for WDT timeout and system reset...\n");
+    /* Initialise NVIC */
+    nvic_init();
+    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer).\n");
 
-            /* Spin until WDT fires (QEMU system reset will interrupt this) */
-            while (1) {
-                __asm__ volatile ("wfi");
-            }
-        }
+    /* Enable IRQs globally */
+    __asm__ volatile ("cpsie i" ::: "memory");
+
+    /* WDT warm-boot fast-path: if we came back from WDT reset, run test 5
+     * immediately to print the warm-boot message, then show the menu. */
+    if (mmio_read32(WDT_RESET_REASON_REG) == WDT_REASON_WDT) {
+        test_wdt();
     }
 
-    /* Idle forever (reached only on WDT warm-boot path after disabling WDT) */
+    /* ── Command prompt loop ─────────────────────────────────────────────
+     *
+     * Available commands:
+     *   1  UART IRQ demo
+     *   2  DMA M2M copy
+     *   3  DMA client interface
+     *   4  CRC-32 accelerator (direct + DMA→CRC)
+     *   5  Watchdog Timer demo
+     *   a  All tests in sequence (1→2→3→4→5)
+     */
     while (1) {
-        __asm__ volatile ("wfi");
+        send_string("=== KX6625 Test Menu ===\n");
+        send_string(" 1) UART IRQ demo\n");
+        send_string(" 2) DMA M2M copy\n");
+        send_string(" 3) DMA client\n");
+        send_string(" 4) CRC-32\n");
+        send_string(" 5) WDT reset\n");
+        send_string(" a) All tests\n");
+        send_string("# ");
+
+        recv_line(cmd_buf, sizeof(cmd_buf));
+        char cmd = cmd_buf[0];
+
+        if (cmd == '1') {
+            test_uart_irq();
+        } else if (cmd == '2') {
+            test_dma_m2m();
+        } else if (cmd == '3') {
+            test_dma_client();
+        } else if (cmd == '4') {
+            test_crc();
+        } else if (cmd == '5') {
+            test_wdt();
+            /* test_wdt() with POR path resets QEMU — never returns */
+        } else if (cmd == 'a') {
+            irq_count = 0;
+            test_uart_irq();
+            test_dma_m2m();
+            test_dma_client();
+            test_crc();
+            test_wdt();
+            /* If WDT path causes reset, we return here on warm boot */
+        } else {
+            send_string("[FW] Unknown command. Enter 1-5 or 'a'.\n");
+        }
     }
 }

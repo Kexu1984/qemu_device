@@ -23,11 +23,17 @@ registers:
   - offset:      0x04
     name:        STATUS
     access:      R
-    description: "Status: bit0=TXREADY (always 1)"
+    description: "Status: bit0=TXREADY (always 1), bit1=RXREADY (1 if RX FIFO non-empty)"
     reset_value: 0x01
 
   - offset:      0x08
     name:        CTRL
     access:      RW
-    description: "Control: bit0=ENABLE"
+    description: "Control: bit0=ENABLE, bit1=RX_IRQ_EN (IRQ on RX data available)"
     reset_value: 0x01
+
+  - offset:      0x0C
+    name:        RXDATA
+    access:      R
+    description: "Receive data byte (low 8 bits); reads 0x00 when FIFO empty"
+    reset_value: 0x00
