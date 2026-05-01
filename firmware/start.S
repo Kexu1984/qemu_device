@@ -1,8 +1,8 @@
 /*
- * Cortex-M3 startup code for bare metal firmware
+ * Cortex-M4 startup code for bare metal firmware
  *
  * Image is loaded at 0x00000000 (FLASH on KX6625 SoC).
- * The Cortex-M3 vector table must sit at the very first bytes of FLASH.
+ * The Cortex-M vector table must sit at the very first bytes of FLASH.
  * Hardware reads the initial MSP from word 0 and the reset handler address
  * from word 1 during reset — no VBAR or mode-switch needed.
  *
@@ -17,17 +17,25 @@
  */
 
 .syntax unified
-.cpu cortex-m3
+.cpu cortex-m4
 .thumb
 
 /* ── External symbols defined in main.c ─────────────────────────────── */
 .extern main
 .extern cpu1_main
+.extern _sidata
+.extern _sdata
+.extern _edata
+.extern _sbss
+.extern _ebss
 .extern uart_irq_handler
 .extern dma_irq_handler
 .extern timer_irq_handler
 .extern dma_client_irq_handler
 .extern wdt_irq_handler
+.extern vPortSVCHandler
+.extern xPortPendSVHandler
+.extern xPortSysTickHandler
 
 /* ── Vector table — must be the very first thing in the image ───────── */
 .section .vectors, "a"
@@ -46,11 +54,11 @@ _vectors:
     .word   0                   /*  8: Reserved                               */
     .word   0                   /*  9: Reserved                               */
     .word   0                   /* 10: Reserved                               */
-    .word   default_handler     /* 11: SVCall                                 */
+    .word   vPortSVCHandler     /* 11: SVCall                                 */
     .word   default_handler     /* 12: Debug Monitor                          */
     .word   0                   /* 13: Reserved                               */
-    .word   default_handler     /* 14: PendSV                                 */
-    .word   default_handler     /* 15: SysTick                                */
+    .word   xPortPendSVHandler  /* 14: PendSV                                 */
+    .word   xPortSysTickHandler /* 15: SysTick                                */
 
     /* ── External IRQs 0-4 (indices 16-20) ─────────────────────────────── */
     .word   uart_irq_handler       /* IRQ0: console_uart device  */
@@ -81,6 +89,31 @@ reset_handler:
     ldr     r1, [r0]            /* r1 = cpu_index (0=CPU0, 1=CPU1) */
     cmp     r1, #1
     beq     cpu1_entry          /* CPU1: switch stack and branch to cpu1_main */
+
+    /* CPU0: initialise C runtime state before calling main. */
+    ldr     r0, =_sidata
+    ldr     r1, =_sdata
+    ldr     r2, =_edata
+1:
+    cmp     r1, r2
+    bcc     2f
+    b       3f
+2:
+    ldr     r3, [r0], #4
+    str     r3, [r1], #4
+    b       1b
+3:
+    ldr     r0, =_sbss
+    ldr     r1, =_ebss
+    movs    r2, #0
+4:
+    cmp     r0, r1
+    bcc     5f
+    b       6f
+5:
+    str     r2, [r0], #4
+    b       4b
+6:
 
     /* CPU0: hardware has already loaded MSP from _vectors[0]; call main */
     bl      main

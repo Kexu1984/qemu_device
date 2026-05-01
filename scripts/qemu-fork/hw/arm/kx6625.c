@@ -1,5 +1,5 @@
 /*
- * KX6625 SoC — Custom Cortex-M3 board emulation.
+ * KX6625 SoC — Custom dual Cortex-M4 board emulation.
  *
  * All hardware parameters (CPU type, clock frequencies, memory regions,
  * IRQ assignments) are generated from spec/soc.yaml + spec/devices.yaml
@@ -39,8 +39,8 @@
 /* ── Machine state ─────────────────────────────────────────────────────── */
 struct KX6625MachineState {
     MachineState parent;
-    ARMv7MState  armv7m;                      /* CPU0 — primary core */
-    ARMv7MState  armv7m1;                     /* CPU1 — secondary core, starts halted */
+    ARMv7MState  armv7m;                      /* CPU0 — primary Cortex-M core */
+    ARMv7MState  armv7m1;                     /* CPU1 — secondary Cortex-M core, starts halted */
     MemoryRegion flash[KX6625_FLASH_COUNT];   /* one slot per flash region */
     MemoryRegion sram[KX6625_SRAM_COUNT];     /* one slot per SRAM region  */
     MemoryRegion sysctrl_mmio;                /* SYSCTRL native MMIO region */
@@ -135,7 +135,7 @@ static void kx6625_init(MachineState *machine)
                                     (hwaddr)kx6625_periph_stubs[i].size);
     }
 
-    /* ARMv7-M container: Cortex-M3 core + NVIC + SysTick (CPU0) */
+    /* ARMv7-M container: Cortex-M core + NVIC + SysTick (CPU0) */
     object_initialize_child(OBJECT(machine), "armv7m", &s->armv7m,
                             TYPE_ARMV7M);
     armv7m = DEVICE(&s->armv7m);

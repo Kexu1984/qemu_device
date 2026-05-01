@@ -11,8 +11,8 @@ This project implements:
 - **Python Device Server** (`device_model/mmio_device_server.py`): Transport + address dispatcher (`MMIOBus`). Each peripheral is a `MMIODevice` subclass with `read()`, `write()`, and an optional `on_tick()` override.
 - **SoC Topology** (`device_model/soc_top.py`): Typed config dataclasses (`UartCfg`, `TimerCfg`, `DmaCfg`, …) and `SoCTop` — the top-level wiring class. `SoCTop` instantiates any number of each device type, assigns each its own `IRQController` / transport servers, and exposes `start()` / `stop()`. `kx6625_default()` returns the canonical KX6625 device map.
 - **Six modelled peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT). See [`spec/README.md`](spec/README.md) for register maps.
-- **KX6625 Custom SoC** (`scripts/qemu-fork/hw/arm/kx6625.c`): Cortex-M3 @ 48 MHz, 512 KB FLASH @ `0x00000000`, 128 KB SRAM @ `0x20000000`, NVIC with 16 external IRQs.
-- **Bare-Metal Cortex-M3 Firmware**: NVIC init, IRQ handlers, UART demo, DMA M2M copy demo, DMA peripheral DREQ/DACK demo, CRC-32 test, WDT countdown-reset demo with warm-boot detection.
+- **KX6625 Custom SoC** (`scripts/qemu-fork/hw/arm/kx6625.c`): Dual Cortex-M4 @ 48 MHz, 512 KB FLASH @ `0x00000000`, 128 KB SRAM @ `0x20000000`, NVIC with 16 external IRQs per ARMv7-M container.
+- **FreeRTOS Cortex-M4F Firmware**: CPU0 boots FreeRTOS using the official GCC `ARM_CM4F` port and Cortex-M SysTick; CPU1 runs a lightweight bare-metal IPC loop. The demo task exercises UART, DMA M2M, DMA peripheral DREQ/DACK, CRC-32, dual-core IPC, and WDT countdown-reset warm-boot detection.
 - **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server, boots QEMU with `icount shift=5`, exercises all six devices including a WDT-triggered system reset, asserts firmware output, and generates an HTML trace report.
 - **Event Tracer** (`device_model/tracer.py`): Non-blocking JSONL event trace for every device — records virtual time, wall time, and device-specific fields. Written by a background thread so device models never block on I/O. Visualised as a self-contained HTML report (`build/trace_report.html`) by `scripts/visualize_trace.py`.
 
@@ -22,11 +22,11 @@ This project implements:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────┐
-│  QEMU  (KX6625 custom SoC — Cortex-M3 @ 48 MHz, NVIC, 16 external IRQs)                   │
+│  QEMU  (KX6625 custom SoC — dual Cortex-M4 @ 48 MHz, NVIC, 16 external IRQs)              │
 │                                                                                            │
 │  ┌──────────────┐    MMIO                ┌──────────────────────────────────────────────┐ │
 │  │  Firmware    │ ─── read/write ──────► │  mmio-sockdev (×6 instances)                 │ │
-│  │  (Cortex-M3) │                        │                                              │ │
+│  │  FreeRTOS    │                        │                                              │ │
 │  │              │ ◄── IRQ (NVIC) ──────── │   chardev      ↔ R/W TCP channel             │ │
 │  └──────┬───────┘                        │   irq-chardev  ← IRQ TCP channel             │ │
 │         │                                │   tick-chardev → virtual-clock tick TCP      │ │
@@ -118,6 +118,30 @@ ICOUNT_SHIFT=5 bash scripts/run_interactive.sh
 
 Without `ICOUNT_SHIFT`, QEMU falls back to realtime wall-clock mode (functional but non-deterministic).
 
+### FreeRTOS and Dual-Core Model
+
+KX6625 is configured as a dual Cortex-M4 SoC. Both cores are instantiated by QEMU as ARMv7-M containers using the generated `KX6625_CPU_TYPE_STR` from `spec/soc.yaml`.
+
+The firmware uses an asymmetric boot model:
+
+- **CPU0** runs the KX6625 startup code, initialises `.data`/`.bss`, creates the `app_task`, and starts the FreeRTOS scheduler with `vTaskStartScheduler()`.
+- **CPU1** is held in reset until CPU0 writes `SYSCTRL.CPU1RST`; it then switches to its own stack and runs `cpu1_main()`, a bare-metal shared-SRAM IPC polling loop.
+- This is not SMP FreeRTOS. FreeRTOS scheduling is active on CPU0 only.
+
+The FreeRTOS port is the official GCC Cortex-M4F port:
+
+```
+freertos/FreeRTOS-Kernel/portable/GCC/ARM_CM4F/port.c
+```
+
+The scheduler tick uses the Cortex-M architecture **SysTick** exception, not the KX6625 `timer0` peripheral. `timer0` remains an external IRQ2 device available to firmware and tests. The vector table in `firmware/start.S` routes the core scheduling exceptions directly to the FreeRTOS port:
+
+```
+SVCall  -> vPortSVCHandler
+PendSV  -> xPortPendSVHandler
+SysTick -> xPortSysTickHandler
+```
+
 ### DES (Discrete Event Simulation) Protocol
 
 Timed devices use the DES write-response protocol to schedule their next event with nanosecond precision in virtual time, without requiring a periodic tick:
@@ -152,7 +176,7 @@ DMA DES tick channel (port 7905) — one-shot, fires at arm_vtime + transfer_ns:
 MMIODevice.irq_controller.set_irq(idx, level)
     │  'I'(1B) | idx(1B) | level(1B)  (TCP irq-port)
     ▼
-mmio-sockdev (QEMU)  ──►  NVIC (IRQ line)  ──►  Cortex-M3
+mmio-sockdev (QEMU)  ──►  NVIC (IRQ line)  ──►  Cortex-M4
 ```
 
 NVIC pulse pattern: assert then immediately deassert so the NVIC edge-trigger does not re-fire.
@@ -506,7 +530,7 @@ The `rst-chardev` property is optional. If omitted, the device operates normally
 The Python device server binds all TCP ports first; QEMU connects to them as a client. Each device needs one `mmio-sockdev` instance. Run with `-icount shift=5,sleep=off,align=off` for deterministic chip-time simulation.
 
 ```bash
-qemu-system-arm -M kx6625 -nographic -no-reboot \
+qemu-system-arm -M kx6625 -smp 2 -nographic -no-reboot \
   -icount shift=5,sleep=off,align=off \
   \
   # Console UART
@@ -663,7 +687,7 @@ python3 scripts/uart_console.py
 
 ## Firmware Demo Sequence
 
-The firmware (`firmware/main.c`) executes five demos back-to-back:
+The FreeRTOS application task (`firmware/main.c`) executes six demos from the UART menu. Command `a` runs them back-to-back:
 
 ### Phase 1 — UART IRQ
 
@@ -673,9 +697,9 @@ The firmware (`firmware/main.c`) executes five demos back-to-back:
 
 ### Phase 2 — DMA Memory-to-Memory Copy (CH0)
 
-1. Fills SRAM source buffer `0x20000000` with bytes `0x01..0x20` (32 bytes).
-2. Programs DMA CH0 registers: `CH0_SRC_ADDR=0x20000000`, `CH0_DST_ADDR=0x20000200`, `CH0_LENGTH=32`, `CH0_CTRL=START`.
-3. DMA controller (Python) reads the source via `dma_read()`, writes the destination via `dma_write()`, then pulses IRQ 1 after 10 virtual ticks.
+1. Fills SRAM source buffer `0x20001000` with bytes `0x01..0x20` (32 bytes).
+2. Programs DMA CH0 registers: `CH0_SRC_ADDR=0x20001000`, `CH0_DST_ADDR=0x20002000`, `CH0_LENGTH=32`, `CH0_CTRL=START`.
+3. DMA controller (Python) reads the source via `dma_read()`, writes the destination via `dma_write()`, then pulses IRQ 1 at the modelled virtual-time deadline.
 4. Firmware handles IRQ 1, then verifies the destination buffer matches the source.
 5. Prints `[DMA] Verification PASSED!` and `[FW] Demo complete.`
 
@@ -693,7 +717,14 @@ The firmware (`firmware/main.c`) executes five demos back-to-back:
 2. **DMA-fed test**: firmware sets up a DMA M2P transfer from SRAM (containing `"123456789"`) to `CRC_DATA` offset `0x40008000`, starts the transfer, waits for IRQ 1, reads `CRC_RESULT`. Asserts result equals `0xCBF43926`.
 3. Prints `[CRC] Result 0xCBF43926 PASSED!`, `[DMA-CRC] Result 0xCBF43926 PASSED!`, and `[FW] All tests done.`
 
-### Phase 5 — Watchdog Timer Reset Demo
+### Phase 5 — Dual-Core IPC
+
+1. CPU0 writes request data into the shared SRAM IPC window, then marks `IPC_STATUS=PENDING`.
+2. CPU1 is already running `cpu1_main()` after CPU0 released it through `SYSCTRL.CPU1RST`; it polls the shared IPC status word.
+3. CPU1 computes `IPC_ARG0 ^ 0xCAFEBABE`, writes `IPC_RESP`, and marks `IPC_STATUS=DONE`.
+4. CPU0 verifies the response and prints `[IPC] Dual-CPU IPC PASS`.
+
+### Phase 6 — Watchdog Timer Reset Demo
 
 1. **POR boot**: firmware reads `WDT_RESET_REASON_REG`; value = 0 (`REASON_POR`) → first boot path.
 2. Sets `WDT_LOAD = 200 ms`, prints `"Kick 1"` and `"Kick 2"` (two `KICK` register writes).
@@ -718,11 +749,16 @@ qemu_device/
 │   ├── timer.yaml                    # Timer 0 register map
 │   ├── crc.yaml                      # CRC-32 engine register map
 │   └── wdt.yaml                      # Watchdog Timer register map
-├── firmware/                         # Bare-metal Cortex-M3 firmware
-│   ├── start.S                       # Vector table, Reset_Handler, IRQ dispatch (IRQ0–IRQ4)
-│   ├── main.c                        # NVIC init + 5-phase demo (UART/DMA/CRC/WDT)
+├── firmware/                         # FreeRTOS Cortex-M4F firmware
+│   ├── FreeRTOSConfig.h              # KX6625 FreeRTOS config (48 MHz, 1 kHz SysTick)
+│   ├── start.S                       # Vector table, Reset_Handler, CPU0/CPU1 split
+│   ├── main.c                        # CPU0 FreeRTOS task + demo menu (UART/DMA/CRC/IPC/WDT)
+│   ├── cpu1_main.c                   # CPU1 bare-metal IPC polling loop
+│   ├── runtime.c                     # Minimal freestanding memset/memcpy for -nostdlib
 │   ├── linker.ld                     # Memory layout (FLASH @ 0x00000000, SRAM @ 0x20000000)
-│   └── Makefile                      # Runs gen_device_code.py then compiles
+│   └── Makefile                      # Runs gen_device_code.py then compiles FreeRTOS firmware
+├── freertos/
+│   └── FreeRTOS-Kernel/              # Vendored FreeRTOS kernel source + GCC ARM_CM4F port
 ├── device_model/                     # Python device emulation layer
 │   ├── mmio_base.py                  # MMIODevice ABC; IRQController; MemChannel;
 │   │                                 #   RstController; UartChannel;
@@ -776,7 +812,7 @@ qemu_device/
 
 | Parameter             | Value                             |
 |-----------------------|-----------------------------------|
-| Machine               | `kx6625` (Cortex-M3 @ 48 MHz)    |
+| Machine               | `kx6625` (dual Cortex-M4 @ 48 MHz) |
 | NVIC external IRQs    | 16                                |
 | UART IRQ              | 0 (`irq-num=0`)                   |
 | DMA IRQ               | 1 (`irq-num=1`)                   |

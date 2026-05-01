@@ -1,11 +1,11 @@
 /*
- * Bare metal Cortex-M3 firmware — MMIO socket device + interrupt test
+ * FreeRTOS Cortex-M4 firmware — MMIO socket device + interrupt test
  *
  * IO addresses and IRQ numbers are NOT hardcoded here.  They come from
  * the auto-generated header build/generated/mmio_devices.h, which is
  * produced by scripts/gen_device_code.py reading spec/devices.yaml.
  *
- * Memory map (KX6625 SoC, Cortex-M3):
+ * Memory map (KX6625 SoC, Cortex-M4):
  *   0x00000000  FLASH — vector table + code  (512 KB)
  *   0xE000E000  NVIC (Nested Vectored Interrupt Controller)
  *   0x20000000  SRAM (128 KB)
@@ -17,6 +17,8 @@
  */
 
 #include <stdint.h>
+#include "FreeRTOS.h"
+#include "task.h"
 #include "mmio_devices.h"   /* auto-generated from spec/devices.yaml */
 #include "ipc.h"             /* IPC + SYSCTRL for dual-CPU demo */
 
@@ -131,7 +133,7 @@ static int recv_line(char *buf, int len)
 }
 
 /* -----------------------------------------------------------------------
- * Cortex-M3 NVIC initialisation
+ * Cortex-M4 NVIC initialisation
  *
  * NVIC register addresses (derived from NVIC_BASE = 0xE000E000):
  *   NVIC_ISER0 (0xE000E100) — IRQ enable set  for IRQ  0-31
@@ -155,7 +157,7 @@ static void nvic_init(void)
 
 /* -----------------------------------------------------------------------
  * IRQ handlers — called directly from the vector table (start.S).
- * Cortex-M3 hardware saves/restores the exception frame automatically;
+ * Cortex-M hardware saves/restores the exception frame automatically;
  * plain C functions with no special attribute are sufficient.
  * ----------------------------------------------------------------------- */
 volatile int irq_count          = 0;
@@ -224,9 +226,8 @@ static void test_dma_m2m(void)
     mmio_write32(DMA_CH0_SRC_ADDR_REG, (uint32_t)DMA_DEMO_SRC);
     mmio_write32(DMA_CH0_DST_ADDR_REG, (uint32_t)DMA_DEMO_DST);
     mmio_write32(DMA_CH0_LENGTH_REG,   DMA_DEMO_LEN);
-    mmio_write32(DMA_CH0_CTRL_REG,     0x3u);
-
     send_string("[FW] DMA started. Waiting for IRQ7 (DMA done)...\n");
+    mmio_write32(DMA_CH0_CTRL_REG,     0x3u);
     while (!dma_irq_fired) {
         __asm__ volatile ("wfi");
     }
@@ -260,9 +261,8 @@ static void test_dma_client(void)
     mmio_write32(DMA_CLIENT_DEMO_SRC_ADDR_REG, (uint32_t)DMA_CLIENT_SRC);
     mmio_write32(DMA_CLIENT_DEMO_DST_ADDR_REG, (uint32_t)DMA_CLIENT_DST);
     mmio_write32(DMA_CLIENT_DEMO_LENGTH_REG,   DMA_CLIENT_LEN);
-    mmio_write32(DMA_CLIENT_DEMO_CTRL_REG,     0x1u);
-
     send_string("[FW] DMA client transfer started. Waiting for IRQ3...\n");
+    mmio_write32(DMA_CLIENT_DEMO_CTRL_REG,     0x1u);
     while (!dma_client_done) {
         __asm__ volatile ("wfi");
     }
@@ -316,8 +316,8 @@ static void test_crc(void)
     mmio_write32(DMA_CH0_SRC_MODE_REG, DMA_ADDR_INCR);
     mmio_write32(DMA_CH0_DST_MODE_REG, DMA_ADDR_FIXED);
     dma_irq_fired = 0;
-    mmio_write32(DMA_CH0_CTRL_REG, 0x1u);
     send_string("[FW] DMA-CRC started. Waiting for DMA done IRQ...\n");
+    mmio_write32(DMA_CH0_CTRL_REG, 0x1u);
     while (!dma_irq_fired) {
         __asm__ volatile ("wfi");
     }
@@ -389,8 +389,30 @@ static void test_wdt(void)
 /* -----------------------------------------------------------------------
  * Firmware entry point
  * ----------------------------------------------------------------------- */
-void main(void)
+void vAssertCalled(const char *file, uint32_t line)
 {
+    (void)file;
+    (void)line;
+    taskDISABLE_INTERRUPTS();
+    for (;;) {
+    }
+}
+
+void vApplicationMallocFailedHook(void)
+{
+    vAssertCalled(__FILE__, __LINE__);
+}
+
+void vApplicationStackOverflowHook(TaskHandle_t task, char *task_name)
+{
+    (void)task;
+    (void)task_name;
+    vAssertCalled(__FILE__, __LINE__);
+}
+
+static void app_task(void *arg)
+{
+    (void)arg;
     char cmd_buf[4];
 
     /* Enable UART (TX-only until menu loop enables RX IRQ) */
@@ -466,5 +488,17 @@ void main(void)
         } else {
             send_string("[FW] Unknown command. Enter 1-6 or 'a'.\n");
         }
+    }
+}
+
+void main(void)
+{
+    if (xTaskCreate(app_task, "kx6625", 1024U, NULL, tskIDLE_PRIORITY + 1U, NULL) != pdPASS) {
+        vAssertCalled(__FILE__, __LINE__);
+    }
+
+    vTaskStartScheduler();
+
+    for (;;) {
     }
 }

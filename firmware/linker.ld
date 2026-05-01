@@ -1,11 +1,11 @@
 /*
- * Linker script for Cortex-M3 bare metal firmware (KX6625 SoC)
+ * Linker script for Cortex-M4 FreeRTOS firmware (KX6625 SoC)
  *
  * Memory layout:
  *   0x00000000  FLASH — vector table + code + rodata  (512 KB)
  *   0x20000000  SRAM  — data + bss + stack            (128 KB, top = _stack_top)
  *
- * The first word in FLASH (0x00000000) must be _stack_top so the Cortex-M3
+ * The first word in FLASH (0x00000000) must be _stack_top so the Cortex-M
  * hardware can load the initial MSP during reset.
  * The second word (0x00000004) must be the address of reset_handler (Thumb,
  * so the linker sets bit 0 automatically for .thumb_func symbols).
@@ -30,7 +30,7 @@ _cpu1_stack_top = ORIGIN(RAM) + LENGTH(RAM);         /* 0x20020000 — CPU1 swit
 
 SECTIONS
 {
-    /* Cortex-M3 vector table must be at the very start of FLASH */
+    /* Cortex-M vector table must be at the very start of FLASH */
     .vectors : {
         *(.vectors)
     } > FLASH
@@ -45,16 +45,24 @@ SECTIONS
         *(.rodata.*)
     } > FLASH
 
-    /* Initialised data: stored in FLASH, copied to RAM at startup if needed.
-     * For simplicity this firmware keeps .data in FLASH (no copy loop). */
+    . = ALIGN(4);
+    _sidata = LOADADDR(.data);
     .data : {
+        . = ALIGN(4);
+        _sdata = .;
         *(.data)
         *(.data.*)
+        . = ALIGN(4);
+        _edata = .;
     } > RAM AT > FLASH
 
     .bss : {
+        . = ALIGN(4);
+        _sbss = .;
         *(.bss)
         *(.bss.*)
         *(COMMON)
+        . = ALIGN(4);
+        _ebss = .;
     } > RAM
 }

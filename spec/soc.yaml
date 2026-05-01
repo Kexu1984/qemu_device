@@ -21,11 +21,11 @@
 
 soc:
   name:    KX6625
-  mc_desc: "KX6625 SoC (Cortex-M3, 512K Flash, 128K SRAM)"
+  mc_desc: "KX6625 SoC (dual Cortex-M4F, 512K Flash, 128K SRAM)"
 
 # ── CPU ─────────────────────────────────────────────────────────────────────
 cpu:
-  type:           cortex-m3   # QEMU CPU type string passed to ARMv7M core
+  type:           cortex-m4   # QEMU CPU type string passed to ARMv7M core
   num_irq:        16          # External interrupt lines wired to NVIC
   enable_bitband: false       # ARMv7-M optional bit-band region
 
