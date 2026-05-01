@@ -98,6 +98,16 @@ devices:
     rst_port:    7903        # Python → QEMU system-reset channel (rst-chardev)
     spec:        wdt.yaml    # register map → spec/wdt.yaml
 
+  - name:        sv_timer
+    description: "SystemVerilog APB timer prototype — Verilator-backed external model"
+    base_addr:   0x4000B000
+    size:        0x1000
+    irq_num:     5           # External IRQ 5 on KX6625
+    irq_delay:   0.0
+    rw_port:     7906        # QEMU → SV bridge MMIO R/W channel
+    irq_port:    7907        # SV bridge → QEMU IRQ injection channel
+    spec:        sv_timer.yaml
+
 # ── Physical Memory Regions ──────────────────────────────────────────────────────────────────
 #
 # RAM regions visible to both firmware (CPU) and device models (via MemChannel).

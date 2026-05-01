@@ -1,6 +1,6 @@
 # Makefile for QEMU MMIO Socket Device Project
 
-.PHONY: all qemu fw gen run clean test help
+.PHONY: all qemu fw sv gen run clean test help
 
 # Default target
 all: help
@@ -19,6 +19,11 @@ qemu:
 fw:
 	@echo "Building firmware..."
 	$(MAKE) -C firmware
+
+# Build SystemVerilog/Verilator device prototypes
+sv:
+	@echo "Building SystemVerilog device prototypes..."
+	$(MAKE) -C sv_device
 
 # Run the complete demo
 run:
@@ -56,6 +61,7 @@ clean:
 	@echo "Cleaning build artifacts..."
 	rm -rf build/
 	$(MAKE) -C firmware clean
+	$(MAKE) -C sv_device clean
 	rm -rf device_model/generated/
 
 # Help
@@ -67,6 +73,7 @@ help:
 	@echo "  gen       - Generate C header + Python map from config/devices.yaml"
 	@echo "  qemu      - Build QEMU with custom mmio-sockdev"
 	@echo "  fw        - Build bare metal firmware (runs gen automatically)"
+	@echo "  sv        - Build SystemVerilog/Verilator device prototypes"
 	@echo "  run       - Show instructions for running demo"
 	@echo "  run-auto  - Run demo automatically (experimental)"
 	@echo "  test      - Test protocol implementation"

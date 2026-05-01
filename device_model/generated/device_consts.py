@@ -111,6 +111,22 @@ WDT_STATUS_REG                           = 0x40009010  # offset 0x0010  R  Statu
 WDT_RESET_REASON_REG                     = 0x40009014  # offset 0x0014  R  Retention: 0=POR/global-reset  1=WDT-reset. Survives watchdog reset.
 WDT_TIMEOUT_CNT_REG                      = 0x40009018  # offset 0x0018  R  Retention: cumulative WDT timeout count since power-on.
 
+# ── SV_TIMER ────────────────────────────────────────────────────
+# SystemVerilog APB timer prototype — Verilator-backed external model
+SV_TIMER_BASE         = 0x4000B000
+SV_TIMER_SIZE         = 0x1000
+SV_TIMER_IRQ_INTID    = 5
+SV_TIMER_IRQ_DELAY_S  = 0.0
+SV_TIMER_IRQ_PORT     = 7907
+SV_TIMER_RW_PORT      = 7906
+
+# Registers
+SV_TIMER_CTRL_REG                        = 0x4000B000  # offset 0x0000  RW  Control: bit0=ENABLE, bit1=IRQ_EN
+SV_TIMER_LOAD_REG                        = 0x4000B004  # offset 0x0004  RW  Countdown load value in SV clock cycles
+SV_TIMER_VALUE_REG                       = 0x4000B008  # offset 0x0008  R  Current countdown value
+SV_TIMER_STATUS_REG                      = 0x4000B00C  # offset 0x000C  R  Status: bit0=IRQ_PENDING
+SV_TIMER_IRQ_CLEAR_REG                   = 0x4000B010  # offset 0x0010  W  Write bit0=1 to clear IRQ_PENDING and deassert IRQ
+
 # ── SRAM memory region ────────────────────────────────────────────────────────
 # Scratchpad SRAM for device DMA transfers
 SRAM_BASE         = 0x20000000

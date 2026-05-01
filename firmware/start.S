@@ -14,6 +14,7 @@
  *   IRQ0: console_uart
  *   IRQ1: dma
  *   IRQ2: timer0
+ *   IRQ5: sv_timer
  */
 
 .syntax unified
@@ -33,6 +34,7 @@
 .extern timer_irq_handler
 .extern dma_client_irq_handler
 .extern wdt_irq_handler
+.extern sv_timer_irq_handler
 .extern vPortSVCHandler
 .extern xPortPendSVHandler
 .extern xPortSysTickHandler
@@ -60,14 +62,15 @@ _vectors:
     .word   xPortPendSVHandler  /* 14: PendSV                                 */
     .word   xPortSysTickHandler /* 15: SysTick                                */
 
-    /* ── External IRQs 0-4 (indices 16-20) ─────────────────────────────── */
+    /* ── External IRQs 0-5 (indices 16-21) ─────────────────────────────── */
     .word   uart_irq_handler       /* IRQ0: console_uart device  */
     .word   dma_irq_handler        /* IRQ1: dma device           */
     .word   timer_irq_handler      /* IRQ2: timer0 device        */
     .word   dma_client_irq_handler /* IRQ3: dma_client_demo      */
     .word   wdt_irq_handler        /* IRQ4: watchdog timer       */
+    .word   sv_timer_irq_handler   /* IRQ5: SV APB timer         */
 
-    /* ── External IRQs 5-15 (indices 21-31) — default ────────────────── */
+    /* ── External IRQs 6-15 (indices 22-31) — default ────────────────── */
     .rept 10
     .word   default_handler
     .endr

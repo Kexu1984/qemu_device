@@ -1,8 +1,27 @@
 # QEMU Custom MMIO Socket Device
 
-A framework for implementing custom ARM hardware devices in QEMU, with register logic and interrupt firing modelled in Python. A single generic QEMU SysBus device (`mmio-sockdev`) proxies MMIO reads/writes, IRQ lines, virtual-clock ticks, and bus-master DMA to/from external Python device models over TCP.
+A framework for implementing custom ARM hardware devices in QEMU, with register logic and interrupt firing modelled in external processes. A single generic QEMU SysBus device (`mmio-sockdev`) proxies MMIO reads/writes, IRQ lines, virtual-clock ticks, and bus-master DMA to/from Python or SystemVerilog/Verilator device models over TCP.
 
-Time in this simulator is **chip virtual time**, not wall-clock time. QEMU is run with `-icount shift=5` so `QEMU_CLOCK_VIRTUAL = instruction_count × 32 ns` — matching the KX6625 at 48 MHz / CPI≈2. A WDT set to 100 ms means 100 ms of simulated chip time, independent of how long the host machine takes to emulate it.
+This repository is a **chip-function validation environment**, not a full cross-domain cycle-accurate simulator. QEMU provides a CPU/software behavioural model for firmware execution. Python devices provide fast functional peripheral models. SystemVerilog devices keep their own local RTL clock and are connected to QEMU through transaction boundaries such as MMIO reads/writes and IRQs.
+
+For QEMU and Python timed devices, time is **chip virtual time**, not wall-clock time. QEMU is run with `-icount shift=5` so `QEMU_CLOCK_VIRTUAL = instruction_count × 32 ns` — matching the KX6625 at 48 MHz / CPI≈2. A WDT set to 100 ms means 100 ms of simulated chip time, independent of how long the host machine takes to emulate it. SystemVerilog devices are intentionally modelled as independent clock domains; their local pclk/cycle count is not automatically back-annotated into QEMU CPU cycles.
+
+## Validation Scope
+
+This environment has two primary goals:
+
+1. **Fast software prototyping**: develop and debug firmware, drivers, RTOS integration, and application logic against a realistic SoC memory map and interrupt topology before hardware is available.
+2. **Fast RTL device validation**: connect selected SystemVerilog peripherals to firmware running on QEMU, exercise their register-level behaviour and IRQ paths, and compare them against Python reference models when useful.
+
+The intended abstraction boundary is:
+
+| Domain | Role | Time/clock model |
+|--------|------|------------------|
+| QEMU CPU/SoC | Behavioural CPU, NVIC, memory map, firmware execution | QEMU virtual time with optional `icount`; MMIO callbacks are synchronous from the guest CPU's perspective |
+| Python devices | Fast functional models and reference/checker models | Can use QEMU virtual-time ticks/DES for deterministic device events |
+| SystemVerilog devices | RTL device models with local state machines and registers | Independent local clock maintained by the SV bridge; no claim of cycle-accurate CPU/APB alignment |
+
+MMIO access to an SV device is a synchronous transaction boundary: QEMU blocks while the bridge completes the APB/RTL operation, then the guest continues. The elapsed host time and the number of SV pclk cycles consumed by that transaction do not automatically advance QEMU guest cycles. This makes the environment well suited for software bring-up and device functional validation, while keeping the boundary honest about what is not modelled: CPU bus wait-state timing and exact 48 MHz : 16 MHz cross-domain cycle alignment.
 
 ## Overview
 
@@ -10,10 +29,11 @@ This project implements:
 - **Custom QEMU Device** (`mmio-sockdev`): Generic SysBus proxy — 4 KB MMIO, IRQ line, optional virtual-clock tick channel, optional bus-master DMA memory channel, optional system-reset channel (`rst-chardev`). One instance per device on the QEMU command line.
 - **Python Device Server** (`device_model/mmio_device_server.py`): Transport + address dispatcher (`MMIOBus`). Each peripheral is a `MMIODevice` subclass with `read()`, `write()`, and an optional `on_tick()` override.
 - **SoC Topology** (`device_model/soc_top.py`): Typed config dataclasses (`UartCfg`, `TimerCfg`, `DmaCfg`, …) and `SoCTop` — the top-level wiring class. `SoCTop` instantiates any number of each device type, assigns each its own `IRQController` / transport servers, and exposes `start()` / `stop()`. `kx6625_default()` returns the canonical KX6625 device map.
-- **Six modelled peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT). See [`spec/README.md`](spec/README.md) for register maps.
+- **Seven modelled peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT), and a SystemVerilog APB timer prototype. See [`spec/README.md`](spec/README.md) for register maps.
+- **SystemVerilog Device Prototype** (`sv_device/`): A Verilator-built APB timer bridge listening on TCP ports 7906/7907. QEMU drives it through a normal `mmio-sockdev` instance at `0x4000B000`, and the SV model returns an IRQ through NVIC IRQ5.
 - **KX6625 Custom SoC** (`scripts/qemu-fork/hw/arm/kx6625.c`): Dual Cortex-M4 @ 48 MHz, 512 KB FLASH @ `0x00000000`, 128 KB SRAM @ `0x20000000`, NVIC with 16 external IRQs per ARMv7-M container.
-- **FreeRTOS Cortex-M4F Firmware**: CPU0 boots FreeRTOS using the official GCC `ARM_CM4F` port and Cortex-M SysTick; CPU1 runs a lightweight bare-metal IPC loop. The demo task exercises UART, DMA M2M, DMA peripheral DREQ/DACK, CRC-32, dual-core IPC, and WDT countdown-reset warm-boot detection.
-- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server, boots QEMU with `icount shift=5`, exercises all six devices including a WDT-triggered system reset, asserts firmware output, and generates an HTML trace report.
+- **FreeRTOS Cortex-M4F Firmware**: CPU0 boots FreeRTOS using the official GCC `ARM_CM4F` port and Cortex-M SysTick; CPU1 runs a lightweight bare-metal IPC loop. The demo task exercises UART, DMA M2M, DMA peripheral DREQ/DACK, CRC-32, dual-core IPC, SV timer IRQ, and WDT countdown-reset warm-boot detection.
+- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server and the SV timer bridge, boots QEMU with `icount shift=5`, exercises all devices including a WDT-triggered system reset, asserts firmware output, and generates an HTML trace report.
 - **Event Tracer** (`device_model/tracer.py`): Non-blocking JSONL event trace for every device — records virtual time, wall time, and device-specific fields. Written by a background thread so device models never block on I/O. Visualised as a self-contained HTML report (`build/trace_report.html`) by `scripts/visualize_trace.py`.
 
 ## Architecture
@@ -25,7 +45,7 @@ This project implements:
 │  QEMU  (KX6625 custom SoC — dual Cortex-M4 @ 48 MHz, NVIC, 16 external IRQs)              │
 │                                                                                            │
 │  ┌──────────────┐    MMIO                ┌──────────────────────────────────────────────┐ │
-│  │  Firmware    │ ─── read/write ──────► │  mmio-sockdev (×6 instances)                 │ │
+│  │  Firmware    │ ─── read/write ──────► │  mmio-sockdev (×7 instances)                 │ │
 │  │  FreeRTOS    │                        │                                              │ │
 │  │              │ ◄── IRQ (NVIC) ──────── │   chardev      ↔ R/W TCP channel             │ │
 │  └──────┬───────┘                        │   irq-chardev  ← IRQ TCP channel             │ │
@@ -565,6 +585,11 @@ qemu-system-arm -M kx6625 -smp 2 -nographic -no-reboot \
   -chardev socket,id=wdt_irq,host=127.0.0.1,port=7902 \
   -chardev socket,id=wdt_rst,host=127.0.0.1,port=7903 \
   -device  mmio-sockdev,chardev=wdt_rw,irq-chardev=wdt_irq,rst-chardev=wdt_rst,addr=0x40009000,irq-num=4 \
+    \
+    # SystemVerilog APB timer prototype (IRQ 5)
+    -chardev socket,id=sv_timer_rw,host=127.0.0.1,port=7906 \
+    -chardev socket,id=sv_timer_irq,host=127.0.0.1,port=7907 \
+    -device  mmio-sockdev,chardev=sv_timer_rw,irq-chardev=sv_timer_irq,addr=0x4000B000,irq-num=5 \
   \
   -kernel firmware.elf
 ```
@@ -578,6 +603,7 @@ qemu-system-arm -M kx6625 -smp 2 -nographic -no-reboot \
 
 - Ubuntu/Debian (or compatible Linux)
 - ARM cross-compiler: `sudo apt install gcc-arm-none-eabi`
+- Verilator: `sudo apt install verilator` or another recent Verilator installation
 - Python 3 (standard library only)
 - Build tools: `sudo apt install build-essential ninja-build pkg-config libglib2.0-dev libpixman-1-dev`
 
@@ -589,7 +615,15 @@ make fw
 
 Output: `build/firmware.elf` and `build/firmware.bin`. This also runs `make gen` to regenerate `build/generated/mmio_devices.h` from `spec/devices.yaml`.
 
-### 2. Build QEMU (first time only — ~10-15 minutes)
+### 2. Build SystemVerilog device prototype
+
+```bash
+make sv
+```
+
+Output: `sv_device/build/sv_timer_bridge`, a Verilator-backed APB timer process used by the e2e and interactive runners.
+
+### 3. Build QEMU (first time only — ~10-15 minutes)
 
 ```bash
 make qemu
@@ -597,16 +631,16 @@ make qemu
 
 Output: `scripts/qemu-fork/build/qemu-system-arm`
 
-### 3. Run end-to-end smoke test
+### 4. Run end-to-end smoke test
 
 ```bash
 ICOUNT_SHIFT=5 bash scripts/e2e_test.sh
 ```
 
 This single command:
-1. Starts the Python device server (all six devices)
+1. Starts the Python device server and the SV timer bridge
 2. Waits for the UART port to be ready
-3. Starts QEMU (`-M kx6625 -icount shift=5,sleep=off,align=off`) with six `mmio-sockdev` instances and the firmware
+3. Starts QEMU (`-M kx6625 -icount shift=5,sleep=off,align=off`) with all `mmio-sockdev` instances and the firmware
 4. Polls firmware output in the server log for up to 120 s
 5. Asserts all expected log lines are present and prints PASS or FAIL
 6. Generates `build/trace_report.html` — a self-contained HTML visualizer of all device events
@@ -665,7 +699,15 @@ Opens the Python device server, QEMU, and a dedicated UART terminal window in on
 ICOUNT_SHIFT=5 bash scripts/run_interactive.sh
 ```
 
-An `xterm` window titled **KX6625 UART Console** appears showing only the clean firmware UART output. All Python device-model debug logs (DMA, IRQ, tick messages) stay in `build/interactive_server.log`.
+When a graphical terminal is available, an `xterm` window titled **KX6625 UART Console** appears showing only the clean firmware UART output. All Python device-model debug logs (DMA, IRQ, tick messages) stay in `build/interactive_server.log`.
+
+In VS Code, SSH, or other environments where the spawned terminal may be hidden, run the console inline in the current terminal:
+
+```bash
+RUN_INLINE=1 ICOUNT_SHIFT=5 bash scripts/run_interactive.sh
+```
+
+This script is intentionally interactive: it waits until you close the UART terminal window, or press `Ctrl-C` / `Ctrl-]` in inline mode. Use `scripts/e2e_test.sh` for an automated pass/fail test that exits on its own.
 
 **Option B — manual (three terminals)**
 
@@ -687,7 +729,7 @@ python3 scripts/uart_console.py
 
 ## Firmware Demo Sequence
 
-The FreeRTOS application task (`firmware/main.c`) executes six demos from the UART menu. Command `a` runs them back-to-back:
+The FreeRTOS application task (`firmware/main.c`) executes seven demos from the UART menu. Command `a` runs them back-to-back:
 
 ### Phase 1 — UART IRQ
 
@@ -724,7 +766,17 @@ The FreeRTOS application task (`firmware/main.c`) executes six demos from the UA
 3. CPU1 computes `IPC_ARG0 ^ 0xCAFEBABE`, writes `IPC_RESP`, and marks `IPC_STATUS=DONE`.
 4. CPU0 verifies the response and prints `[IPC] Dual-CPU IPC PASS`.
 
-### Phase 6 — Watchdog Timer Reset Demo
+### Phase 6 — SystemVerilog APB Timer
+
+1. Firmware writes `SV_TIMER_LOAD=8`, then starts the SV timer with IRQ enabled.
+2. QEMU forwards the MMIO writes to the Verilator bridge at TCP port 7906.
+3. The bridge turns the MMIO operations into APB cycles on `sv_timer_apb.sv`, advances the timer in the SV device's local pclk domain, and observes `irq_o`.
+4. The bridge sends an IRQ message on port 7907; QEMU raises NVIC IRQ5.
+5. Firmware handles IRQ5, writes `SV_TIMER_IRQ_CLEAR`, and prints `[SVTIMER] IRQ observed and cleared PASSED!`.
+
+This phase validates the QEMU-to-SV transaction path and RTL interrupt behaviour. It does not model CPU bus wait states or force the SV pclk to remain cycle-aligned with QEMU's 48 MHz CPU clock.
+
+### Phase 7 — Watchdog Timer Reset Demo
 
 1. **POR boot**: firmware reads `WDT_RESET_REASON_REG`; value = 0 (`REASON_POR`) → first boot path.
 2. Sets `WDT_LOAD = 200 ms`, prints `"Kick 1"` and `"Kick 2"` (two `KICK` register writes).
@@ -748,17 +800,22 @@ qemu_device/
 │   ├── dma_client_demo.yaml          # DMA client demo register map
 │   ├── timer.yaml                    # Timer 0 register map
 │   ├── crc.yaml                      # CRC-32 engine register map
-│   └── wdt.yaml                      # Watchdog Timer register map
+│   ├── wdt.yaml                      # Watchdog Timer register map
+│   └── sv_timer.yaml                 # SystemVerilog APB timer prototype register map
 ├── firmware/                         # FreeRTOS Cortex-M4F firmware
 │   ├── FreeRTOSConfig.h              # KX6625 FreeRTOS config (48 MHz, 1 kHz SysTick)
 │   ├── start.S                       # Vector table, Reset_Handler, CPU0/CPU1 split
-│   ├── main.c                        # CPU0 FreeRTOS task + demo menu (UART/DMA/CRC/IPC/WDT)
+│   ├── main.c                        # CPU0 FreeRTOS task + demo menu (UART/DMA/CRC/IPC/SV timer/WDT)
 │   ├── cpu1_main.c                   # CPU1 bare-metal IPC polling loop
 │   ├── runtime.c                     # Minimal freestanding memset/memcpy for -nostdlib
 │   ├── linker.ld                     # Memory layout (FLASH @ 0x00000000, SRAM @ 0x20000000)
 │   └── Makefile                      # Runs gen_device_code.py then compiles FreeRTOS firmware
 ├── freertos/
 │   └── FreeRTOS-Kernel/              # Vendored FreeRTOS kernel source + GCC ARM_CM4F port
+├── sv_device/                        # SystemVerilog device prototypes
+│   ├── sv_timer_apb.sv               # APB register timer RTL
+│   ├── sv_timer_bridge.cpp           # Verilator + TCP bridge for mmio-sockdev
+│   └── Makefile                      # Builds sv_device/build/sv_timer_bridge
 ├── device_model/                     # Python device emulation layer
 │   ├── mmio_base.py                  # MMIODevice ABC; IRQController; MemChannel;
 │   │                                 #   RstController; UartChannel;
@@ -804,6 +861,7 @@ qemu_device/
 |--------------|--------------------------------------------------------------|
 | `make gen`   | Generate C header + Python consts from `spec/`               |
 | `make fw`    | Generate constants, then build firmware (`build/firmware.elf`) |
+| `make sv`    | Build Verilator-backed SV device prototypes                   |
 | `make qemu`  | Copy `mmio_sockdev.c` to qemu-fork, then build QEMU          |
 | `make run`   | Print interactive run instructions                           |
 | `make clean` | Remove all build artifacts                                   |

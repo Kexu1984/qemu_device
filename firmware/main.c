@@ -14,6 +14,7 @@
  *   0x40006000  timer0 device       (mmio-sockdev, IRQ2)
  *   0x40008000  crc device          (mmio-sockdev, polled)
  *   0x40009000  wdt device          (mmio-sockdev, IRQ4)
+ *   0x4000B000  sv_timer device     (mmio-sockdev -> Verilated SV, IRQ5)
  */
 
 #include <stdint.h>
@@ -63,6 +64,11 @@
 #define WDT_CTRL_INT_ENABLE 0x2U
 #define WDT_REASON_POR      0x0U
 #define WDT_REASON_WDT      0x1U
+
+/* SV timer register bit definitions */
+#define SV_TIMER_CTRL_ENABLE 0x1U
+#define SV_TIMER_CTRL_IRQ_EN 0x2U
+#define SV_TIMER_STATUS_IRQ  0x1U
 
 /* CRC-32 test vector: CRC-32("123456789") = 0xCBF43926  (ISO-HDLC / IEEE 802.3) */
 #define CRC_EXPECTED       0xCBF43926U
@@ -140,19 +146,20 @@ static int recv_line(char *buf, int len)
  *   NVIC_ICPR0 (0xE000E280) — IRQ clear pending for IRQ  0-31
  *   NVIC_IPR0  (0xE000E400) — priority bytes for IRQ 0-3
  *
- * Enables IRQ 0 (UART), IRQ 1 (DMA), IRQ 2 (Timer0).
+ * Enables IRQ 0 (UART), IRQ 1 (DMA), IRQ 2 (Timer0), IRQ 5 (SV timer).
  * KX6625 has 16 external IRQs (0-15); IRQs 0/1/2 are our devices.
  * ----------------------------------------------------------------------- */
 static void nvic_init(void)
 {
-    /* 1. Clear any stale pending state for IRQ 0, 1, 2, 3, 4 */
-    mmio_write32(NVIC_ICPR0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4));
+    /* 1. Clear any stale pending state for IRQ 0-5 */
+    mmio_write32(NVIC_ICPR0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5));
 
-    /* 2. Set priority 0 (highest) for IRQ 0-3 */
+    /* 2. Set priority 0 (highest) for IRQ 0-7 */
     mmio_write32(NVIC_IPR0, 0x00000000U);
+    mmio_write32(NVIC_IPR1, 0x00000000U);
 
-    /* 3. Enable IRQ 0-4 in ISER0 */
-    mmio_write32(NVIC_ISER0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4));
+    /* 3. Enable IRQ 0-5 in ISER0 */
+    mmio_write32(NVIC_ISER0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5));
 }
 
 /* -----------------------------------------------------------------------
@@ -164,6 +171,7 @@ volatile int irq_count          = 0;
 volatile int dma_irq_fired      = 0;
 volatile int dma_client_done    = 0;
 volatile int wdt_irq_fired      = 0;
+volatile int sv_timer_irq_fired = 0;
 
 void uart_irq_handler(void)     /* vector table IRQ0 */
 {
@@ -192,6 +200,16 @@ void wdt_irq_handler(void)         /* vector table IRQ4 */
 {
     wdt_irq_fired++;
     send_string("[IRQ] WDT pre-reset warning IRQ! INTID=4\n");
+}
+
+void sv_timer_irq_handler(void)    /* vector table IRQ5 */
+{
+    uint32_t status = mmio_read32(SV_TIMER_STATUS_REG);
+    if (status & SV_TIMER_STATUS_IRQ) {
+        mmio_write32(SV_TIMER_IRQ_CLEAR_REG, SV_TIMER_STATUS_IRQ);
+        sv_timer_irq_fired++;
+        send_string("[IRQ] SV timer fired! INTID=5\n");
+    }
 }
 
 /* -----------------------------------------------------------------------
@@ -359,6 +377,28 @@ static void test_dual_cpu(void)
     }
 }
 
+/* Test 7: SystemVerilog APB timer through mmio-sockdev */
+static void test_sv_timer(void)
+{
+    send_string("[SVTIMER] Starting SystemVerilog APB timer test.\n");
+    sv_timer_irq_fired = 0;
+
+    mmio_write32(SV_TIMER_IRQ_CLEAR_REG, SV_TIMER_STATUS_IRQ);
+    mmio_write32(SV_TIMER_LOAD_REG, 8U);
+    send_string("[SVTIMER] LOAD=8 cycles, enabling IRQ.\n");
+    mmio_write32(SV_TIMER_CTRL_REG, SV_TIMER_CTRL_ENABLE | SV_TIMER_CTRL_IRQ_EN);
+
+    while (!sv_timer_irq_fired) {
+        __asm__ volatile ("wfi");
+    }
+
+    if ((mmio_read32(SV_TIMER_STATUS_REG) & SV_TIMER_STATUS_IRQ) == 0U) {
+        send_string("[SVTIMER] IRQ observed and cleared PASSED!\n");
+    } else {
+        send_string("[SVTIMER] IRQ clear FAILED!\n");
+    }
+}
+
 /* Test 5: Watchdog Timer (handles warm-boot detection internally) */
 static void test_wdt(void)
 {
@@ -424,7 +464,7 @@ static void app_task(void *arg)
 
     /* Initialise NVIC */
     nvic_init();
-    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer).\n");
+    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer, IRQ5=SV timer).\n");
 
     /* Enable IRQs globally */
     __asm__ volatile ("cpsie i" ::: "memory");
@@ -446,8 +486,9 @@ static void app_task(void *arg)
      *   2  DMA M2M copy
      *   3  DMA client interface
      *   4  CRC-32 accelerator (direct + DMA→CRC)
-     *   5  Watchdog Timer demo
-     *   a  All tests in sequence (1→2→3→4→5)
+    *   5  Watchdog Timer demo
+    *   7  SV APB timer demo
+    *   a  All tests in sequence (1→2→3→4→6→7→5)
      */
     while (1) {
         send_string("=== KX6625 Test Menu ===\n");
@@ -457,6 +498,7 @@ static void app_task(void *arg)
         send_string(" 4) CRC-32\n");
         send_string(" 5) WDT reset\n");
         send_string(" 6) Dual-CPU IPC\n");
+        send_string(" 7) SV APB timer\n");
         send_string(" a) All tests\n");
         send_string("# ");
 
@@ -476,6 +518,8 @@ static void app_task(void *arg)
             /* test_wdt() with POR path resets QEMU — never returns */
         } else if (cmd == '6') {
             test_dual_cpu();
+        } else if (cmd == '7') {
+            test_sv_timer();
         } else if (cmd == 'a') {
             irq_count = 0;
             test_uart_irq();
@@ -483,10 +527,11 @@ static void app_task(void *arg)
             test_dma_client();
             test_crc();
             test_dual_cpu();
+            test_sv_timer();
             test_wdt();
             /* If WDT path causes reset, we return here on warm boot */
         } else {
-            send_string("[FW] Unknown command. Enter 1-6 or 'a'.\n");
+            send_string("[FW] Unknown command. Enter 1-7 or 'a'.\n");
         }
     }
 }

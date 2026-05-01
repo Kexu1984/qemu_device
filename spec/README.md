@@ -10,6 +10,7 @@ spec/
 ├── dma_client_demo.yaml  # DMA client demo peripheral register map
 ├── timer.yaml            # Countdown timer register map
 ├── crc.yaml              # CRC-32 engine register map
+├── sv_timer.yaml         # SystemVerilog APB timer prototype register map
 ├── soc.yaml              # SoC-level configuration (clock, reset)
 └── wdt.yaml              # Watchdog timer register map
 ```
@@ -26,6 +27,7 @@ spec/
 | DMA Client Demo  | `0x40007000`  | 4 KB   | 3        | 7898     | 7899     | —         | —        | —        | —         |
 | CRC-32 Engine    | `0x40008000`  | 4 KB   | —        | 7900     | —        | —         | —        | —        | —         |
 | Watchdog Timer   | `0x40009000`  | 4 KB   | 4        | 7901     | 7902     | —         | —        | 7903     | —         |
+| SV APB Timer     | `0x4000B000`  | 4 KB   | 5        | 7906     | 7907     | —         | —        | —        | —         |
 | **FLASH**        | `0x00000000`  | 512 KB | —        | —        | —        | —         | —        | —        | —         |
 | **SRAM**         | `0x20000000`  | 128 KB | —        | —        | —        | —         | —        | —        | —         |
 
@@ -131,6 +133,20 @@ Test vector: `CRC-32("123456789") = 0xCBF43926`. Supports byte and word writes; 
 **Retention registers** (`RESET_REASON`, `TIMEOUT_CNT`) survive a watchdog reset: they live in the Python device model instance, which persists across QEMU system resets. Only a full Python server restart (power-on reset) clears them to 0.
 
 **Reset flow**: On timeout, `WdtDevice.on_tick()` sets `RESET_REASON=1`, increments `TIMEOUT_CNT`, optionally pulses IRQ 4 (pre-reset warning), then calls `SystemResetManager.wdt_reset()` → `qemu_system_reset_request()` on the QEMU side. TCP sockets remain connected.
+
+---
+
+## SV APB Timer (`sv_device/sv_timer_apb.sv`)
+
+| Offset | Name      | Access | Reset | Description                                  |
+|--------|-----------|--------|-------|----------------------------------------------|
+| 0x00   | CTRL      | R/W    | 0     | bit0 = ENABLE, bit1 = IRQ_EN                 |
+| 0x04   | LOAD      | R/W    | 0     | Countdown load value in SV clock cycles      |
+| 0x08   | VALUE     | R      | 0     | Current countdown value                      |
+| 0x0C   | STATUS    | R      | 0     | bit0 = IRQ_PENDING                           |
+| 0x10   | IRQ_CLEAR | W      | —     | Write bit0 = 1 to clear IRQ_PENDING and IRQ5 |
+
+The Verilator bridge listens on R/W port 7906 and IRQ port 7907. QEMU still sees this as a normal `mmio-sockdev` region at `0x4000B000`; the bridge converts each MMIO access into APB setup/access cycles on the SV RTL.
 
 ---
 

@@ -1,0 +1,34 @@
+# SystemVerilog-backed APB timer prototype.
+#
+# Register contract exposed to firmware through mmio-sockdev:
+#   CTRL       bit0=ENABLE, bit1=IRQ_EN
+#   LOAD       countdown cycles loaded when ENABLE is written
+#   VALUE      current countdown value
+#   STATUS     bit0=IRQ_PENDING
+#   IRQ_CLEAR  W1C bit0 clears IRQ_PENDING and deasserts IRQ
+
+registers:
+  - offset:      0x00
+    name:        ctrl
+    access:      RW
+    description: "Control: bit0=ENABLE, bit1=IRQ_EN"
+
+  - offset:      0x04
+    name:        load
+    access:      RW
+    description: "Countdown load value in SV clock cycles"
+
+  - offset:      0x08
+    name:        value
+    access:      R
+    description: "Current countdown value"
+
+  - offset:      0x0C
+    name:        status
+    access:      R
+    description: "Status: bit0=IRQ_PENDING"
+
+  - offset:      0x10
+    name:        irq_clear
+    access:      W
+    description: "Write bit0=1 to clear IRQ_PENDING and deassert IRQ"
