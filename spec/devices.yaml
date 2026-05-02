@@ -108,6 +108,16 @@ devices:
     irq_port:    7907        # SV bridge → QEMU IRQ injection channel
     spec:        sv_timer.yaml
 
+  - name:        hsm
+    description: "HSM crypto accelerator — AES-128 ECB/CBC/CFB/CTR/CMAC with OTP KEY_ID or open-register key source"
+    base_addr:   0x4000C000
+    size:        0x1000
+    irq_num:     6           # External IRQ 6 on KX6625
+    irq_delay:   0.0
+    rw_port:     7908
+    irq_port:    7909
+    spec:        hsm.yaml
+
 # ── Physical Memory Regions ──────────────────────────────────────────────────────────────────
 #
 # RAM regions visible to both firmware (CPU) and device models (via MemChannel).

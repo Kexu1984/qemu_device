@@ -29,11 +29,11 @@ This project implements:
 - **Custom QEMU Device** (`mmio-sockdev`): Generic SysBus proxy — 4 KB MMIO, IRQ line, optional virtual-clock tick channel, optional bus-master DMA memory channel, optional system-reset channel (`rst-chardev`). One instance per device on the QEMU command line.
 - **Python Device Server** (`device_model/mmio_device_server.py`): Transport + address dispatcher (`MMIOBus`). Each peripheral is a `MMIODevice` subclass with `read()`, `write()`, and an optional `on_tick()` override.
 - **SoC Topology** (`device_model/soc_top.py`): Typed config dataclasses (`UartCfg`, `TimerCfg`, `DmaCfg`, …) and `SoCTop` — the top-level wiring class. `SoCTop` instantiates any number of each device type, assigns each its own `IRQController` / transport servers, and exposes `start()` / `stop()`. `kx6625_default()` returns the canonical KX6625 device map.
-- **Seven modelled peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT), and a SystemVerilog APB timer prototype. See [`spec/README.md`](spec/README.md) for register maps.
+- **Eight modelled peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT), SystemVerilog APB timer prototype, and an HSM crypto accelerator with AES-128/CMAC support. See [`spec/README.md`](spec/README.md) for register maps.
 - **SystemVerilog Device Prototype** (`sv_device/`): A Verilator-built APB timer bridge listening on TCP ports 7906/7907. QEMU drives it through a normal `mmio-sockdev` instance at `0x4000B000`, and the SV model returns an IRQ through NVIC IRQ5.
 - **KX6625 Custom SoC** (`scripts/qemu-fork/hw/arm/kx6625.c`): Dual Cortex-M4 @ 48 MHz, 512 KB FLASH @ `0x00000000`, 128 KB SRAM @ `0x20000000`, NVIC with 16 external IRQs per ARMv7-M container.
-- **FreeRTOS Cortex-M4F Firmware**: CPU0 boots FreeRTOS using the official GCC `ARM_CM4F` port and Cortex-M SysTick; CPU1 runs a lightweight bare-metal IPC loop. The demo task exercises UART, DMA M2M, DMA peripheral DREQ/DACK, CRC-32, dual-core IPC, SV timer IRQ, and WDT countdown-reset warm-boot detection.
-- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server and the SV timer bridge, boots QEMU with `icount shift=5`, exercises all devices including a WDT-triggered system reset, asserts firmware output, and generates an HTML trace report.
+- **FreeRTOS Cortex-M4F Firmware**: CPU0 boots FreeRTOS using the official GCC `ARM_CM4F` port and Cortex-M SysTick; CPU1 runs a lightweight bare-metal IPC loop. The demo task exercises UART, DMA M2M, DMA peripheral DREQ/DACK, CRC-32, dual-core IPC, SV timer IRQ, HSM AES-CBC/CMAC, and WDT countdown-reset warm-boot detection.
+- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server and the SV timer bridge, boots QEMU with `icount shift=5`, exercises all devices including HSM crypto and a WDT-triggered system reset, asserts firmware output, and generates an HTML trace report.
 - **Event Tracer** (`device_model/tracer.py`): Non-blocking JSONL event trace for every device — records virtual time, wall time, and device-specific fields. Written by a background thread so device models never block on I/O. Visualised as a self-contained HTML report (`build/trace_report.html`) by `scripts/visualize_trace.py`.
 
 ## Architecture
@@ -75,11 +75,11 @@ This project implements:
 │                   MMIOBus                    SystemResetManager                            │
 │       ┌───────────────┼──────────┬────────────────┬──────┬──────┐   on WDT timeout:       │
 │       ▼               ▼          ▼                ▼      ▼      ▼   1. device.on_reset()  │
-│  ConsoleUart    DmaController TimerDevice DmaClientDemo CRC-32  WDT  (all devices)        │
-│  0x40004000     0x40005000    0x40006000  0x40007000   0x40008000 0x40009000               │
-│  IRQ 0          IRQ 1         on_tick()   IRQ 3         —       IRQ 4  2. RstCtrl.send()  │
-│                 on_tick()     IRQ 2       DREQ/DACK    data feed on_tick()   → TCP :7903  │
-│                 dma_read/write                                   timeout     → QEMU reset  │
+│  ConsoleUart DmaController TimerDevice DmaClientDemo CRC-32 WDT HSM  (all devices)         │
+│  0x40004000  0x40005000    0x40006000  0x40007000   0x40008000 0x40009000 0x4000C000       │
+│  IRQ 0       IRQ 1         on_tick()   IRQ 3         —      IRQ 4 IRQ 6  2. RstCtrl.send() │
+│              on_tick()     IRQ 2       DREQ/DACK    data feed on_tick() AES/CMAC → :7903  │
+│              dma_read/write                                  timeout  DMA-style crypto     │
 └────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 

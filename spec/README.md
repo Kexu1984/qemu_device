@@ -10,6 +10,7 @@ spec/
 ├── dma_client_demo.yaml  # DMA client demo peripheral register map
 ├── timer.yaml            # Countdown timer register map
 ├── crc.yaml              # CRC-32 engine register map
+├── hsm.yaml              # AES-128 / CMAC HSM register map
 ├── sv_timer.yaml         # SystemVerilog APB timer prototype register map
 ├── soc.yaml              # SoC-level configuration (clock, reset)
 └── wdt.yaml              # Watchdog timer register map
@@ -28,6 +29,7 @@ spec/
 | CRC-32 Engine    | `0x40008000`  | 4 KB   | —        | 7900     | —        | —         | —        | —        | —         |
 | Watchdog Timer   | `0x40009000`  | 4 KB   | 4        | 7901     | 7902     | —         | —        | 7903     | —         |
 | SV APB Timer     | `0x4000B000`  | 4 KB   | 5        | 7906     | 7907     | —         | —        | —        | —         |
+| HSM Crypto       | `0x4000C000`  | 4 KB   | 6        | 7908     | 7909     | —         | —        | —        | —         |
 | **FLASH**        | `0x00000000`  | 512 KB | —        | —        | —        | —         | —        | —        | —         |
 | **SRAM**         | `0x20000000`  | 128 KB | —        | —        | —        | —         | —        | —        | —         |
 
@@ -147,6 +149,59 @@ Test vector: `CRC-32("123456789") = 0xCBF43926`. Supports byte and word writes; 
 | 0x10   | IRQ_CLEAR | W      | —     | Write bit0 = 1 to clear IRQ_PENDING and IRQ5 |
 
 The Verilator bridge listens on R/W port 7906 and IRQ port 7907. QEMU still sees this as a normal `mmio-sockdev` region at `0x4000B000`; the bridge converts each MMIO access into APB setup/access cycles on the SV RTL.
+
+---
+
+## HSM Crypto Accelerator (`hsm_model.py`)
+
+First Python-model scope: AES-128 ECB/CBC/CFB/CTR encrypt/decrypt and AES-128 CMAC. `KEY_ID` selects the key source: values 0..14 select OTP file slots, while value 15 selects the open write-only key registers. Register access is restricted by `master_id`: only CPU0 (`master_id == 0`) may read/write HSM registers; other masters get zero on reads, writes are ignored, and `STATUS.ACCESS_ERR` is latched until HSM module reset.
+
+The HSM is designed as a DMA client. Firmware programs source/destination/length/mode/key registers and starts an operation. The HSM internally reads from `SRC_ADDR`, runs AES/CMAC over its internal buffer, then writes the generated output directly to `DST_ADDR`. No input/output FIFO is exposed in the CPU-visible register map. `SRC_ADDR` may point to FLASH or SRAM. `DST_ADDR` is expected to point to writable memory such as SRAM; a destination in read-only FLASH should surface as a DMA/memory bus error.
+
+OTP model file: `build/hsm_otp.json`.
+
+| Offset | Name       | Access | Reset      | Description |
+|--------|------------|--------|------------|-------------|
+| 0x00   | ID         | R      | 0x314D5348 | ASCII `HSM1` little-endian |
+| 0x04   | VERSION    | R      | 0x00010000 | HSM model version 1.0 |
+| 0x08   | CTRL       | R/W    | 0          | bit0=START, bit1=IRQ_ENABLE |
+| 0x0C   | STATUS     | R      | 0          | bit0=BUSY, bit1=DONE, bit2=ERROR, bit3=IRQ_PENDING, bit4=KEY_VALID, bit5=OTP_KEY_LOADED, bit6=ACCESS_ERR |
+| 0x10   | INT_STATUS | R/W    | 0          | W1C: bit0=DONE_IRQ, bit1=ERROR_IRQ, bit2=ACCESS_ERR_IRQ |
+| 0x14   | INT_ENABLE | R/W    | 0          | Interrupt enable mask |
+| 0x18   | ERROR      | R      | 0          | Last error code: access, mode, length, key, OTP, DMA, destination bus error |
+| 0x1C   | MODE       | R/W    | 0          | bits[3:0]=MODE, bit8=DECRYPT |
+| 0x20   | SRC_ADDR   | R/W    | 0          | DMA input source physical address |
+| 0x24   | DST_ADDR   | R/W    | 0          | DMA output/tag destination physical address, normally writable SRAM |
+| 0x28   | LENGTH     | R/W    | 0          | AES input length or CMAC message length |
+| 0x2C   | DMA_STATUS | R      | 0          | DMA read/write phase status |
+| 0x30   | KEY_ID     | R/W    | 0          | 0..14=OTP key slot, 15=open KEY_WORD0..3 key |
+| 0x34   | KEY_STATUS | R      | 0          | Register/OTP/active key status |
+| 0x38   | KEY_WORD0  | W      | 0          | Open key bits [31:0], read as zero |
+| 0x3C   | KEY_WORD1  | W      | 0          | Open key bits [63:32], read as zero |
+| 0x40   | KEY_WORD2  | W      | 0          | Open key bits [95:64], read as zero |
+| 0x44   | KEY_WORD3  | W      | 0          | Open key bits [127:96], read as zero |
+| 0x50   | IV_WORD0   | R/W    | 0          | IV/counter bits [31:0], used by CBC/CFB/CTR |
+| 0x54   | IV_WORD1   | R/W    | 0          | IV/counter bits [63:32], used by CBC/CFB/CTR |
+| 0x58   | IV_WORD2   | R/W    | 0          | IV/counter bits [95:64], used by CBC/CFB/CTR |
+| 0x5C   | IV_WORD3   | R/W    | 0          | IV/counter bits [127:96], used by CBC/CFB/CTR |
+| 0x60   | TAG_WORD0  | R      | 0          | CMAC tag/result bits [31:0] |
+| 0x64   | TAG_WORD1  | R      | 0          | CMAC tag/result bits [63:32] |
+| 0x68   | TAG_WORD2  | R      | 0          | CMAC tag/result bits [95:64] |
+| 0x6C   | TAG_WORD3  | R      | 0          | CMAC tag/result bits [127:96] |
+
+Mode encoding in `MODE.bits[3:0]`:
+
+| Value | Mode |
+|-------|------|
+| 0 | AES-ECB |
+| 1 | AES-CBC |
+| 2 | AES-CFB |
+| 3 | AES-CTR |
+| 4 | AES-CMAC |
+
+`MODE.bit8` selects decrypt for ECB/CBC/CFB. CTR uses the same transform for encryption/decryption. CMAC ignores `MODE.bit8` and produces a 16-byte tag.
+
+Length rules: ECB/CBC require a non-zero multiple of 16 bytes. CFB/CTR/CMAC accept any non-zero byte length. CMAC writes a 16-byte tag to `DST_ADDR` and mirrors it in `TAG_WORD0..3`.
 
 ---
 

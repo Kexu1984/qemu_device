@@ -96,6 +96,7 @@ from device_model.dma_controller    import DmaController        # noqa: E402
 from device_model.dma_client_demo   import DmaClientDemoDevice  # noqa: E402
 from device_model.crc_device        import CrcDevice            # noqa: E402
 from device_model.wdt_model         import WdtDevice            # noqa: E402
+from device_model.hsm_model         import HsmDevice            # noqa: E402
 from device_model.tracer            import Tracer               # noqa: E402
 
 
@@ -243,6 +244,21 @@ class WdtCfg:
     size:      int = 0x1000
 
 
+@dataclass
+class HsmCfg:
+    """Configuration for the ``HsmDevice`` (IRQ, DMA-style memory access).
+
+    Requires a ``DmaCfg`` to be present so it can reuse the SoC physical
+    address-space/MemChannel path for bus-master reads and writes.
+    """
+    base_addr: int
+    rw_port:   int
+    irq_port:  int
+    nvic_irq:  int
+    otp_file:  str = 'build/hsm_otp.json'
+    size:      int = 0x1000
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SoCTop
 # ─────────────────────────────────────────────────────────────────────────────
@@ -285,11 +301,14 @@ class SoCTop:
         dma_client_demo: Optional[DmaClientDemoCfg] = None,
         crc:             Optional[CrcCfg]           = None,
         wdt:             Optional[WdtCfg]           = None,
+        hsm:             Optional[HsmCfg]           = None,
         tick_port:       int                        = 7896,
         tracer:          Optional[Tracer]           = None,
     ) -> None:
         if dma_client_demo is not None and dma is None:
             raise ValueError('DmaClientDemoCfg requires a DmaCfg')
+        if hsm is not None and dma is None:
+            raise ValueError('HsmCfg requires a DmaCfg')
 
         self._tracer   = tracer
         self._servers: list = []    # transport server objects (have .stop())
@@ -308,6 +327,7 @@ class SoCTop:
             + ([(dma_client_demo.base_addr, dma_client_demo.size)] if dma_client_demo else [])
             + ([(crc.base_addr, crc.size)] if crc else [])
             + ([(wdt.base_addr, wdt.size)] if wdt else [])
+            + ([(hsm.base_addr, hsm.size)] if hsm else [])
         )
 
         # ── 2. DMA subsystem ──────────────────────────────────────────────
@@ -407,6 +427,20 @@ class SoCTop:
             self._add_server(RstServer(port=wdt.rst_port, rst_controller=wdt_rst_ctrl))
             self._add_server(RWServer(port=wdt.rw_port, bus=bus, base_addr=wdt.base_addr))
 
+        # ── 8. HSM ────────────────────────────────────────────────────────
+        if hsm is not None and dma_ctrl is not None:
+            hsm_irq_ctrl = IRQController()
+            hsm_dev = HsmDevice(
+                address_space  = addr_space,
+                irq_controller = hsm_irq_ctrl,
+                irq_idx        = 0,   # device IRQ output index (always 0)
+                otp_file       = hsm.otp_file,
+                tracer         = tracer,
+            )
+            bus.register(hsm.base_addr, hsm.size, hsm_dev)
+            self._add_server(IRQServer(port=hsm.irq_port, irq_controller=hsm_irq_ctrl))
+            self._add_server(RWServer(port=hsm.rw_port, bus=bus, base_addr=hsm.base_addr))
+
     # ── Internal helpers ──────────────────────────────────────────────────
 
     def _add_server(self, srv) -> None:
@@ -488,6 +522,7 @@ def kx6625_default(
         demo    @ 0x40007000  rw=7898 irq=7899 nvic_irq=3
         crc     @ 0x40008000  rw=7900
         wdt     @ 0x40009000  rw=7901 irq=7902 nvic_irq=4 rst=7903
+        hsm     @ 0x4000C000  rw=7908 irq=7909 nvic_irq=6 otp=build/hsm_otp.json
     """
     return SoCTop(
         uarts=[
@@ -535,6 +570,13 @@ def kx6625_default(
             irq_port  = 7902,
             nvic_irq  = 4,
             rst_port  = 7903,
+        ),
+        hsm=HsmCfg(
+            base_addr = 0x4000C000,
+            rw_port   = 7908,
+            irq_port  = 7909,
+            nvic_irq  = 6,
+            otp_file  = 'build/hsm_otp.json',
         ),
         tick_port = 7896,
         tracer    = tracer,

@@ -15,6 +15,7 @@
  *   0x40008000  crc device          (mmio-sockdev, polled)
  *   0x40009000  wdt device          (mmio-sockdev, IRQ4)
  *   0x4000B000  sv_timer device     (mmio-sockdev -> Verilated SV, IRQ5)
+ *   0x4000C000  hsm device          (mmio-sockdev, IRQ6)
  */
 
 #include <stdint.h>
@@ -59,6 +60,11 @@
 #define CRC_CTRL_RESET     0x1U   /* bit0: reset accumulator to 0xFFFFFFFF */
 #define DMA_CRC_SRC        (SRAM_BASE + 0x5000U)  /* 16B source for DMA→CRC test */
 
+/* HSM test buffers */
+#define HSM_TEST_SRC       (SRAM_BASE + 0x6000U)
+#define HSM_TEST_DST       (SRAM_BASE + 0x6100U)
+#define HSM_CMAC_DST       (SRAM_BASE + 0x6200U)
+
 /* WDT register bit definitions */
 #define WDT_CTRL_ENABLE     0x1U
 #define WDT_CTRL_INT_ENABLE 0x2U
@@ -69,6 +75,16 @@
 #define SV_TIMER_CTRL_ENABLE 0x1U
 #define SV_TIMER_CTRL_IRQ_EN 0x2U
 #define SV_TIMER_STATUS_IRQ  0x1U
+
+/* HSM register bit definitions */
+#define HSM_CTRL_START       0x1U
+#define HSM_CTRL_IRQ_ENABLE  0x2U
+#define HSM_STATUS_ERROR     0x4U
+#define HSM_INT_DONE         0x1U
+#define HSM_INT_ERROR        0x2U
+#define HSM_MODE_CBC         0x1U
+#define HSM_MODE_CMAC        0x4U
+#define HSM_KEY_ID_REGISTER  15U
 
 /* CRC-32 test vector: CRC-32("123456789") = 0xCBF43926  (ISO-HDLC / IEEE 802.3) */
 #define CRC_EXPECTED       0xCBF43926U
@@ -146,20 +162,20 @@ static int recv_line(char *buf, int len)
  *   NVIC_ICPR0 (0xE000E280) — IRQ clear pending for IRQ  0-31
  *   NVIC_IPR0  (0xE000E400) — priority bytes for IRQ 0-3
  *
- * Enables IRQ 0 (UART), IRQ 1 (DMA), IRQ 2 (Timer0), IRQ 5 (SV timer).
+ * Enables IRQ 0 (UART), IRQ 1 (DMA), IRQ 2 (Timer0), IRQ 5 (SV timer), IRQ 6 (HSM).
  * KX6625 has 16 external IRQs (0-15); IRQs 0/1/2 are our devices.
  * ----------------------------------------------------------------------- */
 static void nvic_init(void)
 {
-    /* 1. Clear any stale pending state for IRQ 0-5 */
-    mmio_write32(NVIC_ICPR0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5));
+    /* 1. Clear any stale pending state for IRQ 0-6 */
+    mmio_write32(NVIC_ICPR0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6));
 
     /* 2. Set priority 0 (highest) for IRQ 0-7 */
     mmio_write32(NVIC_IPR0, 0x00000000U);
     mmio_write32(NVIC_IPR1, 0x00000000U);
 
-    /* 3. Enable IRQ 0-5 in ISER0 */
-    mmio_write32(NVIC_ISER0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5));
+    /* 3. Enable IRQ 0-6 in ISER0 */
+    mmio_write32(NVIC_ISER0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6));
 }
 
 /* -----------------------------------------------------------------------
@@ -172,6 +188,7 @@ volatile int dma_irq_fired      = 0;
 volatile int dma_client_done    = 0;
 volatile int wdt_irq_fired      = 0;
 volatile int sv_timer_irq_fired = 0;
+volatile int hsm_irq_fired      = 0;
 
 void uart_irq_handler(void)     /* vector table IRQ0 */
 {
@@ -209,6 +226,22 @@ void sv_timer_irq_handler(void)    /* vector table IRQ5 */
         mmio_write32(SV_TIMER_IRQ_CLEAR_REG, SV_TIMER_STATUS_IRQ);
         sv_timer_irq_fired++;
         send_string("[IRQ] SV timer fired! INTID=5\n");
+    }
+}
+
+void hsm_irq_handler(void)         /* vector table IRQ6 */
+{
+    uint32_t int_status = mmio_read32(HSM_INT_STATUS_REG);
+    if (int_status) {
+        mmio_write32(HSM_INT_STATUS_REG, int_status);
+    }
+    if (int_status & HSM_INT_DONE) {
+        hsm_irq_fired++;
+        send_string("[IRQ] HSM done! INTID=6\n");
+    }
+    if (int_status & HSM_INT_ERROR) {
+        hsm_irq_fired++;
+        send_string("[IRQ] HSM error! INTID=6\n");
     }
 }
 
@@ -399,6 +432,105 @@ static void test_sv_timer(void)
     }
 }
 
+/* Test 8: HSM AES-128 CBC and CMAC */
+static void hsm_write_key_and_iv(void)
+{
+    /* AES-128 key: 2b7e151628aed2a6abf7158809cf4f3c
+     * IV:          000102030405060708090a0b0c0d0e0f
+     * Registers are little-endian words carrying the byte stream. */
+    mmio_write32(HSM_KEY_ID_REG, HSM_KEY_ID_REGISTER);
+    mmio_write32(HSM_KEY_WORD0_REG, 0x16157E2BU);
+    mmio_write32(HSM_KEY_WORD1_REG, 0xA6D2AE28U);
+    mmio_write32(HSM_KEY_WORD2_REG, 0x8815F7ABU);
+    mmio_write32(HSM_KEY_WORD3_REG, 0x3C4FCF09U);
+
+    mmio_write32(HSM_IV_WORD0_REG, 0x03020100U);
+    mmio_write32(HSM_IV_WORD1_REG, 0x07060504U);
+    mmio_write32(HSM_IV_WORD2_REG, 0x0B0A0908U);
+    mmio_write32(HSM_IV_WORD3_REG, 0x0F0E0D0CU);
+}
+
+static int hsm_wait_done(void)
+{
+    hsm_irq_fired = 0;
+    while (!hsm_irq_fired) {
+        __asm__ volatile ("wfi");
+    }
+    return (mmio_read32(HSM_STATUS_REG) & HSM_STATUS_ERROR) == 0U;
+}
+
+static void test_hsm(void)
+{
+    uint32_t i;
+    static const uint8_t plain[16] = {
+        0x6BU, 0xC1U, 0xBEU, 0xE2U, 0x2EU, 0x40U, 0x9FU, 0x96U,
+        0xE9U, 0x3DU, 0x7EU, 0x11U, 0x73U, 0x93U, 0x17U, 0x2AU
+    };
+    static const uint8_t cbc_expected[16] = {
+        0x76U, 0x49U, 0xABU, 0xACU, 0x81U, 0x19U, 0xB2U, 0x46U,
+        0xCEU, 0xE9U, 0x8EU, 0x9BU, 0x12U, 0xE9U, 0x19U, 0x7DU
+    };
+    static const uint8_t cmac_expected[16] = {
+        0x07U, 0x0AU, 0x16U, 0xB4U, 0x6BU, 0x4DU, 0x41U, 0x44U,
+        0xF7U, 0x9BU, 0xDDU, 0x9DU, 0xD0U, 0x4AU, 0x28U, 0x7CU
+    };
+
+    send_string("[HSM] HSM AES-CBC encrypt test.\n");
+    {
+        volatile uint8_t *src = (volatile uint8_t *)(uintptr_t)HSM_TEST_SRC;
+        volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)HSM_TEST_DST;
+        for (i = 0; i < 16U; i++) {
+            src[i] = plain[i];
+            dst[i] = 0U;
+        }
+    }
+
+    hsm_write_key_and_iv();
+    mmio_write32(HSM_INT_ENABLE_REG, HSM_INT_DONE | HSM_INT_ERROR);
+    mmio_write32(HSM_SRC_ADDR_REG, HSM_TEST_SRC);
+    mmio_write32(HSM_DST_ADDR_REG, HSM_TEST_DST);
+    mmio_write32(HSM_LENGTH_REG, 16U);
+    mmio_write32(HSM_MODE_REG, HSM_MODE_CBC);
+    mmio_write32(HSM_CTRL_REG, HSM_CTRL_START | HSM_CTRL_IRQ_ENABLE);
+
+    if (hsm_wait_done()) {
+        volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)HSM_TEST_DST;
+        int ok = 1;
+        for (i = 0; i < 16U; i++) {
+            if (dst[i] != cbc_expected[i]) { ok = 0; break; }
+        }
+        send_string(ok ? "[HSM] HSM AES-CBC encrypt PASSED!\n"
+                       : "[HSM] HSM AES-CBC encrypt FAILED!\n");
+    } else {
+        send_string("[HSM] HSM AES-CBC encrypt FAILED!\n");
+    }
+
+    send_string("[HSM] HSM AES-CMAC test.\n");
+    {
+        volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)HSM_CMAC_DST;
+        for (i = 0; i < 16U; i++) dst[i] = 0U;
+    }
+    hsm_write_key_and_iv();
+    mmio_write32(HSM_INT_ENABLE_REG, HSM_INT_DONE | HSM_INT_ERROR);
+    mmio_write32(HSM_SRC_ADDR_REG, HSM_TEST_SRC);
+    mmio_write32(HSM_DST_ADDR_REG, HSM_CMAC_DST);
+    mmio_write32(HSM_LENGTH_REG, 16U);
+    mmio_write32(HSM_MODE_REG, HSM_MODE_CMAC);
+    mmio_write32(HSM_CTRL_REG, HSM_CTRL_START | HSM_CTRL_IRQ_ENABLE);
+
+    if (hsm_wait_done()) {
+        volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)HSM_CMAC_DST;
+        int ok = 1;
+        for (i = 0; i < 16U; i++) {
+            if (dst[i] != cmac_expected[i]) { ok = 0; break; }
+        }
+        send_string(ok ? "[HSM] HSM AES-CMAC PASSED!\n"
+                       : "[HSM] HSM AES-CMAC FAILED!\n");
+    } else {
+        send_string("[HSM] HSM AES-CMAC FAILED!\n");
+    }
+}
+
 /* Test 5: Watchdog Timer (handles warm-boot detection internally) */
 static void test_wdt(void)
 {
@@ -464,7 +596,7 @@ static void app_task(void *arg)
 
     /* Initialise NVIC */
     nvic_init();
-    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer, IRQ5=SV timer).\n");
+    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer, IRQ5=SV timer, IRQ6=HSM).\n");
 
     /* Enable IRQs globally */
     __asm__ volatile ("cpsie i" ::: "memory");
@@ -488,7 +620,8 @@ static void app_task(void *arg)
      *   4  CRC-32 accelerator (direct + DMA→CRC)
     *   5  Watchdog Timer demo
     *   7  SV APB timer demo
-    *   a  All tests in sequence (1→2→3→4→6→7→5)
+    *   8  HSM AES/CMAC demo
+    *   a  All tests in sequence (1→2→3→4→6→7→8→5)
      */
     while (1) {
         send_string("=== KX6625 Test Menu ===\n");
@@ -499,6 +632,7 @@ static void app_task(void *arg)
         send_string(" 5) WDT reset\n");
         send_string(" 6) Dual-CPU IPC\n");
         send_string(" 7) SV APB timer\n");
+        send_string(" 8) HSM AES/CMAC\n");
         send_string(" a) All tests\n");
         send_string("# ");
 
@@ -520,6 +654,8 @@ static void app_task(void *arg)
             test_dual_cpu();
         } else if (cmd == '7') {
             test_sv_timer();
+        } else if (cmd == '8') {
+            test_hsm();
         } else if (cmd == 'a') {
             irq_count = 0;
             test_uart_irq();
@@ -528,10 +664,11 @@ static void app_task(void *arg)
             test_crc();
             test_dual_cpu();
             test_sv_timer();
+            test_hsm();
             test_wdt();
             /* If WDT path causes reset, we return here on warm boot */
         } else {
-            send_string("[FW] Unknown command. Enter 1-7 or 'a'.\n");
+            send_string("[FW] Unknown command. Enter 1-8 or 'a'.\n");
         }
     }
 }
