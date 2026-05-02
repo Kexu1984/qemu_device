@@ -551,48 +551,21 @@ The Python device server binds all TCP ports first; QEMU connects to them as a c
 
 ```bash
 qemu-system-arm -M kx6625 -smp 2 -nographic -no-reboot \
-  -icount shift=5,sleep=off,align=off \
-  \
-  # Console UART
-  -chardev socket,id=uart_rw,host=127.0.0.1,port=7890 \
-  -chardev socket,id=uart_irq,host=127.0.0.1,port=7891 \
-  -device  mmio-sockdev,chardev=uart_rw,irq-chardev=uart_irq,addr=0x40004000,irq-num=0 \
-  \
-  # DMA controller — mem-chardev for bus-master; tick-chardev (port 7905) for DES one-shot ticks
-  -chardev socket,id=dma_rw,host=127.0.0.1,port=7892 \
-  -chardev socket,id=dma_irq,host=127.0.0.1,port=7893 \
-  -chardev socket,id=dma_mem,host=127.0.0.1,port=7897 \
-  -chardev socket,id=dma_tick,host=127.0.0.1,port=7905 \
-  -device  mmio-sockdev,chardev=dma_rw,irq-chardev=dma_irq,mem-chardev=dma_mem,tick-chardev=dma_tick,tick-period-ms=0,addr=0x40005000,irq-num=1 \
-  \
-  # Timer 0 — tick-chardev (port 7896) is the shared 1 ms periodic broadcast
-  -chardev socket,id=timer_rw,host=127.0.0.1,port=7894 \
-  -chardev socket,id=timer_irq,host=127.0.0.1,port=7895 \
-  -chardev socket,id=timer_tick,host=127.0.0.1,port=7896 \
-  -device  mmio-sockdev,chardev=timer_rw,irq-chardev=timer_irq,tick-chardev=timer_tick,tick-period-ms=1,addr=0x40006000,irq-num=2 \
-  \
-  # DMA Client Demo peripheral
-  -chardev socket,id=demo_rw,host=127.0.0.1,port=7898 \
-  -chardev socket,id=demo_irq,host=127.0.0.1,port=7899 \
-  -device  mmio-sockdev,chardev=demo_rw,irq-chardev=demo_irq,addr=0x40007000,irq-num=3 \
-  \
-  # CRC-32 engine (no IRQ, no tick)
-  -chardev socket,id=crc_rw,host=127.0.0.1,port=7900 \
-  -device  mmio-sockdev,chardev=crc_rw,addr=0x40008000 \
-  \
-  # Watchdog Timer (IRQ 4 pre-reset warning + rst-chardev for system reset)
-  -chardev socket,id=wdt_rw,host=127.0.0.1,port=7901 \
-  -chardev socket,id=wdt_irq,host=127.0.0.1,port=7902 \
-  -chardev socket,id=wdt_rst,host=127.0.0.1,port=7903 \
-  -device  mmio-sockdev,chardev=wdt_rw,irq-chardev=wdt_irq,rst-chardev=wdt_rst,addr=0x40009000,irq-num=4 \
-    \
-    # SystemVerilog APB timer prototype (IRQ 5)
-    -chardev socket,id=sv_timer_rw,host=127.0.0.1,port=7906 \
-    -chardev socket,id=sv_timer_irq,host=127.0.0.1,port=7907 \
-    -device  mmio-sockdev,chardev=sv_timer_rw,irq-chardev=sv_timer_irq,addr=0x4000B000,irq-num=5 \
-  \
-  -kernel firmware.elf
+    -icount shift=5,sleep=off,align=off \
+    -device mmio-sockdev,...,addr=0x40004000,irq-num=0 \
+    -device mmio-sockdev,...,addr=0x40005000,irq-num=1 \
+    -device mmio-sockdev,...,addr=0x40006000,irq-num=2 \
+    -device mmio-sockdev,...,addr=0x40007000,irq-num=3 \
+    -device mmio-sockdev,...,addr=0x40008000 \
+    -device mmio-sockdev,...,addr=0x40009000,irq-num=4 \
+    -device mmio-sockdev,...,addr=0x4000B000,irq-num=5 \
+    -device mmio-sockdev,...,addr=0x4000C000,irq-num=6 \
+    -kernel build/firmware.hex
 ```
+
+The full command line, including all `-chardev` socket wiring, is maintained in `scripts/e2e_test.sh` and `scripts/run_interactive.sh`.
+
+The KX6625 QEMU machine treats `-kernel build/firmware.hex` as a flash preload image, not as a direct ELF boot. During machine initialisation it fills FLASH with erased bytes (`0xFF`), parses the Intel HEX records into the FLASH ROM backing store, then lets the Cortex-M reset sequence fetch MSP/PC from address `0x00000000`. Keep `build/firmware.elf` for symbols and debugging.
 
 > **`tick-period-ms=0`** on the DMA device disables the periodic tick. QEMU only fires the DMA tick channel when a DES `next_event_ns > 0` response is received from a write.  
 > **`tick-period-ms=1`** on the timer device keeps the 1 ms shared broadcast for all bus devices.
@@ -613,7 +586,7 @@ qemu-system-arm -M kx6625 -smp 2 -nographic -no-reboot \
 make fw
 ```
 
-Output: `build/firmware.elf` and `build/firmware.bin`. This also runs `make gen` to regenerate `build/generated/mmio_devices.h` from `spec/devices.yaml`.
+Output: `build/firmware.elf`, `build/firmware.bin`, and `build/firmware.hex`. QEMU boots from `build/firmware.hex`; keep the ELF for symbols and post-build inspection. This also runs `make gen` to regenerate `build/generated/mmio_devices.h` from `spec/devices.yaml`.
 
 ### 2. Build SystemVerilog device prototype
 
@@ -640,7 +613,7 @@ ICOUNT_SHIFT=5 bash scripts/e2e_test.sh
 This single command:
 1. Starts the Python device server and the SV timer bridge
 2. Waits for the UART port to be ready
-3. Starts QEMU (`-M kx6625 -icount shift=5,sleep=off,align=off`) with all `mmio-sockdev` instances and the firmware
+3. Starts QEMU (`-M kx6625 -icount shift=5,sleep=off,align=off`) with all `mmio-sockdev` instances and preloads `build/firmware.hex` into FLASH
 4. Polls firmware output in the server log for up to 120 s
 5. Asserts all expected log lines are present and prints PASS or FAIL
 6. Generates `build/trace_report.html` — a self-contained HTML visualizer of all device events
@@ -685,7 +658,7 @@ Logs are written to `build/e2e_server.log` and `build/e2e_qemu.log` for post-mor
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `Required file not found: …/qemu-system-arm` | QEMU not built yet | `make qemu` |
-| `Required file not found: …/firmware.bin` | Firmware not built | `make fw` |
+| `Required file not found: …/firmware.hex` | Firmware not built | `make fw` |
 | Port already in use | Leftover process | `fuser -k 7890/tcp 7891/tcp` |
 | Timeout / FAIL | IRQ not firing | Check `build/e2e_server.log` and `build/e2e_qemu.log` |
 
@@ -848,7 +821,7 @@ qemu_device/
 │           ├── misc/mmio_sockdev.c   # Generic SysBus mmio-sockdev (chardev/irq/tick/mem/rst)
 │           └── arm/kx6625.c          # KX6625 custom SoC definition
 └── build/                            # Build artifacts (gitignored)
-    ├── firmware.elf / firmware.bin
+    ├── firmware.elf / firmware.bin / firmware.hex
     ├── device_trace.jsonl            # Device event trace (JSONL; created at server runtime)
     ├── trace_report.html             # HTML trace visualizer (generated after e2e_test.sh)
     └── generated/
@@ -860,7 +833,7 @@ qemu_device/
 | Target       | Description                                                  |
 |--------------|--------------------------------------------------------------|
 | `make gen`   | Generate C header + Python consts from `spec/`               |
-| `make fw`    | Generate constants, then build firmware (`build/firmware.elf`) |
+| `make fw`    | Generate constants, then build firmware (`build/firmware.elf`, `.bin`, `.hex`) |
 | `make sv`    | Build Verilator-backed SV device prototypes                   |
 | `make qemu`  | Copy `mmio_sockdev.c` to qemu-fork, then build QEMU          |
 | `make run`   | Print interactive run instructions                           |
@@ -896,7 +869,7 @@ IRQ pulse pattern: assert then immediately deassert to edge-trigger the NVIC wit
 |---------|-----|
 | `"chardev not connected"` | Start Python server before QEMU |
 | `"Connection refused"` on port | Check server is running: `lsof -i :7890` |
-| Firmware never prints | Verify `build/firmware.elf` exists (`make fw`) |
+| Firmware never prints | Verify `build/firmware.hex` exists and QEMU was rebuilt (`make fw && make qemu`) |
 | IRQ never fires | Check `build/e2e_server.log`; confirm IRQ port not blocked |
 | DMA never completes | Check `build/e2e_server.log` for `[MEM]` and `[TICK]` connection lines |
 | WDT timeout never fires | Confirm WDT CTRL.ENABLE is set; check `[TICK]` connection in server log |

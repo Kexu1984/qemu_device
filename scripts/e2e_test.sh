@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 QEMU_BIN="$PROJECT_ROOT/scripts/qemu-fork/build/qemu-system-arm"
-FIRMWARE_BIN="$PROJECT_ROOT/build/firmware.bin"
+FIRMWARE_HEX="$PROJECT_ROOT/build/firmware.hex"
 SERVER_SCRIPT="$PROJECT_ROOT/device_model/mmio_device_server.py"
 SV_BRIDGE="$PROJECT_ROOT/sv_device/build/sv_timer_bridge"
 
@@ -63,7 +63,7 @@ trap cleanup EXIT
 # -----------------------------------------------------------------------
 # Sanity checks
 # -----------------------------------------------------------------------
-for f in "$QEMU_BIN" "$FIRMWARE_BIN" "$SERVER_SCRIPT" "$SV_BRIDGE"; do
+for f in "$QEMU_BIN" "$FIRMWARE_HEX" "$SERVER_SCRIPT" "$SV_BRIDGE"; do
     if [ ! -f "$f" ]; then
         fail "Required file not found: $f"
         exit 1
@@ -72,7 +72,7 @@ done
 
 mkdir -p "$LOG_DIR"
 info "QEMU    : $QEMU_BIN"
-info "Firmware: $FIRMWARE_BIN"
+info "Firmware HEX: $FIRMWARE_HEX"
 echo ""
 
 # -----------------------------------------------------------------------
@@ -195,7 +195,7 @@ info "Starting QEMU..."
     -chardev socket,id=hsm_rw,host=127.0.0.1,port=7908 \
     -chardev socket,id=hsm_irq,host=127.0.0.1,port=7909 \
     -device mmio-sockdev,chardev=hsm_rw,irq-chardev=hsm_irq,addr=0x4000C000,irq-num=6 \
-    -kernel "${FIRMWARE_BIN%.bin}.elf" \
+    -kernel "$FIRMWARE_HEX" \
     </dev/null > "$QEMU_LOG" 2>&1 &
 QEMU_PID=$!
 info "QEMU PID: $QEMU_PID  (log: $QEMU_LOG)"

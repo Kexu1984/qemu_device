@@ -14,8 +14,10 @@
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include "hw/arm/boot.h"
+#include "hw/loader.h"
 #include "hw/arm/armv7m.h"
 #include "hw/boards.h"
+#include "exec/memory.h"
 #include "exec/address-spaces.h"
 #include "hw/qdev-properties.h"
 #include "hw/misc/unimp.h"
@@ -94,6 +96,37 @@ static const MemoryRegionOps kx6625_sysctrl_ops = {
 
 /* ── Board initialisation ──────────────────────────────────────────────── */
 
+static void kx6625_init_flash_erase_state(KX6625MachineState *s)
+{
+    int i;
+
+    for (i = 0; i < KX6625_FLASH_COUNT; i++) {
+        memset(memory_region_get_ram_ptr(&s->flash[i]), 0xff,
+               kx6625_flash_regions[i].size);
+    }
+}
+
+static void kx6625_load_firmware_hex(MachineState *machine)
+{
+    hwaddr entry = KX6625_FLASH0_BASE;
+    ssize_t image_size;
+
+    if (!machine->kernel_filename) {
+        error_report("kx6625: missing firmware image; pass Intel HEX with -kernel");
+        exit(1);
+    }
+
+    image_size = load_targphys_hex_as(machine->kernel_filename, &entry, NULL);
+    if (image_size < 0) {
+        error_report("kx6625: could not load Intel HEX firmware '%s'",
+                     machine->kernel_filename);
+        exit(1);
+    }
+
+    info_report("kx6625: loaded %zd bytes from Intel HEX '%s' into flash",
+                image_size, machine->kernel_filename);
+}
+
 static void kx6625_init(MachineState *machine)
 {
     KX6625MachineState *s = KX6625_MACHINE(machine);
@@ -117,6 +150,7 @@ static void kx6625_init(MachineState *machine)
                                     (hwaddr)kx6625_flash_regions[i].base,
                                     &s->flash[i]);
     }
+    kx6625_init_flash_erase_state(s);
 
     /* SRAM (RAM) regions — read/write */
     for (i = 0; i < KX6625_SRAM_COUNT; i++) {
@@ -195,12 +229,16 @@ static void kx6625_init(MachineState *machine)
     memory_region_add_subregion_overlap(system_memory, KX6625_SYSCTRL_BASE,
                                         &s->sysctrl_mmio, 1);
 
-    /* Load firmware ELF / binary into the primary flash region */
-    armv7m_load_kernel(ARM_CPU(first_cpu), machine->kernel_filename,
+    /* Register Cortex-M reset handling, then preload flash from Intel HEX.
+     * The HEX file is treated as an already-programmed flash image: QEMU fills
+     * flash with erased bytes first, writes the HEX records into ROM backing
+     * storage, and only then lets CPU reset fetch MSP/PC from 0x00000000. */
+    armv7m_load_kernel(ARM_CPU(first_cpu), NULL,
                        (hwaddr)KX6625_FLASH0_BASE, (int)KX6625_FLASH0_SIZE);
+    kx6625_load_firmware_hex(machine);
 
     /* Re-reset CPU1 now that firmware is loaded into flash.
-     * start-powered-off applied cpu_reset() before the firmware ELF was written,
+     * start-powered-off applied cpu_reset() before the firmware HEX was written,
      * so CPU1's initial PC/SP were read from an uninitialised flash (zeros).
      * Re-running cpu_reset() reads the correct vector table from the loaded image.
      * Re-apply halt so CPU1 waits for the SYSCTRL.CPU1RST write from firmware. */

@@ -24,9 +24,11 @@ jobs:
     - name: Test protocol implementation
       run: make test
     
-    - name: Verify firmware binary exists
+    - name: Verify firmware images exist
       run: |
+        ls -la build/firmware.elf
         ls -la build/firmware.bin
+        ls -la build/firmware.hex
         file build/firmware.bin
     
     - name: Check firmware size

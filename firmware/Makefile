@@ -35,7 +35,7 @@ TARGET = $(BUILD_DIR)/firmware
 
 .PHONY: all gen clean
 
-all: gen $(TARGET).bin
+all: gen $(TARGET).bin $(TARGET).hex
 
 # Run code generator before compiling firmware
 gen: $(GEN_HEADER)
@@ -61,6 +61,9 @@ $(TARGET).elf: $(OBJECTS)
 
 $(TARGET).bin: $(TARGET).elf
 	$(OBJCOPY) -O binary $< $@
+
+$(TARGET).hex: $(TARGET).elf
+	$(OBJCOPY) -O ihex $< $@
 
 clean:
 	rm -f $(BUILD_DIR)/firmware.*
