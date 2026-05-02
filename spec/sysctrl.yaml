@@ -1,0 +1,143 @@
+# ============================================================================
+# SYSCTRL — KX6625 system control register map
+# ============================================================================
+#
+# SYSCTRL is a native QEMU MMIO block, not an external mmio-sockdev device.
+# It owns chip-level control surfaces that are expected to exist before the
+# Python device server is connected: CPU identity, CPU reset release, boot
+# status, coarse clock/reset gates, and a controlled indirect device-register
+# access window.
+#
+# Design intent:
+#   - Keep reset-time CPU discovery simple: reset code can read CPUID at offset
+#     0x00 before stack setup.
+#   - Preserve the legacy CPU1RST alias at 0x04 so existing firmware continues
+#     to release CPU1 by writing 1.
+#   - Centralize system policy knobs that will later be used by boot ROM,
+#     secure boot, HSM ownership, and device reset/clock control.
+#   - Let firmware perform controlled SYSCTRL-mediated device register access
+#     through DEVCTL_* registers. This models a system controller that can reach
+#     peripheral registers as a privileged bus master without making every
+#     device directly responsible for global policy.
+#
+# Device-control convention:
+#   DEVCTL_ADDR selects a 32-bit aligned physical register address.
+#   DEVCTL_WDATA provides write data.
+#   Writing DEVCTL_CTRL.START with READ or WRITE performs one 32-bit access.
+#   DEVCTL_STATUS reports BUSY/DONE/ERROR and DEVCTL_RDATA returns read data.
+#   Accesses to SYSCTRL itself through DEVCTL are invalid to avoid recursion.
+
+registers:
+  - offset:      0x00
+    name:        CPUID
+    access:      R
+    description: "Current CPU index from the QEMU vCPU performing the access: 0=CPU0, 1=CPU1"
+    reset_value: 0x00000000
+
+  - offset:      0x04
+    name:        CPU1RST
+    access:      W
+    description: "Legacy CPU1 reset-release alias. Write 1 to release CPU1 from reset/hold state. Prefer CPU_CTRL.CPU1_RELEASE for new code."
+    reset_value: 0x00000000
+
+  - offset:      0x08
+    name:        ID
+    access:      R
+    description: "Device ID: ASCII 'SCTL' encoded little-endian"
+    reset_value: 0x4C544353
+
+  - offset:      0x0C
+    name:        VERSION
+    access:      R
+    description: "SYSCTRL model version: major.minor encoded as 0x00010000 for v1.0"
+    reset_value: 0x00010000
+
+  - offset:      0x10
+    name:        RESET_CTRL
+    access:      RW
+    description: "System reset control. bit0=SYS_RESET_REQ (write 1 requests QEMU subsystem reset, self-clears); bit1=HOLD_CPU1_AFTER_RESET."
+    reset_value: 0x00000002
+
+  - offset:      0x14
+    name:        RESET_STATUS
+    access:      R
+    description: "Reset status. bit0=POR_SEEN; bit1=SYS_RESET_REQUESTED_BY_SYSCTRL; bit2=CPU1_HELD_IN_RESET."
+    reset_value: 0x00000005
+
+  - offset:      0x18
+    name:        CPU_CTRL
+    access:      RW
+    description: "CPU control. bit0=CPU0_ENABLE (read-only 1 in this model); bit1=CPU1_RELEASE (write 1 releases CPU1, read reflects released state); bit2=CPU1_HALT_REQ reserved."
+    reset_value: 0x00000001
+
+  - offset:      0x1C
+    name:        CPU_STATUS
+    access:      R
+    description: "CPU status. bit0=CPU0_ACTIVE; bit1=CPU1_RELEASED; bit2=CPU1_HALTED_OR_HELD."
+    reset_value: 0x00000005
+
+  - offset:      0x20
+    name:        BOOT_MODE
+    access:      RW
+    description: "Boot mode straps/policy. bits[1:0]=BOOT_SRC (0=FLASH_HEX, 1=BOOTROM reserved, 2=SRAM reserved); bit8=SECURE_BOOT_EN reserved."
+    reset_value: 0x00000000
+
+  - offset:      0x24
+    name:        BOOT_STATUS
+    access:      R
+    description: "Boot status. bit0=FLASH_IMAGE_LOADED; bit1=BOOT_VECTOR_VALID; bit2=SECURE_BOOT_DONE reserved; bit3=SECURE_BOOT_PASS reserved."
+    reset_value: 0x00000003
+
+  - offset:      0x30
+    name:        DEVICE_CLK_EN
+    access:      RW
+    description: "Coarse peripheral clock enable bitmap. bit0=UART, bit1=DMA, bit2=TIMER0, bit3=DMA_CLIENT_DEMO, bit4=CRC, bit5=WDT, bit6=SV_TIMER, bit7=HSM. Current models keep clocks effectively enabled but expose policy state here."
+    reset_value: 0x000000FF
+
+  - offset:      0x34
+    name:        DEVICE_RST_CTRL
+    access:      RW
+    description: "Peripheral reset request bitmap, W1 pulse semantic in QEMU model. bit assignments match DEVICE_CLK_EN. Actual Python-device reset propagation is future work; QEMU records requested reset pulses in DEVICE_RST_STATUS."
+    reset_value: 0x00000000
+
+  - offset:      0x38
+    name:        DEVICE_RST_STATUS
+    access:      R
+    description: "Last peripheral reset request bitmap latched from DEVICE_RST_CTRL writes. Firmware can use this as an observable SYSCTRL policy state."
+    reset_value: 0x00000000
+
+  - offset:      0x40
+    name:        DEVCTL_ADDR
+    access:      RW
+    description: "Indirect device register access target physical address. Must be 32-bit aligned and must not point back into SYSCTRL."
+    reset_value: 0x00000000
+
+  - offset:      0x44
+    name:        DEVCTL_WDATA
+    access:      RW
+    description: "Indirect device register write data. Used when DEVCTL_CTRL.WRITE is set."
+    reset_value: 0x00000000
+
+  - offset:      0x48
+    name:        DEVCTL_RDATA
+    access:      R
+    description: "Indirect device register read data. Updated after a successful DEVCTL read."
+    reset_value: 0x00000000
+
+  - offset:      0x4C
+    name:        DEVCTL_CTRL
+    access:      RW
+    description: "Indirect access control. bit0=START (self-clears); bit1=READ; bit2=WRITE. Exactly one of READ/WRITE must be set with START."
+    reset_value: 0x00000000
+
+  - offset:      0x50
+    name:        DEVCTL_STATUS
+    access:      R
+    description: "Indirect access status. bit0=BUSY; bit1=DONE; bit2=ERROR; bit3=ADDR_ALIGN_ERR; bit4=ADDR_RANGE_ERR; bit5=BUS_ERROR."
+    reset_value: 0x00000000
+
+  - offset:      0x54
+    name:        DEVCTL_ERROR
+    access:      R
+    description: "Indirect access last error code. 0=NONE; 1=BAD_CTRL; 2=ADDR_ALIGN; 3=ADDR_RANGE; 4=BUS_ERROR."
+    reset_value: 0x00000000

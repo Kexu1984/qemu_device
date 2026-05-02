@@ -111,6 +111,33 @@ WDT_STATUS_REG                           = 0x40009010  # offset 0x0010  R  Statu
 WDT_RESET_REASON_REG                     = 0x40009014  # offset 0x0014  R  Retention: 0=POR/global-reset  1=WDT-reset. Survives watchdog reset.
 WDT_TIMEOUT_CNT_REG                      = 0x40009018  # offset 0x0018  R  Retention: cumulative WDT timeout count since power-on.
 
+# ── SYSCTRL ─────────────────────────────────────────────────────
+# System controller — CPU reset release, boot policy, device clock/reset state, indirect device register access
+SYSCTRL_BASE         = 0x4000A000
+SYSCTRL_SIZE         = 0x1000
+SYSCTRL_NATIVE_MMIO  = True
+
+# Registers
+SYSCTRL_CPUID_REG                        = 0x4000A000  # offset 0x0000  R  Current CPU index from the QEMU vCPU performing the access: 0=CPU0, 1=CPU1
+SYSCTRL_CPU1RST_REG                      = 0x4000A004  # offset 0x0004  W  Legacy CPU1 reset-release alias. Write 1 to release CPU1 from reset/hold state. Prefer CPU_CTRL.CPU1_RELEASE for new code.
+SYSCTRL_ID_REG                           = 0x4000A008  # offset 0x0008  R  Device ID: ASCII 'SCTL' encoded little-endian
+SYSCTRL_VERSION_REG                      = 0x4000A00C  # offset 0x000C  R  SYSCTRL model version: major.minor encoded as 0x00010000 for v1.0
+SYSCTRL_RESET_CTRL_REG                   = 0x4000A010  # offset 0x0010  RW  System reset control. bit0=SYS_RESET_REQ (write 1 requests QEMU subsystem reset, self-clears); bit1=HOLD_CPU1_AFTER_RESET.
+SYSCTRL_RESET_STATUS_REG                 = 0x4000A014  # offset 0x0014  R  Reset status. bit0=POR_SEEN; bit1=SYS_RESET_REQUESTED_BY_SYSCTRL; bit2=CPU1_HELD_IN_RESET.
+SYSCTRL_CPU_CTRL_REG                     = 0x4000A018  # offset 0x0018  RW  CPU control. bit0=CPU0_ENABLE (read-only 1 in this model); bit1=CPU1_RELEASE (write 1 releases CPU1, read reflects released state); bit2=CPU1_HALT_REQ reserved.
+SYSCTRL_CPU_STATUS_REG                   = 0x4000A01C  # offset 0x001C  R  CPU status. bit0=CPU0_ACTIVE; bit1=CPU1_RELEASED; bit2=CPU1_HALTED_OR_HELD.
+SYSCTRL_BOOT_MODE_REG                    = 0x4000A020  # offset 0x0020  RW  Boot mode straps/policy. bits[1:0]=BOOT_SRC (0=FLASH_HEX, 1=BOOTROM reserved, 2=SRAM reserved); bit8=SECURE_BOOT_EN reserved.
+SYSCTRL_BOOT_STATUS_REG                  = 0x4000A024  # offset 0x0024  R  Boot status. bit0=FLASH_IMAGE_LOADED; bit1=BOOT_VECTOR_VALID; bit2=SECURE_BOOT_DONE reserved; bit3=SECURE_BOOT_PASS reserved.
+SYSCTRL_DEVICE_CLK_EN_REG                = 0x4000A030  # offset 0x0030  RW  Coarse peripheral clock enable bitmap. bit0=UART, bit1=DMA, bit2=TIMER0, bit3=DMA_CLIENT_DEMO, bit4=CRC, bit5=WDT, bit6=SV_TIMER, bit7=HSM. Current models keep clocks effectively enabled but expose policy state here.
+SYSCTRL_DEVICE_RST_CTRL_REG              = 0x4000A034  # offset 0x0034  RW  Peripheral reset request bitmap, W1 pulse semantic in QEMU model. bit assignments match DEVICE_CLK_EN. Actual Python-device reset propagation is future work; QEMU records requested reset pulses in DEVICE_RST_STATUS.
+SYSCTRL_DEVICE_RST_STATUS_REG            = 0x4000A038  # offset 0x0038  R  Last peripheral reset request bitmap latched from DEVICE_RST_CTRL writes. Firmware can use this as an observable SYSCTRL policy state.
+SYSCTRL_DEVCTL_ADDR_REG                  = 0x4000A040  # offset 0x0040  RW  Indirect device register access target physical address. Must be 32-bit aligned and must not point back into SYSCTRL.
+SYSCTRL_DEVCTL_WDATA_REG                 = 0x4000A044  # offset 0x0044  RW  Indirect device register write data. Used when DEVCTL_CTRL.WRITE is set.
+SYSCTRL_DEVCTL_RDATA_REG                 = 0x4000A048  # offset 0x0048  R  Indirect device register read data. Updated after a successful DEVCTL read.
+SYSCTRL_DEVCTL_CTRL_REG                  = 0x4000A04C  # offset 0x004C  RW  Indirect access control. bit0=START (self-clears); bit1=READ; bit2=WRITE. Exactly one of READ/WRITE must be set with START.
+SYSCTRL_DEVCTL_STATUS_REG                = 0x4000A050  # offset 0x0050  R  Indirect access status. bit0=BUSY; bit1=DONE; bit2=ERROR; bit3=ADDR_ALIGN_ERR; bit4=ADDR_RANGE_ERR; bit5=BUS_ERROR.
+SYSCTRL_DEVCTL_ERROR_REG                 = 0x4000A054  # offset 0x0054  R  Indirect access last error code. 0=NONE; 1=BAD_CTRL; 2=ADDR_ALIGN; 3=ADDR_RANGE; 4=BUS_ERROR.
+
 # ── SV_TIMER ────────────────────────────────────────────────────
 # SystemVerilog APB timer prototype — Verilator-backed external model
 SV_TIMER_BASE         = 0x4000B000

@@ -14,8 +14,10 @@
  *   0x20020000  CPU1 stack  (4 KB, grows down)  ← _cpu1_stack_top
  *
  * SYSCTRL (native MMIO at 0x4000A000, implemented in kx6625.c):
- *   0x4000A000  SYSCTRL_CPUID  [RO] returns current CPU's cpu_index
- *   0x4000A004  SYSCTRL_CPU1RST [WO] write 1 to release CPU1 from reset
+ *   0x4000A000  SYSCTRL_CPUID    [RO] returns current CPU's cpu_index
+ *   0x4000A004  SYSCTRL_CPU1RST  [WO] legacy write-1 CPU1 reset release
+ *   0x4000A018  SYSCTRL_CPU_CTRL [RW] bit1 also releases CPU1
+ *   0x4000A040+ SYSCTRL_DEVCTL_* indirect device-register access window
  */
 
 #ifndef IPC_H
@@ -45,8 +47,34 @@
 #define IPC_REQ_ECHO_XOR   0x01U
 
 /* ── SYSCTRL registers ───────────────────────────────────────────────── */
+#ifndef SYSCTRL_BASE
 #define SYSCTRL_BASE    0x4000A000U
+#endif
 #define SYSCTRL_CPUID   (*(volatile uint32_t *)(SYSCTRL_BASE + 0x00U))
 #define SYSCTRL_CPU1RST (*(volatile uint32_t *)(SYSCTRL_BASE + 0x04U))
+#define SYSCTRL_ID      (*(volatile uint32_t *)(SYSCTRL_BASE + 0x08U))
+#define SYSCTRL_VERSION (*(volatile uint32_t *)(SYSCTRL_BASE + 0x0CU))
+#define SYSCTRL_RESET_CTRL   (*(volatile uint32_t *)(SYSCTRL_BASE + 0x10U))
+#define SYSCTRL_RESET_STATUS (*(volatile uint32_t *)(SYSCTRL_BASE + 0x14U))
+#define SYSCTRL_CPU_CTRL     (*(volatile uint32_t *)(SYSCTRL_BASE + 0x18U))
+#define SYSCTRL_CPU_STATUS   (*(volatile uint32_t *)(SYSCTRL_BASE + 0x1CU))
+#define SYSCTRL_BOOT_MODE    (*(volatile uint32_t *)(SYSCTRL_BASE + 0x20U))
+#define SYSCTRL_BOOT_STATUS  (*(volatile uint32_t *)(SYSCTRL_BASE + 0x24U))
+#define SYSCTRL_DEVICE_CLK_EN     (*(volatile uint32_t *)(SYSCTRL_BASE + 0x30U))
+#define SYSCTRL_DEVICE_RST_CTRL   (*(volatile uint32_t *)(SYSCTRL_BASE + 0x34U))
+#define SYSCTRL_DEVICE_RST_STATUS (*(volatile uint32_t *)(SYSCTRL_BASE + 0x38U))
+#define SYSCTRL_DEVCTL_ADDR   (*(volatile uint32_t *)(SYSCTRL_BASE + 0x40U))
+#define SYSCTRL_DEVCTL_WDATA  (*(volatile uint32_t *)(SYSCTRL_BASE + 0x44U))
+#define SYSCTRL_DEVCTL_RDATA  (*(volatile uint32_t *)(SYSCTRL_BASE + 0x48U))
+#define SYSCTRL_DEVCTL_CTRL   (*(volatile uint32_t *)(SYSCTRL_BASE + 0x4CU))
+#define SYSCTRL_DEVCTL_STATUS (*(volatile uint32_t *)(SYSCTRL_BASE + 0x50U))
+#define SYSCTRL_DEVCTL_ERROR  (*(volatile uint32_t *)(SYSCTRL_BASE + 0x54U))
+
+#define SYSCTRL_CPU_CTRL_CPU1_RELEASE 0x2U
+#define SYSCTRL_DEVCTL_START          0x1U
+#define SYSCTRL_DEVCTL_READ           0x2U
+#define SYSCTRL_DEVCTL_WRITE          0x4U
+#define SYSCTRL_DEVCTL_STATUS_DONE    0x2U
+#define SYSCTRL_DEVCTL_STATUS_ERROR   0x4U
 
 #endif /* IPC_H */

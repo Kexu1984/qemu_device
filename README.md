@@ -29,11 +29,12 @@ This project implements:
 - **Custom QEMU Device** (`mmio-sockdev`): Generic SysBus proxy — 4 KB MMIO, IRQ line, optional virtual-clock tick channel, optional bus-master DMA memory channel, optional system-reset channel (`rst-chardev`). One instance per device on the QEMU command line.
 - **Python Device Server** (`device_model/mmio_device_server.py`): Transport + address dispatcher (`MMIOBus`). Each peripheral is a `MMIODevice` subclass with `read()`, `write()`, and an optional `on_tick()` override.
 - **SoC Topology** (`device_model/soc_top.py`): Typed config dataclasses (`UartCfg`, `TimerCfg`, `DmaCfg`, …) and `SoCTop` — the top-level wiring class. `SoCTop` instantiates any number of each device type, assigns each its own `IRQController` / transport servers, and exposes `start()` / `stop()`. `kx6625_default()` returns the canonical KX6625 device map.
-- **Eight modelled peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT), SystemVerilog APB timer prototype, and an HSM crypto accelerator with AES-128/CMAC support. See [`spec/README.md`](spec/README.md) for register maps.
+- **Native SYSCTRL block**: QEMU-native system controller at `0x4000A000` for CPU identity, CPU1 reset release, boot status, device clock/reset policy state, and SYSCTRL-mediated indirect device-register access.
+- **Eight socket-backed peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT), SystemVerilog APB timer prototype, and an HSM crypto accelerator with AES-128/CMAC support. See [`spec/README.md`](spec/README.md) for register maps.
 - **SystemVerilog Device Prototype** (`sv_device/`): A Verilator-built APB timer bridge listening on TCP ports 7906/7907. QEMU drives it through a normal `mmio-sockdev` instance at `0x4000B000`, and the SV model returns an IRQ through NVIC IRQ5.
 - **KX6625 Custom SoC** (`scripts/qemu-fork/hw/arm/kx6625.c`): Dual Cortex-M4 @ 48 MHz, 512 KB FLASH @ `0x00000000`, 128 KB SRAM @ `0x20000000`, NVIC with 16 external IRQs per ARMv7-M container.
-- **FreeRTOS Cortex-M4F Firmware**: CPU0 boots FreeRTOS using the official GCC `ARM_CM4F` port and Cortex-M SysTick; CPU1 runs a lightweight bare-metal IPC loop. The demo task exercises UART, DMA M2M, DMA peripheral DREQ/DACK, CRC-32, dual-core IPC, SV timer IRQ, HSM AES-CBC/CMAC, and WDT countdown-reset warm-boot detection.
-- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server and the SV timer bridge, boots QEMU with `icount shift=5`, exercises all devices including HSM crypto and a WDT-triggered system reset, asserts firmware output, and generates an HTML trace report.
+- **FreeRTOS Cortex-M4F Firmware**: CPU0 boots FreeRTOS using the official GCC `ARM_CM4F` port and Cortex-M SysTick; CPU1 runs a lightweight bare-metal IPC loop. The demo task exercises UART, DMA M2M, DMA peripheral DREQ/DACK, CRC-32, dual-core IPC, SV timer IRQ, HSM AES-CBC/CMAC, SYSCTRL, and WDT countdown-reset warm-boot detection.
+- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server and the SV timer bridge, boots QEMU with `icount shift=5`, exercises all devices including HSM crypto, SYSCTRL indirect register access, and a WDT-triggered system reset, asserts firmware output, and generates an HTML trace report.
 - **Event Tracer** (`device_model/tracer.py`): Non-blocking JSONL event trace for every device — records virtual time, wall time, and device-specific fields. Written by a background thread so device models never block on I/O. Visualised as a self-contained HTML report (`build/trace_report.html`) by `scripts/visualize_trace.py`.
 
 ## Architecture
@@ -45,15 +46,21 @@ This project implements:
 │  QEMU  (KX6625 custom SoC — dual Cortex-M4 @ 48 MHz, NVIC, 16 external IRQs)              │
 │                                                                                            │
 │  ┌──────────────┐    MMIO                ┌──────────────────────────────────────────────┐ │
-│  │  Firmware    │ ─── read/write ──────► │  mmio-sockdev (×7 instances)                 │ │
+│  │  Firmware    │ ─── read/write ──────► │  mmio-sockdev (×8 instances)                 │ │
 │  │  FreeRTOS    │                        │                                              │ │
 │  │              │ ◄── IRQ (NVIC) ──────── │   chardev      ↔ R/W TCP channel             │ │
 │  └──────┬───────┘                        │   irq-chardev  ← IRQ TCP channel             │ │
 │         │                                │   tick-chardev → virtual-clock tick TCP      │ │
 │         │ read/write                     │   mem-chardev  ← DMA bus-master TCP (opt.)   │ │
-│         ▼                                │   rst-chardev  ← system-reset TCP (opt.)     │ │
-│  ┌────────────────────┐                  └───────────┬──────────────────────────────────┘ │
-│  │  FLASH  512 KB     │                              │ TCP channels                       │
+│         │                                │   rst-chardev  ← system-reset TCP (opt.)     │ │
+│         │                                └───────────┬──────────────────────────────────┘ │
+│         ▼                                            │ TCP channels                       │
+│  ┌────────────────────┐                              │                                    │
+│  │ SYSCTRL 0x4000A000 │  native QEMU MMIO            │                                    │
+│  │ CPU/boot/devctl    │                              │                                    │
+│  └────────────────────┘                              │                                    │
+│  ┌────────────────────┐                              │                                    │
+│  │  FLASH  512 KB     │                              │                                    │
 │  │  0x00000000        │ ◄── cpu_physical_memory_write (mem-chardev → QEMU phys mem)       │
 │  ├────────────────────┤                              │                                    │
 │  │  SRAM   128 KB     │   QEMU_CLOCK_VIRTUAL fires QEMUTimer every tick-period-ms         │
@@ -549,6 +556,8 @@ The `rst-chardev` property is optional. If omitted, the device operates normally
 
 The Python device server binds all TCP ports first; QEMU connects to them as a client. Each device needs one `mmio-sockdev` instance. Run with `-icount shift=5,sleep=off,align=off` for deterministic chip-time simulation.
 
+SYSCTRL is part of the KX6625 machine itself, so it does not need a `-device mmio-sockdev` command-line entry.
+
 ```bash
 qemu-system-arm -M kx6625 -smp 2 -nographic -no-reboot \
     -icount shift=5,sleep=off,align=off \
@@ -749,7 +758,14 @@ The FreeRTOS application task (`firmware/main.c`) executes seven demos from the 
 
 This phase validates the QEMU-to-SV transaction path and RTL interrupt behaviour. It does not model CPU bus wait states or force the SV pclk to remain cycle-aligned with QEMU's 48 MHz CPU clock.
 
-### Phase 7 — Watchdog Timer Reset Demo
+### Phase 7 — SYSCTRL Native Controller
+
+1. Firmware reads `SYSCTRL_ID`, `SYSCTRL_BOOT_STATUS`, and `SYSCTRL_CPU_STATUS` from the QEMU-native controller at `0x4000A000`.
+2. Firmware writes the device clock/reset policy registers and confirms the reset request is latched in `DEVICE_RST_STATUS`.
+3. Firmware programs `DEVCTL_ADDR=CONSOLE_UART_STATUS`, writes `DEVCTL_CTRL=START|READ`, and verifies `DEVCTL_RDATA` reports UART TX-ready.
+4. This validates that SYSCTRL can act as a central system-control block and as a controlled bus master for device register access.
+
+### Phase 8 — Watchdog Timer Reset Demo
 
 1. **POR boot**: firmware reads `WDT_RESET_REASON_REG`; value = 0 (`REASON_POR`) → first boot path.
 2. Sets `WDT_LOAD = 200 ms`, prints `"Kick 1"` and `"Kick 2"` (two `KICK` register writes).
@@ -773,12 +789,14 @@ qemu_device/
 │   ├── dma_client_demo.yaml          # DMA client demo register map
 │   ├── timer.yaml                    # Timer 0 register map
 │   ├── crc.yaml                      # CRC-32 engine register map
+│   ├── hsm.yaml                      # HSM AES/CMAC accelerator register map
+│   ├── sysctrl.yaml                  # Native SYSCTRL register map
 │   ├── wdt.yaml                      # Watchdog Timer register map
 │   └── sv_timer.yaml                 # SystemVerilog APB timer prototype register map
 ├── firmware/                         # FreeRTOS Cortex-M4F firmware
 │   ├── FreeRTOSConfig.h              # KX6625 FreeRTOS config (48 MHz, 1 kHz SysTick)
 │   ├── start.S                       # Vector table, Reset_Handler, CPU0/CPU1 split
-│   ├── main.c                        # CPU0 FreeRTOS task + demo menu (UART/DMA/CRC/IPC/SV timer/WDT)
+│   ├── main.c                        # CPU0 FreeRTOS task + demo menu (UART/DMA/CRC/IPC/SV/HSM/SYSCTRL/WDT)
 │   ├── cpu1_main.c                   # CPU1 bare-metal IPC polling loop
 │   ├── runtime.c                     # Minimal freestanding memset/memcpy for -nostdlib
 │   ├── linker.ld                     # Memory layout (FLASH @ 0x00000000, SRAM @ 0x20000000)

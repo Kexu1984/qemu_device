@@ -98,6 +98,13 @@ devices:
     rst_port:    7903        # Python → QEMU system-reset channel (rst-chardev)
     spec:        wdt.yaml    # register map → spec/wdt.yaml
 
+  - name:        sysctrl
+    description: "System controller — CPU reset release, boot policy, device clock/reset state, indirect device register access"
+    base_addr:   0x4000A000
+    size:        0x1000
+    native:      true        # QEMU-native MMIO block; no mmio-sockdev transport
+    spec:        sysctrl.yaml
+
   - name:        sv_timer
     description: "SystemVerilog APB timer prototype — Verilator-backed external model"
     base_addr:   0x4000B000

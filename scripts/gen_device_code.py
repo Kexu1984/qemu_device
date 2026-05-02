@@ -95,11 +95,17 @@ def _validate(cfg: dict) -> None:
     seen_irq_ports: dict[int, str] = {}
 
     for dev in cfg["devices"]:
-        for key in ("name", "base_addr", "size", "rw_port", "registers"):
+        required = ("name", "base_addr", "size", "registers")
+        for key in required:
             if key not in dev:
                 sys.exit(
                     f"ERROR: device '{dev.get('name', '?')}' is missing field '{key}'"
                 )
+        native = bool(dev.get("native", False))
+        if not native and "rw_port" not in dev:
+            sys.exit(
+                f"ERROR: device '{dev.get('name', '?')}' is missing field 'rw_port'"
+            )
         # irq_num, irq_delay, irq_port are optional — polled devices omit them.
 
         name = dev["name"]
@@ -114,13 +120,14 @@ def _validate(cfg: dict) -> None:
             )
         seen_bases[base] = name
 
-        rw_port = int(dev["rw_port"])
-        if rw_port in seen_rw_ports:
-            sys.exit(
-                f"ERROR: device '{name}' shares rw_port {rw_port} "
-                f"with '{seen_rw_ports[rw_port]}'"
-            )
-        seen_rw_ports[rw_port] = name
+        if not native:
+            rw_port = int(dev["rw_port"])
+            if rw_port in seen_rw_ports:
+                sys.exit(
+                    f"ERROR: device '{name}' shares rw_port {rw_port} "
+                    f"with '{seen_rw_ports[rw_port]}'"
+                )
+            seen_rw_ports[rw_port] = name
 
         if "irq_port" in dev:
             irq_port = int(dev["irq_port"])
@@ -197,18 +204,20 @@ def generate_c_header(cfg: dict, config_path: str) -> str:
         size       = int(dev["size"])
         irq_num    = int(dev["irq_num"])   if "irq_num"   in dev else None
         irq_delay  = float(dev["irq_delay"]) if "irq_delay" in dev else None
-        rw_port    = int(dev["rw_port"])
+        native     = bool(dev.get("native", False))
+        rw_port    = int(dev["rw_port"]) if "rw_port" in dev else None
         irq_port   = int(dev["irq_port"])   if "irq_port"  in dev else None
         description = dev.get("description", "")
 
         irq_info = (f"  irq_num={irq_num}  irq_port={irq_port}"
                     if irq_num is not None else "  (polled — no IRQ)")
+        transport_info = "native MMIO" if native else f"rw_port={rw_port}"
         sep = "─" * (60 - len(prefix))
         lines.append(
             f"/* ── {prefix} {sep}\n"
             f" * {description}\n"
             f" * base={_hex(base)}  size={_hex(size, 4)}"
-            f"  rw_port={rw_port}{irq_info}\n"
+            f"  {transport_info}{irq_info}\n"
             f" * ─────────────────────────────────────────────────────────── */\n"
         )
         lines.append(f"#define {prefix}_BASE          {_hex(base)}UL\n")
@@ -217,7 +226,8 @@ def generate_c_header(cfg: dict, config_path: str) -> str:
             lines.append(f"#define {prefix}_IRQ_INTID     {irq_num}U\n")
             lines.append(f"#define {prefix}_IRQ_DELAY_S   {irq_delay}\n")
             lines.append(f"#define {prefix}_IRQ_PORT      {irq_port}\n")
-        lines.append(f"#define {prefix}_RW_PORT       {rw_port}\n")
+        if rw_port is not None:
+            lines.append(f"#define {prefix}_RW_PORT       {rw_port}\n")
         lines.append("\n/* Registers */\n")
 
         for reg in dev["registers"]:
@@ -270,7 +280,8 @@ def generate_python_consts(cfg: dict, config_path: str) -> str:
         size        = int(dev["size"])
         irq_num     = int(dev["irq_num"])   if "irq_num"   in dev else None
         irq_delay   = float(dev["irq_delay"]) if "irq_delay" in dev else None
-        rw_port     = int(dev["rw_port"])
+        native      = bool(dev.get("native", False))
+        rw_port     = int(dev["rw_port"]) if "rw_port" in dev else None
         irq_port    = int(dev["irq_port"])   if "irq_port"  in dev else None
         description = dev.get("description", "")
 
@@ -279,11 +290,14 @@ def generate_python_consts(cfg: dict, config_path: str) -> str:
         lines.append(f"# {description}\n")
         lines.append(f"{prefix}_BASE         = {_hex(base)}\n")
         lines.append(f"{prefix}_SIZE         = {_hex(size, 4)}\n")
+        if native:
+            lines.append(f"{prefix}_NATIVE_MMIO  = True\n")
         if irq_num is not None:
             lines.append(f"{prefix}_IRQ_INTID    = {irq_num}\n")
             lines.append(f"{prefix}_IRQ_DELAY_S  = {irq_delay}\n")
             lines.append(f"{prefix}_IRQ_PORT     = {irq_port}\n")
-        lines.append(f"{prefix}_RW_PORT      = {rw_port}\n")
+        if rw_port is not None:
+            lines.append(f"{prefix}_RW_PORT      = {rw_port}\n")
         lines.append("\n# Registers\n")
 
         for reg in dev["registers"]:

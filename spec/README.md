@@ -11,6 +11,7 @@ spec/
 ├── timer.yaml            # Countdown timer register map
 ├── crc.yaml              # CRC-32 engine register map
 ├── hsm.yaml              # AES-128 / CMAC HSM register map
+├── sysctrl.yaml          # Native system controller register map
 ├── sv_timer.yaml         # SystemVerilog APB timer prototype register map
 ├── soc.yaml              # SoC-level configuration (clock, reset)
 └── wdt.yaml              # Watchdog timer register map
@@ -28,6 +29,7 @@ spec/
 | DMA Client Demo  | `0x40007000`  | 4 KB   | 3        | 7898     | 7899     | —         | —        | —        | —         |
 | CRC-32 Engine    | `0x40008000`  | 4 KB   | —        | 7900     | —        | —         | —        | —        | —         |
 | Watchdog Timer   | `0x40009000`  | 4 KB   | 4        | 7901     | 7902     | —         | —        | 7903     | —         |
+| SYSCTRL          | `0x4000A000`  | 4 KB   | —        | native   | —        | —         | —        | —        | —         |
 | SV APB Timer     | `0x4000B000`  | 4 KB   | 5        | 7906     | 7907     | —         | —        | —        | —         |
 | HSM Crypto       | `0x4000C000`  | 4 KB   | 6        | 7908     | 7909     | —         | —        | —        | —         |
 | **FLASH**        | `0x00000000`  | 512 KB | —        | —        | —        | —         | —        | —        | —         |
@@ -149,6 +151,50 @@ Test vector: `CRC-32("123456789") = 0xCBF43926`. Supports byte and word writes; 
 | 0x10   | IRQ_CLEAR | W      | —     | Write bit0 = 1 to clear IRQ_PENDING and IRQ5 |
 
 The Verilator bridge listens on R/W port 7906 and IRQ port 7907. QEMU still sees this as a normal `mmio-sockdev` region at `0x4000B000`; the bridge converts each MMIO access into APB setup/access cycles on the SV RTL.
+
+---
+
+## SYSCTRL (`kx6625.c`, native QEMU MMIO)
+
+SYSCTRL is the chip-level system controller. Unlike most peripherals in this project, it is implemented directly in the KX6625 QEMU machine rather than through `mmio-sockdev`, because reset-time firmware must be able to read CPU identity and release CPU1 before the external Python device server participates.
+
+Responsibilities:
+
+- CPU identity and CPU1 reset release.
+- Boot policy/status for the HEX-preloaded FLASH image and future boot ROM / secure boot work.
+- Coarse device clock/reset policy state.
+- Privileged indirect device-register access through `DEVCTL_*`, modelling a system controller that can reach peripheral registers as a bus master.
+
+| Offset | Name              | Access | Reset      | Description |
+|--------|-------------------|--------|------------|-------------|
+| 0x00   | CPUID             | R      | dynamic    | Current CPU index: 0=CPU0, 1=CPU1 |
+| 0x04   | CPU1RST           | W      | —          | Legacy write-1 CPU1 reset release alias |
+| 0x08   | ID                | R      | 0x4C544353 | ASCII `SCTL` little-endian |
+| 0x0C   | VERSION           | R      | 0x00010000 | SYSCTRL model version 1.0 |
+| 0x10   | RESET_CTRL        | R/W    | 0x00000002 | bit0=SYS_RESET_REQ, bit1=HOLD_CPU1_AFTER_RESET |
+| 0x14   | RESET_STATUS      | R      | 0x00000005 | bit0=POR_SEEN, bit1=SYSCTRL reset request, bit2=CPU1 held |
+| 0x18   | CPU_CTRL          | R/W    | 0x00000001 | bit0=CPU0_ENABLE, bit1=CPU1_RELEASE |
+| 0x1C   | CPU_STATUS        | R      | 0x00000005 | bit0=CPU0_ACTIVE, bit1=CPU1_RELEASED, bit2=CPU1_HELD |
+| 0x20   | BOOT_MODE         | R/W    | 0          | boot source and future secure-boot policy bits |
+| 0x24   | BOOT_STATUS       | R      | 0x00000003 | bit0=FLASH_IMAGE_LOADED, bit1=BOOT_VECTOR_VALID |
+| 0x30   | DEVICE_CLK_EN     | R/W    | 0x000000FF | coarse peripheral clock enable bitmap |
+| 0x34   | DEVICE_RST_CTRL   | R/W    | 0          | peripheral reset request bitmap, W1 pulse semantics |
+| 0x38   | DEVICE_RST_STATUS | R      | 0          | last reset request bitmap latched by SYSCTRL |
+| 0x40   | DEVCTL_ADDR       | R/W    | 0          | indirect device-register physical address |
+| 0x44   | DEVCTL_WDATA      | R/W    | 0          | indirect write data |
+| 0x48   | DEVCTL_RDATA      | R      | 0          | indirect read data |
+| 0x4C   | DEVCTL_CTRL       | R/W    | 0          | bit0=START, bit1=READ, bit2=WRITE |
+| 0x50   | DEVCTL_STATUS     | R      | 0          | bit1=DONE, bit2=ERROR, bit3=ALIGN, bit4=RANGE, bit5=BUS |
+| 0x54   | DEVCTL_ERROR      | R      | 0          | 0=NONE, 1=BAD_CTRL, 2=ADDR_ALIGN, 3=ADDR_RANGE, 4=BUS_ERROR |
+
+Indirect access sequence:
+
+1. Write `DEVCTL_ADDR` with a 32-bit aligned peripheral register address.
+2. For writes, write `DEVCTL_WDATA`.
+3. Write `DEVCTL_CTRL = START | READ` or `START | WRITE`.
+4. Poll `DEVCTL_STATUS.DONE`; on read, consume `DEVCTL_RDATA`.
+
+Accesses back into the SYSCTRL address range through `DEVCTL_*` are rejected to avoid recursion.
 
 ---
 

@@ -19,6 +19,7 @@
 #include "hw/boards.h"
 #include "exec/memory.h"
 #include "exec/address-spaces.h"
+#include "sysemu/runstate.h"
 #include "hw/qdev-properties.h"
 #include "hw/misc/unimp.h"
 #include "hw/qdev-clock.h"
@@ -32,11 +33,57 @@
 /* ── Type names ────────────────────────────────────────────────────────── */
 #define TYPE_KX6625_MACHINE  MACHINE_TYPE_NAME("kx6625")
 
-/* ── SYSCTRL: CPU ID register + CPU1 release ────────────────────────── */
+/* ── SYSCTRL: native system controller MMIO ──────────────────────────── */
 #define KX6625_SYSCTRL_BASE   0x4000A000UL   /* native MMIO, not via mmio-sockdev */
 #define KX6625_SYSCTRL_SIZE   0x1000UL
 #define SYSCTRL_OFF_CPUID     0x00U   /* RO: returns current_cpu->cpu_index */
 #define SYSCTRL_OFF_CPU1RST   0x04U   /* WO: write 1 to release CPU1 from reset */
+#define SYSCTRL_OFF_ID        0x08U
+#define SYSCTRL_OFF_VERSION   0x0CU
+#define SYSCTRL_OFF_RESET_CTRL        0x10U
+#define SYSCTRL_OFF_RESET_STATUS      0x14U
+#define SYSCTRL_OFF_CPU_CTRL          0x18U
+#define SYSCTRL_OFF_CPU_STATUS        0x1CU
+#define SYSCTRL_OFF_BOOT_MODE         0x20U
+#define SYSCTRL_OFF_BOOT_STATUS       0x24U
+#define SYSCTRL_OFF_DEVICE_CLK_EN     0x30U
+#define SYSCTRL_OFF_DEVICE_RST_CTRL   0x34U
+#define SYSCTRL_OFF_DEVICE_RST_STATUS 0x38U
+#define SYSCTRL_OFF_DEVCTL_ADDR       0x40U
+#define SYSCTRL_OFF_DEVCTL_WDATA      0x44U
+#define SYSCTRL_OFF_DEVCTL_RDATA      0x48U
+#define SYSCTRL_OFF_DEVCTL_CTRL       0x4CU
+#define SYSCTRL_OFF_DEVCTL_STATUS     0x50U
+#define SYSCTRL_OFF_DEVCTL_ERROR      0x54U
+
+#define SYSCTRL_ID_VALUE              0x4C544353U  /* 'SCTL' little-endian */
+#define SYSCTRL_VERSION_VALUE         0x00010000U
+#define SYSCTRL_RESET_SYS_REQ         0x00000001U
+#define SYSCTRL_RESET_HOLD_CPU1       0x00000002U
+#define SYSCTRL_RESET_STATUS_POR      0x00000001U
+#define SYSCTRL_RESET_STATUS_SYSCTRL  0x00000002U
+#define SYSCTRL_RESET_STATUS_CPU1HELD 0x00000004U
+#define SYSCTRL_CPU0_ENABLE           0x00000001U
+#define SYSCTRL_CPU1_RELEASE          0x00000002U
+#define SYSCTRL_CPU_STATUS_CPU0_ACTIVE 0x00000001U
+#define SYSCTRL_CPU_STATUS_CPU1_RELEASED 0x00000002U
+#define SYSCTRL_CPU_STATUS_CPU1_HELD  0x00000004U
+#define SYSCTRL_BOOT_FLASH_LOADED     0x00000001U
+#define SYSCTRL_BOOT_VECTOR_VALID     0x00000002U
+#define SYSCTRL_DEVICE_MASK           0x000000FFU
+#define SYSCTRL_DEVCTL_START          0x00000001U
+#define SYSCTRL_DEVCTL_READ           0x00000002U
+#define SYSCTRL_DEVCTL_WRITE          0x00000004U
+#define SYSCTRL_DEVCTL_STATUS_DONE    0x00000002U
+#define SYSCTRL_DEVCTL_STATUS_ERROR   0x00000004U
+#define SYSCTRL_DEVCTL_STATUS_ALIGN   0x00000008U
+#define SYSCTRL_DEVCTL_STATUS_RANGE   0x00000010U
+#define SYSCTRL_DEVCTL_STATUS_BUS     0x00000020U
+#define SYSCTRL_DEVCTL_ERR_NONE       0U
+#define SYSCTRL_DEVCTL_ERR_BAD_CTRL   1U
+#define SYSCTRL_DEVCTL_ERR_ALIGN      2U
+#define SYSCTRL_DEVCTL_ERR_RANGE      3U
+#define SYSCTRL_DEVCTL_ERR_BUS        4U
 
 /* ── Machine state ─────────────────────────────────────────────────────── */
 struct KX6625MachineState {
@@ -50,19 +97,170 @@ struct KX6625MachineState {
     Clock       *sysclk;
     Clock       *refclk;
     CPUState    *cpu1;                        /* pointer to CPU1's CPUState */
+    bool         cpu1_released;
+    uint32_t     sysctrl_reset_ctrl;
+    uint32_t     sysctrl_reset_status;
+    uint32_t     sysctrl_boot_mode;
+    uint32_t     sysctrl_boot_status;
+    uint32_t     sysctrl_device_clk_en;
+    uint32_t     sysctrl_device_rst_status;
+    uint32_t     sysctrl_devctl_addr;
+    uint32_t     sysctrl_devctl_wdata;
+    uint32_t     sysctrl_devctl_rdata;
+    uint32_t     sysctrl_devctl_ctrl;
+    uint32_t     sysctrl_devctl_status;
+    uint32_t     sysctrl_devctl_error;
 };
 
 OBJECT_DECLARE_SIMPLE_TYPE(KX6625MachineState, KX6625_MACHINE)
 
 /* ── SYSCTRL MemoryRegionOps ───────────────────────────────────────────── */
 
+static void kx6625_sysctrl_release_cpu1(KX6625MachineState *s)
+{
+    s->cpu1_released = true;
+    s->sysctrl_reset_status &= ~SYSCTRL_RESET_STATUS_CPU1HELD;
+    if (s->cpu1 && s->cpu1->halted) {
+        s->cpu1->halted          = 0;
+        s->cpu1->exception_index = -1;  /* EXCP_NONE */
+        qemu_cpu_kick(s->cpu1);
+        info_report("kx6625: SYSCTRL: CPU1 released from reset (by CPU%d)",
+                    current_cpu ? current_cpu->cpu_index : -1);
+    }
+}
+
+static uint32_t kx6625_sysctrl_cpu_ctrl(KX6625MachineState *s)
+{
+    return SYSCTRL_CPU0_ENABLE |
+           (s->cpu1_released ? SYSCTRL_CPU1_RELEASE : 0U);
+}
+
+static uint32_t kx6625_sysctrl_cpu_status(KX6625MachineState *s)
+{
+    return SYSCTRL_CPU_STATUS_CPU0_ACTIVE |
+           (s->cpu1_released ? SYSCTRL_CPU_STATUS_CPU1_RELEASED
+                             : SYSCTRL_CPU_STATUS_CPU1_HELD);
+}
+
+static void kx6625_sysctrl_devctl_error(KX6625MachineState *s,
+                                        uint32_t status_bit, uint32_t error)
+{
+    s->sysctrl_devctl_status = SYSCTRL_DEVCTL_STATUS_DONE |
+                               SYSCTRL_DEVCTL_STATUS_ERROR | status_bit;
+    s->sysctrl_devctl_error = error;
+}
+
+static void kx6625_sysctrl_do_devctl(KX6625MachineState *s)
+{
+    uint32_t op = s->sysctrl_devctl_ctrl;
+    uint32_t access = op & (SYSCTRL_DEVCTL_READ | SYSCTRL_DEVCTL_WRITE);
+    hwaddr addr = s->sysctrl_devctl_addr;
+    MemTxResult result;
+    uint32_t value;
+
+    s->sysctrl_devctl_ctrl &= ~SYSCTRL_DEVCTL_START;
+    s->sysctrl_devctl_status = 0;
+    s->sysctrl_devctl_error = SYSCTRL_DEVCTL_ERR_NONE;
+
+    if (access != SYSCTRL_DEVCTL_READ && access != SYSCTRL_DEVCTL_WRITE) {
+        kx6625_sysctrl_devctl_error(s, 0, SYSCTRL_DEVCTL_ERR_BAD_CTRL);
+        return;
+    }
+    if (addr & 0x3U) {
+        kx6625_sysctrl_devctl_error(s, SYSCTRL_DEVCTL_STATUS_ALIGN,
+                                    SYSCTRL_DEVCTL_ERR_ALIGN);
+        return;
+    }
+    if (addr >= KX6625_SYSCTRL_BASE && addr < KX6625_SYSCTRL_BASE + KX6625_SYSCTRL_SIZE) {
+        kx6625_sysctrl_devctl_error(s, SYSCTRL_DEVCTL_STATUS_RANGE,
+                                    SYSCTRL_DEVCTL_ERR_RANGE);
+        return;
+    }
+
+    if (access == SYSCTRL_DEVCTL_READ) {
+        value = 0;
+        result = address_space_read(&address_space_memory, addr,
+                                    MEMTXATTRS_UNSPECIFIED, &value, sizeof(value));
+        if (result != MEMTX_OK) {
+            kx6625_sysctrl_devctl_error(s, SYSCTRL_DEVCTL_STATUS_BUS,
+                                        SYSCTRL_DEVCTL_ERR_BUS);
+            return;
+        }
+        s->sysctrl_devctl_rdata = value;
+    } else {
+        value = s->sysctrl_devctl_wdata;
+        result = address_space_write(&address_space_memory, addr,
+                                     MEMTXATTRS_UNSPECIFIED, &value, sizeof(value));
+        if (result != MEMTX_OK) {
+            kx6625_sysctrl_devctl_error(s, SYSCTRL_DEVCTL_STATUS_BUS,
+                                        SYSCTRL_DEVCTL_ERR_BUS);
+            return;
+        }
+    }
+
+    s->sysctrl_devctl_status = SYSCTRL_DEVCTL_STATUS_DONE;
+}
+
+static void kx6625_sysctrl_init_state(KX6625MachineState *s)
+{
+    s->cpu1_released = false;
+    s->sysctrl_reset_ctrl = SYSCTRL_RESET_HOLD_CPU1;
+    s->sysctrl_reset_status = SYSCTRL_RESET_STATUS_POR | SYSCTRL_RESET_STATUS_CPU1HELD;
+    s->sysctrl_boot_mode = 0;
+    s->sysctrl_boot_status = 0;
+    s->sysctrl_device_clk_en = SYSCTRL_DEVICE_MASK;
+    s->sysctrl_device_rst_status = 0;
+    s->sysctrl_devctl_addr = 0;
+    s->sysctrl_devctl_wdata = 0;
+    s->sysctrl_devctl_rdata = 0;
+    s->sysctrl_devctl_ctrl = 0;
+    s->sysctrl_devctl_status = 0;
+    s->sysctrl_devctl_error = SYSCTRL_DEVCTL_ERR_NONE;
+}
+
 static uint64_t kx6625_sysctrl_read(void *opaque, hwaddr offset, unsigned size)
 {
+    KX6625MachineState *s = opaque;
+
     switch (offset) {
     case SYSCTRL_OFF_CPUID:
         /* Returns the cpu_index of whichever CPU performed this load.
          * current_cpu is a thread-local set by QEMU's TCG vCPU thread. */
         return current_cpu ? (uint64_t)current_cpu->cpu_index : 0;
+    case SYSCTRL_OFF_ID:
+        return SYSCTRL_ID_VALUE;
+    case SYSCTRL_OFF_VERSION:
+        return SYSCTRL_VERSION_VALUE;
+    case SYSCTRL_OFF_RESET_CTRL:
+        return s->sysctrl_reset_ctrl;
+    case SYSCTRL_OFF_RESET_STATUS:
+        return s->sysctrl_reset_status;
+    case SYSCTRL_OFF_CPU_CTRL:
+        return kx6625_sysctrl_cpu_ctrl(s);
+    case SYSCTRL_OFF_CPU_STATUS:
+        return kx6625_sysctrl_cpu_status(s);
+    case SYSCTRL_OFF_BOOT_MODE:
+        return s->sysctrl_boot_mode;
+    case SYSCTRL_OFF_BOOT_STATUS:
+        return s->sysctrl_boot_status;
+    case SYSCTRL_OFF_DEVICE_CLK_EN:
+        return s->sysctrl_device_clk_en;
+    case SYSCTRL_OFF_DEVICE_RST_CTRL:
+        return 0;
+    case SYSCTRL_OFF_DEVICE_RST_STATUS:
+        return s->sysctrl_device_rst_status;
+    case SYSCTRL_OFF_DEVCTL_ADDR:
+        return s->sysctrl_devctl_addr;
+    case SYSCTRL_OFF_DEVCTL_WDATA:
+        return s->sysctrl_devctl_wdata;
+    case SYSCTRL_OFF_DEVCTL_RDATA:
+        return s->sysctrl_devctl_rdata;
+    case SYSCTRL_OFF_DEVCTL_CTRL:
+        return s->sysctrl_devctl_ctrl;
+    case SYSCTRL_OFF_DEVCTL_STATUS:
+        return s->sysctrl_devctl_status;
+    case SYSCTRL_OFF_DEVCTL_ERROR:
+        return s->sysctrl_devctl_error;
     default:
         return 0;
     }
@@ -72,15 +270,49 @@ static void kx6625_sysctrl_write(void *opaque, hwaddr offset,
                                   uint64_t value, unsigned size)
 {
     KX6625MachineState *s = opaque;
-    if (offset == SYSCTRL_OFF_CPU1RST && value == 1) {
-        /* Release CPU1 from reset: clear halted flag and kick the vCPU thread. */
-        if (s->cpu1 && s->cpu1->halted) {
-            s->cpu1->halted          = 0;
-            s->cpu1->exception_index = -1;  /* EXCP_NONE */
-            qemu_cpu_kick(s->cpu1);
-            info_report("kx6625: SYSCTRL: CPU1 released from reset (by CPU%d)",
-                        current_cpu ? current_cpu->cpu_index : -1);
+
+    switch (offset) {
+    case SYSCTRL_OFF_CPU1RST:
+        if (value == 1) {
+            kx6625_sysctrl_release_cpu1(s);
         }
+        break;
+    case SYSCTRL_OFF_RESET_CTRL:
+        s->sysctrl_reset_ctrl = (uint32_t)value & SYSCTRL_RESET_HOLD_CPU1;
+        if (value & SYSCTRL_RESET_SYS_REQ) {
+            s->sysctrl_reset_status |= SYSCTRL_RESET_STATUS_SYSCTRL;
+            qemu_system_reset_request(SHUTDOWN_CAUSE_SUBSYSTEM_RESET);
+        }
+        break;
+    case SYSCTRL_OFF_CPU_CTRL:
+        if (value & SYSCTRL_CPU1_RELEASE) {
+            kx6625_sysctrl_release_cpu1(s);
+        }
+        break;
+    case SYSCTRL_OFF_BOOT_MODE:
+        s->sysctrl_boot_mode = (uint32_t)value & 0x00000103U;
+        break;
+    case SYSCTRL_OFF_DEVICE_CLK_EN:
+        s->sysctrl_device_clk_en = (uint32_t)value & SYSCTRL_DEVICE_MASK;
+        break;
+    case SYSCTRL_OFF_DEVICE_RST_CTRL:
+        s->sysctrl_device_rst_status = (uint32_t)value & SYSCTRL_DEVICE_MASK;
+        break;
+    case SYSCTRL_OFF_DEVCTL_ADDR:
+        s->sysctrl_devctl_addr = (uint32_t)value;
+        break;
+    case SYSCTRL_OFF_DEVCTL_WDATA:
+        s->sysctrl_devctl_wdata = (uint32_t)value;
+        break;
+    case SYSCTRL_OFF_DEVCTL_CTRL:
+        s->sysctrl_devctl_ctrl = (uint32_t)value &
+                                 (SYSCTRL_DEVCTL_START | SYSCTRL_DEVCTL_READ | SYSCTRL_DEVCTL_WRITE);
+        if (s->sysctrl_devctl_ctrl & SYSCTRL_DEVCTL_START) {
+            kx6625_sysctrl_do_devctl(s);
+        }
+        break;
+    default:
+        break;
     }
 }
 
@@ -133,6 +365,8 @@ static void kx6625_init(MachineState *machine)
     MemoryRegion *system_memory = get_system_memory();
     DeviceState  *armv7m;
     int           i;
+
+    kx6625_sysctrl_init_state(s);
 
     /* Fixed-frequency clocks (no migration needed) */
     s->sysclk = clock_new(OBJECT(machine), "SYSCLK");
@@ -236,6 +470,7 @@ static void kx6625_init(MachineState *machine)
     armv7m_load_kernel(ARM_CPU(first_cpu), NULL,
                        (hwaddr)KX6625_FLASH0_BASE, (int)KX6625_FLASH0_SIZE);
     kx6625_load_firmware_hex(machine);
+    s->sysctrl_boot_status |= SYSCTRL_BOOT_FLASH_LOADED | SYSCTRL_BOOT_VECTOR_VALID;
 
     /* Re-reset CPU1 now that firmware is loaded into flash.
      * start-powered-off applied cpu_reset() before the firmware HEX was written,
@@ -246,6 +481,8 @@ static void kx6625_init(MachineState *machine)
         cpu_reset(s->cpu1);
         s->cpu1->halted          = 1;
         s->cpu1->exception_index = EXCP_HLT;
+        s->cpu1_released = false;
+        s->sysctrl_reset_status |= SYSCTRL_RESET_STATUS_CPU1HELD;
     }
 }
 
