@@ -71,6 +71,7 @@ for f in "$QEMU_BIN" "$FIRMWARE_HEX" "$SERVER_SCRIPT" "$SV_BRIDGE"; do
 done
 
 mkdir -p "$LOG_DIR"
+rm -f "$LOG_DIR/otp.hex"
 info "QEMU    : $QEMU_BIN"
 info "Firmware HEX: $FIRMWARE_HEX"
 echo ""
@@ -78,7 +79,7 @@ echo ""
 # -----------------------------------------------------------------------
 # Kill any leftover processes from a previous run that may hold our ports
 # -----------------------------------------------------------------------
-for PORT in 7890 7891 7892 7893 7894 7895 7896 7897 7898 7899 7900 7901 7902 7903 7904 7905 7906 7907 7908 7909; do
+for PORT in 7890 7891 7892 7893 7894 7895 7896 7897 7898 7899 7900 7901 7902 7903 7904 7905 7906 7907 7908 7909 7910 7911; do
     fuser -k "${PORT}/tcp" 2>/dev/null || true
 done
 sleep 0.3
@@ -195,6 +196,9 @@ info "Starting QEMU..."
     -chardev socket,id=hsm_rw,host=127.0.0.1,port=7908 \
     -chardev socket,id=hsm_irq,host=127.0.0.1,port=7909 \
     -device mmio-sockdev,chardev=hsm_rw,irq-chardev=hsm_irq,addr=0x4000C000,irq-num=6 \
+    -chardev socket,id=otp_rw,host=127.0.0.1,port=7910 \
+    -chardev socket,id=otp_irq,host=127.0.0.1,port=7911 \
+    -device mmio-sockdev,chardev=otp_rw,irq-chardev=otp_irq,addr=0x4000D000,irq-num=7 \
     -kernel "$FIRMWARE_HEX" \
     </dev/null > "$QEMU_LOG" 2>&1 &
 QEMU_PID=$!
@@ -230,6 +234,13 @@ EXPECTED=(
     "HSM AES-CBC encrypt test"
     "HSM AES-CBC encrypt PASSED"
     "HSM AES-CMAC PASSED"
+    "OTP controller test"
+    "OTP] ID OTP1 PASSED"
+    "OTP] Key slot0 programmed PASSED"
+    "OTP] Key read protection PASSED"
+    "OTP] Non-secret row read PASSED"
+    "OTP] Zero-to-one rejection PASSED"
+    "OTP] HSM OTP KEY_ID0 AES-CBC PASSED"
     "Native SYSCTRL register test"
     "SYSCTRL] ID SCTL PASSED"
     "SYSCTRL] BOOT_STATUS flash/vector PASSED"
@@ -343,6 +354,7 @@ UART_EXPECTED=(
     "UART interrupt handled"
     "All tests done"
     "HSM AES-CMAC PASSED"
+    "HSM OTP KEY_ID0 AES-CBC PASSED"
     "DEVCTL UART STATUS read PASSED"
     "Warm boot detected"
     "WDT demo complete"

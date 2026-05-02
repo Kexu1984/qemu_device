@@ -17,6 +17,7 @@
  *   0x4000A000  sysctrl device      (QEMU-native system control)
  *   0x4000B000  sv_timer device     (mmio-sockdev -> Verilated SV, IRQ5)
  *   0x4000C000  hsm device          (mmio-sockdev, IRQ6)
+ *   0x4000D000  otp device          (mmio-sockdev, IRQ7)
  */
 
 #include <stdint.h>
@@ -86,6 +87,19 @@
 #define HSM_MODE_CBC         0x1U
 #define HSM_MODE_CMAC        0x4U
 #define HSM_KEY_ID_REGISTER  15U
+
+/* OTP register bit definitions */
+#define OTP_CTRL_START       0x1U
+#define OTP_CTRL_READ        0x2U
+#define OTP_CTRL_PROGRAM     0x4U
+#define OTP_STATUS_DONE      0x2U
+#define OTP_STATUS_ERROR     0x4U
+#define OTP_STATUS_READ_PROTECTED 0x800U
+#define OTP_ERR_ZERO_TO_ONE  3U
+#define OTP_ERR_READ_PROTECTED 11U
+#define OTP_UNLOCK0_VALUE    0x4F545031U
+#define OTP_UNLOCK1_VALUE    0x50524F47U
+#define OTP_ID_EXPECTED      0x3150544FU
 
 /* CRC-32 test vector: CRC-32("123456789") = 0xCBF43926  (ISO-HDLC / IEEE 802.3) */
 #define CRC_EXPECTED       0xCBF43926U
@@ -169,20 +183,20 @@ static int recv_line(char *buf, int len)
  *   NVIC_ICPR0 (0xE000E280) — IRQ clear pending for IRQ  0-31
  *   NVIC_IPR0  (0xE000E400) — priority bytes for IRQ 0-3
  *
- * Enables IRQ 0 (UART), IRQ 1 (DMA), IRQ 2 (Timer0), IRQ 5 (SV timer), IRQ 6 (HSM).
+ * Enables IRQ 0 (UART), IRQ 1 (DMA), IRQ 2 (Timer0), IRQ 5 (SV timer), IRQ 6 (HSM), IRQ 7 (OTP).
  * KX6625 has 16 external IRQs (0-15); IRQs 0/1/2 are our devices.
  * ----------------------------------------------------------------------- */
 static void nvic_init(void)
 {
-    /* 1. Clear any stale pending state for IRQ 0-6 */
-    mmio_write32(NVIC_ICPR0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6));
+    /* 1. Clear any stale pending state for IRQ 0-7 */
+    mmio_write32(NVIC_ICPR0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 7));
 
     /* 2. Set priority 0 (highest) for IRQ 0-7 */
     mmio_write32(NVIC_IPR0, 0x00000000U);
     mmio_write32(NVIC_IPR1, 0x00000000U);
 
-    /* 3. Enable IRQ 0-6 in ISER0 */
-    mmio_write32(NVIC_ISER0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6));
+    /* 3. Enable IRQ 0-7 in ISER0 */
+    mmio_write32(NVIC_ISER0, (1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 4) | (1u << 5) | (1u << 6) | (1u << 7));
 }
 
 /* -----------------------------------------------------------------------
@@ -284,7 +298,7 @@ static void test_dma_m2m(void)
     mmio_write32(DMA_CH0_SRC_ADDR_REG, (uint32_t)DMA_DEMO_SRC);
     mmio_write32(DMA_CH0_DST_ADDR_REG, (uint32_t)DMA_DEMO_DST);
     mmio_write32(DMA_CH0_LENGTH_REG,   DMA_DEMO_LEN);
-    send_string("[FW] DMA started. Waiting for IRQ7 (DMA done)...\n");
+    send_string("[FW] DMA started. Waiting for IRQ1 (DMA done)...\n");
     mmio_write32(DMA_CH0_CTRL_REG,     0x3u);
     while (!dma_irq_fired) {
         __asm__ volatile ("wfi");
@@ -440,6 +454,14 @@ static void test_sv_timer(void)
 }
 
 /* Test 8: HSM AES-128 CBC and CMAC */
+static void hsm_write_iv(void)
+{
+    mmio_write32(HSM_IV_WORD0_REG, 0x03020100U);
+    mmio_write32(HSM_IV_WORD1_REG, 0x07060504U);
+    mmio_write32(HSM_IV_WORD2_REG, 0x0B0A0908U);
+    mmio_write32(HSM_IV_WORD3_REG, 0x0F0E0D0CU);
+}
+
 static void hsm_write_key_and_iv(void)
 {
     /* AES-128 key: 2b7e151628aed2a6abf7158809cf4f3c
@@ -450,11 +472,7 @@ static void hsm_write_key_and_iv(void)
     mmio_write32(HSM_KEY_WORD1_REG, 0xA6D2AE28U);
     mmio_write32(HSM_KEY_WORD2_REG, 0x8815F7ABU);
     mmio_write32(HSM_KEY_WORD3_REG, 0x3C4FCF09U);
-
-    mmio_write32(HSM_IV_WORD0_REG, 0x03020100U);
-    mmio_write32(HSM_IV_WORD1_REG, 0x07060504U);
-    mmio_write32(HSM_IV_WORD2_REG, 0x0B0A0908U);
-    mmio_write32(HSM_IV_WORD3_REG, 0x0F0E0D0CU);
+    hsm_write_iv();
 }
 
 static int hsm_wait_done(void)
@@ -535,6 +553,102 @@ static void test_hsm(void)
                        : "[HSM] HSM AES-CMAC FAILED!\n");
     } else {
         send_string("[HSM] HSM AES-CMAC FAILED!\n");
+    }
+}
+
+static int otp_program_row(uint32_t row, uint32_t value)
+{
+    mmio_write32(OTP_UNLOCK0_REG, OTP_UNLOCK0_VALUE);
+    mmio_write32(OTP_UNLOCK1_REG, OTP_UNLOCK1_VALUE);
+    mmio_write32(OTP_ADDR_REG, row);
+    mmio_write32(OTP_WDATA_REG, value);
+    mmio_write32(OTP_CTRL_REG, OTP_CTRL_START | OTP_CTRL_PROGRAM);
+    return ((mmio_read32(OTP_STATUS_REG) & (OTP_STATUS_DONE | OTP_STATUS_ERROR)) == OTP_STATUS_DONE);
+}
+
+static int otp_read_row(uint32_t row, uint32_t *value)
+{
+    mmio_write32(OTP_ADDR_REG, row);
+    mmio_write32(OTP_CTRL_REG, OTP_CTRL_START | OTP_CTRL_READ);
+    if ((mmio_read32(OTP_STATUS_REG) & (OTP_STATUS_DONE | OTP_STATUS_ERROR)) != OTP_STATUS_DONE) {
+        return 0;
+    }
+    *value = mmio_read32(OTP_RDATA_REG);
+    return 1;
+}
+
+/* Test 0: OTP one-time-programmable controller and HSM direct key path */
+static void test_otp(void)
+{
+    uint32_t i;
+    uint32_t value = 0U;
+    int ok;
+    static const uint32_t key_words[4] = {
+        0x16157E2BU, 0xA6D2AE28U, 0x8815F7ABU, 0x3C4FCF09U
+    };
+    static const uint8_t plain[16] = {
+        0x6BU, 0xC1U, 0xBEU, 0xE2U, 0x2EU, 0x40U, 0x9FU, 0x96U,
+        0xE9U, 0x3DU, 0x7EU, 0x11U, 0x73U, 0x93U, 0x17U, 0x2AU
+    };
+    static const uint8_t cbc_expected[16] = {
+        0x76U, 0x49U, 0xABU, 0xACU, 0x81U, 0x19U, 0xB2U, 0x46U,
+        0xCEU, 0xE9U, 0x8EU, 0x9BU, 0x12U, 0xE9U, 0x19U, 0x7DU
+    };
+
+    send_string("[OTP] OTP controller test.\n");
+    send_string(mmio_read32(OTP_ID_REG) == OTP_ID_EXPECTED ? "[OTP] ID OTP1 PASSED!\n"
+                                                        : "[OTP] ID FAILED!\n");
+
+    ok = 1;
+    for (i = 0; i < 4U; i++) {
+        if (!otp_program_row(i, key_words[i])) { ok = 0; }
+    }
+    send_string(ok ? "[OTP] Key slot0 programmed PASSED!\n"
+                   : "[OTP] Key slot0 programmed FAILED!\n");
+
+    mmio_write32(OTP_ADDR_REG, 0U);
+    mmio_write32(OTP_CTRL_REG, OTP_CTRL_START | OTP_CTRL_READ);
+    send_string(((mmio_read32(OTP_STATUS_REG) & OTP_STATUS_READ_PROTECTED) != 0U) &&
+                (mmio_read32(OTP_ERROR_REG) == OTP_ERR_READ_PROTECTED)
+                ? "[OTP] Key read protection PASSED!\n"
+                : "[OTP] Key read protection FAILED!\n");
+
+    ok = otp_program_row(0x50U, 0x12345678U) && otp_read_row(0x50U, &value) && value == 0x12345678U;
+    send_string(ok ? "[OTP] Non-secret row read PASSED!\n"
+                   : "[OTP] Non-secret row read FAILED!\n");
+
+    (void)otp_program_row(0x50U, 0xFFFFFFFFU);
+    send_string(mmio_read32(OTP_ERROR_REG) == OTP_ERR_ZERO_TO_ONE
+                ? "[OTP] Zero-to-one rejection PASSED!\n"
+                : "[OTP] Zero-to-one rejection FAILED!\n");
+
+    {
+        volatile uint8_t *src = (volatile uint8_t *)(uintptr_t)HSM_TEST_SRC;
+        volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)HSM_TEST_DST;
+        for (i = 0; i < 16U; i++) {
+            src[i] = plain[i];
+            dst[i] = 0U;
+        }
+    }
+    hsm_write_iv();
+    mmio_write32(HSM_KEY_ID_REG, 0U);
+    mmio_write32(HSM_INT_ENABLE_REG, HSM_INT_DONE | HSM_INT_ERROR);
+    mmio_write32(HSM_SRC_ADDR_REG, HSM_TEST_SRC);
+    mmio_write32(HSM_DST_ADDR_REG, HSM_TEST_DST);
+    mmio_write32(HSM_LENGTH_REG, 16U);
+    mmio_write32(HSM_MODE_REG, HSM_MODE_CBC);
+    mmio_write32(HSM_CTRL_REG, HSM_CTRL_START | HSM_CTRL_IRQ_ENABLE);
+
+    if (hsm_wait_done()) {
+        volatile uint8_t *dst = (volatile uint8_t *)(uintptr_t)HSM_TEST_DST;
+        ok = 1;
+        for (i = 0; i < 16U; i++) {
+            if (dst[i] != cbc_expected[i]) { ok = 0; break; }
+        }
+        send_string(ok ? "[OTP] HSM OTP KEY_ID0 AES-CBC PASSED!\n"
+                       : "[OTP] HSM OTP KEY_ID0 AES-CBC FAILED!\n");
+    } else {
+        send_string("[OTP] HSM OTP KEY_ID0 AES-CBC FAILED!\n");
     }
 }
 
@@ -640,7 +754,7 @@ static void app_task(void *arg)
 
     /* Initialise NVIC */
     nvic_init();
-    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer, IRQ5=SV timer, IRQ6=HSM).\n");
+    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer, IRQ5=SV timer, IRQ6=HSM, IRQ7=OTP).\n");
 
     /* Enable IRQs globally */
     __asm__ volatile ("cpsie i" ::: "memory");
@@ -666,7 +780,8 @@ static void app_task(void *arg)
         *   7  SV APB timer demo
         *   8  HSM AES/CMAC demo
         *   9  SYSCTRL native controller demo
-        *   a  All tests in sequence (1→2→3→4→6→7→8→9→5)
+        *   0  OTP controller + HSM direct key demo
+        *   a  All tests in sequence (1→2→3→4→6→7→0→8→9→5)
      */
     while (1) {
         send_string("=== KX6625 Test Menu ===\n");
@@ -679,6 +794,7 @@ static void app_task(void *arg)
         send_string(" 7) SV APB timer\n");
         send_string(" 8) HSM AES/CMAC\n");
         send_string(" 9) SYSCTRL native controller\n");
+        send_string(" 0) OTP controller\n");
         send_string(" a) All tests\n");
         send_string("# ");
 
@@ -704,6 +820,8 @@ static void app_task(void *arg)
             test_hsm();
         } else if (cmd == '9') {
             test_sysctrl();
+        } else if (cmd == '0') {
+            test_otp();
         } else if (cmd == 'a') {
             irq_count = 0;
             test_uart_irq();
@@ -712,12 +830,13 @@ static void app_task(void *arg)
             test_crc();
             test_dual_cpu();
             test_sv_timer();
+            test_otp();
             test_hsm();
             test_sysctrl();
             test_wdt();
             /* If WDT path causes reset, we return here on warm boot */
         } else {
-            send_string("[FW] Unknown command. Enter 1-9 or 'a'.\n");
+            send_string("[FW] Unknown command. Enter 0-9 or 'a'.\n");
         }
     }
 }

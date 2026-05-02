@@ -17,7 +17,7 @@ import json
 import sys
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from Crypto.Cipher import AES
 from Crypto.Hash import CMAC
@@ -118,6 +118,7 @@ class HsmDevice(MMIODevice):
         irq_controller: Optional[IRQController] = None,
         irq_idx: int = 0,
         otp_file: str = 'build/hsm_otp.json',
+        otp_provider: Optional[Callable[[int, int], Optional[bytes]]] = None,
         tracer: Optional[Tracer] = None,
     ) -> None:
         init = bytearray(self._REGSIZE)
@@ -147,6 +148,7 @@ class HsmDevice(MMIODevice):
         self._addrspace = address_space
         self._irq = IrqLine(irq_controller, irq_idx)
         self._otp_file = Path(otp_file)
+        self._otp_provider = otp_provider
         self._tr: DeviceTracer = tracer.context(self.name) if tracer else NULL_DEVICE_TRACER
         self._op_lock = threading.Lock()
         self._active_key: Optional[bytes] = None
@@ -311,6 +313,13 @@ class HsmDevice(MMIODevice):
         return None
 
     def _load_otp_key(self, key_id: int) -> Optional[bytes]:
+        if self._otp_provider is not None:
+            key = self._otp_provider(key_id, 128)
+            if key is None or len(key) != 16:
+                self._set_error(self._ERR_OTP_SLOT)
+                return None
+            return key
+
         try:
             doc = json.loads(self._otp_file.read_text(encoding='utf-8'))
             value = doc['slots'][str(key_id)]['aes128']

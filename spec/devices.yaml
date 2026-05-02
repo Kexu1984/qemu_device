@@ -125,6 +125,16 @@ devices:
     irq_port:    7909
     spec:        hsm.yaml
 
+  - name:        otp
+    description: "OTP controller — one-time-programmable storage with ECC and HSM direct key provider"
+    base_addr:   0x4000D000
+    size:        0x1000
+    irq_num:     7           # External IRQ 7 on KX6625
+    irq_delay:   0.0
+    rw_port:     7910
+    irq_port:    7911
+    spec:        otp.yaml
+
 # ── Physical Memory Regions ──────────────────────────────────────────────────────────────────
 #
 # RAM regions visible to both firmware (CPU) and device models (via MemChannel).

@@ -30,11 +30,11 @@ This project implements:
 - **Python Device Server** (`device_model/mmio_device_server.py`): Transport + address dispatcher (`MMIOBus`). Each peripheral is a `MMIODevice` subclass with `read()`, `write()`, and an optional `on_tick()` override.
 - **SoC Topology** (`device_model/soc_top.py`): Typed config dataclasses (`UartCfg`, `TimerCfg`, `DmaCfg`, …) and `SoCTop` — the top-level wiring class. `SoCTop` instantiates any number of each device type, assigns each its own `IRQController` / transport servers, and exposes `start()` / `stop()`. `kx6625_default()` returns the canonical KX6625 device map.
 - **Native SYSCTRL block**: QEMU-native system controller at `0x4000A000` for CPU identity, CPU1 reset release, boot status, device clock/reset policy state, and SYSCTRL-mediated indirect device-register access.
-- **Eight socket-backed peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT), SystemVerilog APB timer prototype, and an HSM crypto accelerator with AES-128/CMAC support. See [`spec/README.md`](spec/README.md) for register maps.
+- **Nine socket-backed peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT), SystemVerilog APB timer prototype, an HSM crypto accelerator with AES-128/CMAC support, and an OTP controller with 1-to-0 programming and ECC. See [`spec/README.md`](spec/README.md) for register maps.
 - **SystemVerilog Device Prototype** (`sv_device/`): A Verilator-built APB timer bridge listening on TCP ports 7906/7907. QEMU drives it through a normal `mmio-sockdev` instance at `0x4000B000`, and the SV model returns an IRQ through NVIC IRQ5.
 - **KX6625 Custom SoC** (`scripts/qemu-fork/hw/arm/kx6625.c`): Dual Cortex-M4 @ 48 MHz, 512 KB FLASH @ `0x00000000`, 128 KB SRAM @ `0x20000000`, NVIC with 16 external IRQs per ARMv7-M container.
-- **FreeRTOS Cortex-M4F Firmware**: CPU0 boots FreeRTOS using the official GCC `ARM_CM4F` port and Cortex-M SysTick; CPU1 runs a lightweight bare-metal IPC loop. The demo task exercises UART, DMA M2M, DMA peripheral DREQ/DACK, CRC-32, dual-core IPC, SV timer IRQ, HSM AES-CBC/CMAC, SYSCTRL, and WDT countdown-reset warm-boot detection.
-- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server and the SV timer bridge, boots QEMU with `icount shift=5`, exercises all devices including HSM crypto, SYSCTRL indirect register access, and a WDT-triggered system reset, asserts firmware output, and generates an HTML trace report.
+- **FreeRTOS Cortex-M4F Firmware**: CPU0 boots FreeRTOS using the official GCC `ARM_CM4F` port and Cortex-M SysTick; CPU1 runs a lightweight bare-metal IPC loop. The demo task exercises UART, DMA M2M, DMA peripheral DREQ/DACK, CRC-32, dual-core IPC, SV timer IRQ, OTP programming/read protection, HSM AES-CBC/CMAC including OTP-backed `KEY_ID`, SYSCTRL, and WDT countdown-reset warm-boot detection.
+- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server and the SV timer bridge, boots QEMU with `icount shift=5`, exercises all devices including OTP/HSM direct key wiring, HSM crypto, SYSCTRL indirect register access, and a WDT-triggered system reset, asserts firmware output, and generates an HTML trace report.
 - **Event Tracer** (`device_model/tracer.py`): Non-blocking JSONL event trace for every device — records virtual time, wall time, and device-specific fields. Written by a background thread so device models never block on I/O. Visualised as a self-contained HTML report (`build/trace_report.html`) by `scripts/visualize_trace.py`.
 
 ## Architecture
@@ -46,7 +46,7 @@ This project implements:
 │  QEMU  (KX6625 custom SoC — dual Cortex-M4 @ 48 MHz, NVIC, 16 external IRQs)              │
 │                                                                                            │
 │  ┌──────────────┐    MMIO                ┌──────────────────────────────────────────────┐ │
-│  │  Firmware    │ ─── read/write ──────► │  mmio-sockdev (×8 instances)                 │ │
+│  │  Firmware    │ ─── read/write ──────► │  mmio-sockdev (×9 instances)                 │ │
 │  │  FreeRTOS    │                        │                                              │ │
 │  │              │ ◄── IRQ (NVIC) ──────── │   chardev      ↔ R/W TCP channel             │ │
 │  └──────┬───────┘                        │   irq-chardev  ← IRQ TCP channel             │ │
@@ -82,8 +82,8 @@ This project implements:
 │                   MMIOBus                    SystemResetManager                            │
 │       ┌───────────────┼──────────┬────────────────┬──────┬──────┐   on WDT timeout:       │
 │       ▼               ▼          ▼                ▼      ▼      ▼   1. device.on_reset()  │
-│  ConsoleUart DmaController TimerDevice DmaClientDemo CRC-32 WDT HSM  (all devices)         │
-│  0x40004000  0x40005000    0x40006000  0x40007000   0x40008000 0x40009000 0x4000C000       │
+│  ConsoleUart DmaController TimerDevice DmaClientDemo CRC-32 WDT HSM OTP (all devices)      │
+│  0x40004000  0x40005000    0x40006000  0x40007000   0x40008000 0x40009000 ...              │
 │  IRQ 0       IRQ 1         on_tick()   IRQ 3         —      IRQ 4 IRQ 6  2. RstCtrl.send() │
 │              on_tick()     IRQ 2       DREQ/DACK    data feed on_tick() AES/CMAC → :7903  │
 │              dma_read/write                                  timeout  DMA-style crypto     │
@@ -569,6 +569,7 @@ qemu-system-arm -M kx6625 -smp 2 -nographic -no-reboot \
     -device mmio-sockdev,...,addr=0x40009000,irq-num=4 \
     -device mmio-sockdev,...,addr=0x4000B000,irq-num=5 \
     -device mmio-sockdev,...,addr=0x4000C000,irq-num=6 \
+    -device mmio-sockdev,...,addr=0x4000D000,irq-num=7 \
     -kernel build/firmware.hex
 ```
 
@@ -711,11 +712,11 @@ python3 scripts/uart_console.py
 
 ## Firmware Demo Sequence
 
-The FreeRTOS application task (`firmware/main.c`) executes seven demos from the UART menu. Command `a` runs them back-to-back:
+The FreeRTOS application task (`firmware/main.c`) executes nine demos from the UART menu. Command `a` runs them back-to-back:
 
 ### Phase 1 — UART IRQ
 
-1. Initialises NVIC (16 external IRQs armed, IRQs 0–4 enabled).
+1. Initialises NVIC (16 external IRQs armed, IRQs 0–7 enabled).
 2. Enables IRQs and waits (`WFI`) for IRQ 0.
 3. Python server fires the UART IRQ ~2 s after connecting; firmware acknowledges and prints `[FW] UART interrupt handled successfully!`.
 
@@ -765,7 +766,14 @@ This phase validates the QEMU-to-SV transaction path and RTL interrupt behaviour
 3. Firmware programs `DEVCTL_ADDR=CONSOLE_UART_STATUS`, writes `DEVCTL_CTRL=START|READ`, and verifies `DEVCTL_RDATA` reports UART TX-ready.
 4. This validates that SYSCTRL can act as a central system-control block and as a controlled bus master for device register access.
 
-### Phase 8 — Watchdog Timer Reset Demo
+### Phase 8 — OTP Controller And HSM Direct Key Path
+
+1. Firmware programs OTP key slot 0 rows with the AES-128 test key after writing the required unlock words.
+2. Firmware attempts a CPU `READ` of key row 0 and expects `ERROR.READ_PROTECTED`.
+3. Firmware programs and reads a non-secret customer row, then attempts an invalid 0 to 1 program and expects rejection.
+4. Firmware runs HSM AES-CBC with `KEY_ID=0`; HSM obtains the key through the direct OTP provider rather than CPU-readable registers.
+
+### Phase 9 — Watchdog Timer Reset Demo
 
 1. **POR boot**: firmware reads `WDT_RESET_REASON_REG`; value = 0 (`REASON_POR`) → first boot path.
 2. Sets `WDT_LOAD = 200 ms`, prints `"Kick 1"` and `"Kick 2"` (two `KICK` register writes).
@@ -790,13 +798,14 @@ qemu_device/
 │   ├── timer.yaml                    # Timer 0 register map
 │   ├── crc.yaml                      # CRC-32 engine register map
 │   ├── hsm.yaml                      # HSM AES/CMAC accelerator register map
+│   ├── otp.yaml                      # OTP controller register map and HSM direct-key provider
 │   ├── sysctrl.yaml                  # Native SYSCTRL register map
 │   ├── wdt.yaml                      # Watchdog Timer register map
 │   └── sv_timer.yaml                 # SystemVerilog APB timer prototype register map
 ├── firmware/                         # FreeRTOS Cortex-M4F firmware
 │   ├── FreeRTOSConfig.h              # KX6625 FreeRTOS config (48 MHz, 1 kHz SysTick)
 │   ├── start.S                       # Vector table, Reset_Handler, CPU0/CPU1 split
-│   ├── main.c                        # CPU0 FreeRTOS task + demo menu (UART/DMA/CRC/IPC/SV/HSM/SYSCTRL/WDT)
+│   ├── main.c                        # CPU0 FreeRTOS task + demo menu (UART/DMA/CRC/IPC/SV/OTP/HSM/SYSCTRL/WDT)
 │   ├── cpu1_main.c                   # CPU1 bare-metal IPC polling loop
 │   ├── runtime.c                     # Minimal freestanding memset/memcpy for -nostdlib
 │   ├── linker.ld                     # Memory layout (FLASH @ 0x00000000, SRAM @ 0x20000000)
@@ -824,6 +833,8 @@ qemu_device/
 │   ├── dma_client_demo.py            # DMA client demo peripheral (DREQ/DACK to DMA CH1)
 │   ├── timer_model.py                # Countdown timer (virtual-clock, one-shot + periodic)
 │   ├── crc_device.py                 # CRC-32/ISO-HDLC hardware accelerator
+│   ├── hsm_model.py                  # HSM AES/CMAC accelerator with direct OTP key provider
+│   ├── otp_model.py                  # File-backed OTP controller with ECC and protected key rows
 │   ├── wdt_model.py                  # Watchdog Timer (countdown reset + retention registers)
 │   └── generated/                    # Auto-generated constants (make gen / make fw)
 │       └── device_consts.py          # Python constants mirroring mmio_devices.h

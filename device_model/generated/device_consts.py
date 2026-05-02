@@ -202,6 +202,54 @@ HSM_TAG_WORD1_REG                        = 0x4000C064  # offset 0x0064  R  CMAC 
 HSM_TAG_WORD2_REG                        = 0x4000C068  # offset 0x0068  R  CMAC tag/result word 2, bits [95:64]
 HSM_TAG_WORD3_REG                        = 0x4000C06C  # offset 0x006C  R  CMAC tag/result word 3, bits [127:96]
 
+# ── OTP ─────────────────────────────────────────────────────────
+# OTP controller — one-time-programmable storage with ECC and HSM direct key provider
+OTP_BASE         = 0x4000D000
+OTP_SIZE         = 0x1000
+OTP_IRQ_INTID    = 7
+OTP_IRQ_DELAY_S  = 0.0
+OTP_IRQ_PORT     = 7911
+OTP_RW_PORT      = 7910
+
+# Registers
+OTP_ID_REG                               = 0x4000D000  # offset 0x0000  R  Device ID: ASCII 'OTP1' encoded little-endian
+OTP_VERSION_REG                          = 0x4000D004  # offset 0x0004  R  OTP controller model version: major.minor encoded as 0x00010000 for v1.0
+OTP_CTRL_REG                             = 0x4000D008  # offset 0x0008  RW  Control register. bit0 = START (write 1 to execute command, self-clears); bit1 = READ row into RDATA/ECC_RDATA; bit2 = PROGRAM row from WDATA; bit3 = RELOAD storage file and refresh shadow registers; bit4 = SAVE current rows to storage file; bit5 = IRQ_ENABLE; exactly one of READ/PROGRAM/RELOAD/SAVE must be set with START.
+
+OTP_STATUS_REG                           = 0x4000D00C  # offset 0x000C  R  Status register. bit0 = BUSY; bit1 = DONE; bit2 = ERROR; bit3 = IRQ_PENDING; bit4 = UNLOCKED; bit5 = FILE_LOADED; bit6 = FILE_DIRTY; bit7 = ECC_CORRECTED sticky until STATUS_CLEAR; bit8 = ECC_UNCORRECTABLE sticky until STATUS_CLEAR; bit9 = LOCKED_REGION; bit10 = SHADOW_VALID; bit11 = READ_PROTECTED sticky until STATUS_CLEAR.
+
+OTP_INT_STATUS_REG                       = 0x4000D010  # offset 0x0010  RW  Interrupt/status latch, W1C. bit0 = DONE_IRQ; bit1 = ERROR_IRQ; bit2 = ECC_CORRECTED_IRQ; bit3 = ECC_UNCORRECTABLE_IRQ.
+
+OTP_INT_ENABLE_REG                       = 0x4000D014  # offset 0x0014  RW  Interrupt enable mask corresponding to INT_STATUS bits. CTRL.IRQ_ENABLE must also be set for the Python model to pulse the IRQ line.
+
+OTP_ERROR_REG                            = 0x4000D018  # offset 0x0018  R  Last error code. 0=NONE; 1=BAD_COMMAND; 2=ADDR_RANGE; 3=ZERO_TO_ONE_PROGRAM; 4=LOCKED; 5=UNLOCK_REQUIRED; 6=FILE_IO; 7=FILE_FORMAT; 8=ECC_CORRECTED; 9=ECC_UNCORRECTABLE; 10=BUSY; 11=READ_PROTECTED.
+
+OTP_STATUS_CLEAR_REG                     = 0x4000D01C  # offset 0x001C  W  Write-1-to-clear sticky STATUS bits. bit7 clears ECC_CORRECTED; bit8 clears ECC_UNCORRECTABLE; bit11 clears READ_PROTECTED.
+
+OTP_ADDR_REG                             = 0x4000D020  # offset 0x0020  RW  OTP row index for command READ/PROGRAM. Valid range: 0 .. row_count-1.
+OTP_WDATA_REG                            = 0x4000D024  # offset 0x0024  RW  32-bit data word used by PROGRAM command. Only 1->0 transitions are allowed.
+OTP_RDATA_REG                            = 0x4000D028  # offset 0x0028  R  32-bit data word returned by the last successful non-secret READ command.
+OTP_ECC_RDATA_REG                        = 0x4000D02C  # offset 0x002C  R  ECC byte associated with the last READ command. bits[7:0] carry the model ECC.
+OTP_UNLOCK0_REG                          = 0x4000D030  # offset 0x0030  W  First programming unlock word. Write 0x4F545031 ('OTP1') before PROGRAM. Reads return 0.
+OTP_UNLOCK1_REG                          = 0x4000D034  # offset 0x0034  W  Second programming unlock word. Write 0x50524F47 ('PROG') before PROGRAM. Reads return 0.
+OTP_LOCK_CTRL_REG                        = 0x4000D038  # offset 0x0038  RW  Region lock request register. W1 locks regions permanently for this model instance and persists lock bits in the OTP metadata row. bit0 locks HSM key slots 0..14; bit1 locks lifecycle rows; bit2 locks customer configuration rows; bit3 locks general-purpose rows.
+
+OTP_LOCK_STATUS_REG                      = 0x4000D03C  # offset 0x003C  R  Latched region lock status. Same bit assignment as LOCK_CTRL.
+OTP_ROW_COUNT_REG                        = 0x4000D040  # offset 0x0040  R  Total number of OTP rows implemented by this model. Reset value follows model.row_count.
+OTP_ROW_BITS_REG                         = 0x4000D044  # offset 0x0044  R  Data bits per OTP row. First model uses 32-bit rows.
+OTP_ECC_STATUS_REG                       = 0x4000D048  # offset 0x0048  R  ECC summary. bits[7:0] = corrected error count modulo 256; bits[15:8] = uncorrectable error count modulo 256; bits[31:16] = last row index with an ECC event.
+
+OTP_FILE_STATUS_REG                      = 0x4000D04C  # offset 0x004C  R  Storage file summary. bit0 = EXISTS; bit1 = LOADED; bit2 = DIRTY; bit3 = STRICT_FILE; bit4 = FORMAT_ERROR.
+
+OTP_LIFECYCLE_WORD0_REG                  = 0x4000D100  # offset 0x0100  R  Shadow of non-secret lifecycle / boot policy row 0x0040
+OTP_LIFECYCLE_WORD1_REG                  = 0x4000D104  # offset 0x0104  R  Shadow of non-secret lifecycle / boot policy row 0x0041
+OTP_LIFECYCLE_WORD2_REG                  = 0x4000D108  # offset 0x0108  R  Shadow of non-secret lifecycle / boot policy row 0x0042
+OTP_LIFECYCLE_WORD3_REG                  = 0x4000D10C  # offset 0x010C  R  Shadow of non-secret lifecycle / boot policy row 0x0043
+OTP_CUSTOMER_WORD0_REG                   = 0x4000D120  # offset 0x0120  R  Shadow of non-secret customer configuration row 0x0050
+OTP_CUSTOMER_WORD1_REG                   = 0x4000D124  # offset 0x0124  R  Shadow of non-secret customer configuration row 0x0051
+OTP_CUSTOMER_WORD2_REG                   = 0x4000D128  # offset 0x0128  R  Shadow of non-secret customer configuration row 0x0052
+OTP_CUSTOMER_WORD3_REG                   = 0x4000D12C  # offset 0x012C  R  Shadow of non-secret customer configuration row 0x0053
+
 # ── SRAM memory region ────────────────────────────────────────────────────────
 # Scratchpad SRAM for device DMA transfers
 SRAM_BASE         = 0x20000000

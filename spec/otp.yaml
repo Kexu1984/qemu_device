@@ -1,0 +1,380 @@
+# ============================================================================
+# OTP Controller - one-time-programmable non-volatile storage model
+# ============================================================================
+#
+# Referenced by spec/devices.yaml:
+#   name:        otp
+#   base_addr:   0x4000D000
+#   size:        0x1000
+#   rw_port:     7910
+#   irq_port:    7911
+#   spec:        otp.yaml
+#
+# Design intent
+# -------------
+# OTP models SoC one-time-programmable storage. The true non-volatile content
+# is persisted in a host-side HEX text file. The Python model loads that file at
+# device/server start, validates ECC, and exposes a high-level MMIO controller
+# for row programming, non-secret row reads, reload/save, status, and locks.
+#
+# HSM KEY_ID 0..14 uses a direct Python-side OTP provider, modelling hardware
+# direct wiring from OTP to HSM. HSM key material must not be exposed through
+# CPU-readable registers or CPU READ commands. A future debug port may inspect
+# key rows out-of-band; that is intentionally not part of this CPU MMIO block.
+#
+# Programming rules
+# -----------------
+# - Erased OTP bits are 1.
+# - Programming may only change 1 -> 0.
+# - Erase is not supported.
+# - A write attempting 0 -> 1 is rejected, does not change OTP content, and
+#   latches STATUS.ERROR / ERROR.ZERO_TO_ONE.
+# - Programming is word-granular in the first model: one 32-bit word per START.
+# - PROGRAM requires the UNLOCK0/UNLOCK1 magic sequence.
+# - ECC is updated for the programmed word and persisted with the HEX file.
+#
+# File model
+# ----------
+# The persistent OTP file is line-oriented ASCII. Each physical row is one
+# 32-bit data word plus ECC.
+#
+# Format, version 1:
+#   # KX6625 OTP v1: row_index data_hex ecc_hex
+#   0000 FFFFFFFF 00
+#   0001 FFFFFFFF 00
+#   0010 16157E2B 5A
+#
+# Rules:
+# - row_index is a 4-digit hex row number.
+# - data_hex is an 8-digit big-endian text rendering of the 32-bit OTP word.
+#   Firmware/MMIO sees the same value as a normal little-endian 32-bit register.
+# - ecc_hex is a 2-digit ECC byte for the data word.
+# - Missing file means all rows are erased (0xFFFFFFFF) unless STRICT_FILE mode
+#   is enabled in the Python model configuration.
+# - Missing rows are treated as erased and are materialized when first written
+#   or when SAVE is requested.
+#
+# ECC model
+# ---------
+# This virtual platform uses a deterministic SECDED-style ECC byte for each
+# 32-bit row. It is not a claim of the real KX6625 OTP macro ECC.
+#
+# - ECC bits[5:0] are Hamming parity bits for data bit positions 1..32.
+# - ECC bit6 is reserved and reads as 0.
+# - ECC bit7 is overall parity across data bits and parity bits.
+# - A single-bit data error is corrected in the returned value and latches
+#   STATUS.ECC_CORRECTED / INT_STATUS.ECC_CORRECTED_IRQ.
+# - A single-bit ECC error is reported as corrected, with data unchanged.
+# - A double-bit or otherwise uncorrectable error latches
+#   STATUS.ECC_UNCORRECTABLE / INT_STATUS.ECC_UNCORRECTABLE_IRQ and
+#   ERROR.ECC_UNCORRECTABLE.
+#
+# CPU-visible read policy
+# -----------------------
+# - Rows 0x0000..0x003B contain HSM key slots 0..14 and are CPU read-protected.
+# - CPU READ commands targeting key rows fail with ERROR.READ_PROTECTED.
+# - CPU PROGRAM commands may program key rows after unlock, unless the key region
+#   is locked.
+# - HSM direct reads can consume key rows through the provider API and still
+#   receive ECC correction/error status internally.
+#
+# HSM direct connection
+# ---------------------
+# The Python SoC wiring should provide HSM with an OTP provider object/function:
+#
+#   otp.read_key(slot_id: int, key_size_bits: int = 128) -> bytes | None
+#
+# That API reads OTP rows assigned to the requested key slot, checks ECC, applies
+# lock/access policy, and returns 16 bytes to HSM. This models hardware direct
+# wiring, not a CPU-visible MMIO path. HSM KEY_ID 15 remains the open write-only
+# register key path.
+#
+# OTP row map
+# -----------
+# - Rows 0x0000..0x003B: HSM AES-128 key slots 0..14
+#   slot N uses rows 4*N + 0 .. 4*N + 3, little-endian word order matching the
+#   HSM KEY_WORD registers.
+# - Rows 0x0040..0x0043: lifecycle / boot policy reservation.
+# - Rows 0x0050..0x005F: customer configuration / board ID reservation.
+# - Rows 0x0060..0x00FF: general-purpose OTP reservation.
+#
+# Shadow/register-load behavior
+# -----------------------------
+# At device/server start, OTP loads the file and mirrors selected non-secret
+# rows into a CPU-readable shadow window. Key rows are never mirrored here.
+#
+# First-model shadow window:
+# - 0x100..0x10C: lifecycle / boot policy rows 0x0040..0x0043
+# - 0x120..0x12C: customer configuration rows 0x0050..0x0053
+#
+# Typical firmware command sequences
+# ----------------------------------
+# Read one non-secret row:
+#   1. Write ADDR = row_index.
+#   2. Write CTRL = START | READ.
+#   3. Poll STATUS.DONE.
+#   4. Read RDATA and ECC_RDATA.
+#
+# Program one row:
+#   1. Write UNLOCK0 = 0x4F545031 ('OTP1').
+#   2. Write UNLOCK1 = 0x50524F47 ('PROG').
+#   3. Write ADDR = row_index.
+#   4. Write WDATA = new_word_value.
+#   5. Write CTRL = START | PROGRAM.
+#   6. Poll STATUS.DONE; check STATUS.ERROR and ERROR.
+#
+# Reload shadow from file:
+#   1. Write CTRL = START | RELOAD.
+#   2. Poll STATUS.DONE.
+#
+# Save current OTP rows to file:
+#   1. Write CTRL = START | SAVE.
+#   2. Poll STATUS.DONE.
+
+model:
+  storage_file: "build/otp.hex"
+  row_count: 256
+  row_bits: 32
+  ecc_bits: 8
+  erased_word: 0xFFFFFFFF
+  strict_file: false
+  auto_load_on_start: true
+  auto_save_after_program: true
+  program_granularity_bits: 32
+  program_requires_unlock: true
+  hsm_key_slots: 15
+  hsm_key_size_bits: 128
+  hsm_key_base_row: 0x0000
+  hsm_key_rows_per_slot: 4
+  cpu_read_protected_ranges:
+    - [0x0000, 0x003B]
+
+registers:
+  - offset:      0x00
+    name:        ID
+    access:      R
+    description: "Device ID: ASCII 'OTP1' encoded little-endian"
+    reset_value: 0x3150544F
+
+  - offset:      0x04
+    name:        VERSION
+    access:      R
+    description: "OTP controller model version: major.minor encoded as 0x00010000 for v1.0"
+    reset_value: 0x00010000
+
+  - offset:      0x08
+    name:        CTRL
+    access:      RW
+    description: >
+      Control register.
+      bit0 = START (write 1 to execute command, self-clears);
+      bit1 = READ row into RDATA/ECC_RDATA;
+      bit2 = PROGRAM row from WDATA;
+      bit3 = RELOAD storage file and refresh shadow registers;
+      bit4 = SAVE current rows to storage file;
+      bit5 = IRQ_ENABLE;
+      exactly one of READ/PROGRAM/RELOAD/SAVE must be set with START.
+    reset_value: 0x00000000
+
+  - offset:      0x0C
+    name:        STATUS
+    access:      R
+    description: >
+      Status register.
+      bit0 = BUSY;
+      bit1 = DONE;
+      bit2 = ERROR;
+      bit3 = IRQ_PENDING;
+      bit4 = UNLOCKED;
+      bit5 = FILE_LOADED;
+      bit6 = FILE_DIRTY;
+      bit7 = ECC_CORRECTED sticky until STATUS_CLEAR;
+      bit8 = ECC_UNCORRECTABLE sticky until STATUS_CLEAR;
+      bit9 = LOCKED_REGION;
+      bit10 = SHADOW_VALID;
+      bit11 = READ_PROTECTED sticky until STATUS_CLEAR.
+    reset_value: 0x00000000
+
+  - offset:      0x10
+    name:        INT_STATUS
+    access:      RW
+    description: >
+      Interrupt/status latch, W1C.
+      bit0 = DONE_IRQ;
+      bit1 = ERROR_IRQ;
+      bit2 = ECC_CORRECTED_IRQ;
+      bit3 = ECC_UNCORRECTABLE_IRQ.
+    reset_value: 0x00000000
+
+  - offset:      0x14
+    name:        INT_ENABLE
+    access:      RW
+    description: >
+      Interrupt enable mask corresponding to INT_STATUS bits. CTRL.IRQ_ENABLE
+      must also be set for the Python model to pulse the IRQ line.
+    reset_value: 0x00000000
+
+  - offset:      0x18
+    name:        ERROR
+    access:      R
+    description: >
+      Last error code.
+      0=NONE;
+      1=BAD_COMMAND;
+      2=ADDR_RANGE;
+      3=ZERO_TO_ONE_PROGRAM;
+      4=LOCKED;
+      5=UNLOCK_REQUIRED;
+      6=FILE_IO;
+      7=FILE_FORMAT;
+      8=ECC_CORRECTED;
+      9=ECC_UNCORRECTABLE;
+      10=BUSY;
+      11=READ_PROTECTED.
+    reset_value: 0x00000000
+
+  - offset:      0x1C
+    name:        STATUS_CLEAR
+    access:      W
+    description: >
+      Write-1-to-clear sticky STATUS bits.
+      bit7 clears ECC_CORRECTED;
+      bit8 clears ECC_UNCORRECTABLE;
+      bit11 clears READ_PROTECTED.
+    reset_value: 0x00000000
+
+  - offset:      0x20
+    name:        ADDR
+    access:      RW
+    description: "OTP row index for command READ/PROGRAM. Valid range: 0 .. row_count-1."
+    reset_value: 0x00000000
+
+  - offset:      0x24
+    name:        WDATA
+    access:      RW
+    description: "32-bit data word used by PROGRAM command. Only 1->0 transitions are allowed."
+    reset_value: 0xFFFFFFFF
+
+  - offset:      0x28
+    name:        RDATA
+    access:      R
+    description: "32-bit data word returned by the last successful non-secret READ command."
+    reset_value: 0xFFFFFFFF
+
+  - offset:      0x2C
+    name:        ECC_RDATA
+    access:      R
+    description: "ECC byte associated with the last READ command. bits[7:0] carry the model ECC."
+    reset_value: 0x00000000
+
+  - offset:      0x30
+    name:        UNLOCK0
+    access:      W
+    description: "First programming unlock word. Write 0x4F545031 ('OTP1') before PROGRAM. Reads return 0."
+    reset_value: 0x00000000
+
+  - offset:      0x34
+    name:        UNLOCK1
+    access:      W
+    description: "Second programming unlock word. Write 0x50524F47 ('PROG') before PROGRAM. Reads return 0."
+    reset_value: 0x00000000
+
+  - offset:      0x38
+    name:        LOCK_CTRL
+    access:      RW
+    description: >
+      Region lock request register. W1 locks regions permanently for this model
+      instance and persists lock bits in the OTP metadata row.
+      bit0 locks HSM key slots 0..14;
+      bit1 locks lifecycle rows;
+      bit2 locks customer configuration rows;
+      bit3 locks general-purpose rows.
+    reset_value: 0x00000000
+
+  - offset:      0x3C
+    name:        LOCK_STATUS
+    access:      R
+    description: "Latched region lock status. Same bit assignment as LOCK_CTRL."
+    reset_value: 0x00000000
+
+  - offset:      0x40
+    name:        ROW_COUNT
+    access:      R
+    description: "Total number of OTP rows implemented by this model. Reset value follows model.row_count."
+    reset_value: 0x00000100
+
+  - offset:      0x44
+    name:        ROW_BITS
+    access:      R
+    description: "Data bits per OTP row. First model uses 32-bit rows."
+    reset_value: 0x00000020
+
+  - offset:      0x48
+    name:        ECC_STATUS
+    access:      R
+    description: >
+      ECC summary.
+      bits[7:0] = corrected error count modulo 256;
+      bits[15:8] = uncorrectable error count modulo 256;
+      bits[31:16] = last row index with an ECC event.
+    reset_value: 0x00000000
+
+  - offset:      0x4C
+    name:        FILE_STATUS
+    access:      R
+    description: >
+      Storage file summary.
+      bit0 = EXISTS;
+      bit1 = LOADED;
+      bit2 = DIRTY;
+      bit3 = STRICT_FILE;
+      bit4 = FORMAT_ERROR.
+    reset_value: 0x00000000
+
+  - offset:      0x100
+    name:        LIFECYCLE_WORD0
+    access:      R
+    description: "Shadow of non-secret lifecycle / boot policy row 0x0040"
+    reset_value: 0xFFFFFFFF
+
+  - offset:      0x104
+    name:        LIFECYCLE_WORD1
+    access:      R
+    description: "Shadow of non-secret lifecycle / boot policy row 0x0041"
+    reset_value: 0xFFFFFFFF
+
+  - offset:      0x108
+    name:        LIFECYCLE_WORD2
+    access:      R
+    description: "Shadow of non-secret lifecycle / boot policy row 0x0042"
+    reset_value: 0xFFFFFFFF
+
+  - offset:      0x10C
+    name:        LIFECYCLE_WORD3
+    access:      R
+    description: "Shadow of non-secret lifecycle / boot policy row 0x0043"
+    reset_value: 0xFFFFFFFF
+
+  - offset:      0x120
+    name:        CUSTOMER_WORD0
+    access:      R
+    description: "Shadow of non-secret customer configuration row 0x0050"
+    reset_value: 0xFFFFFFFF
+
+  - offset:      0x124
+    name:        CUSTOMER_WORD1
+    access:      R
+    description: "Shadow of non-secret customer configuration row 0x0051"
+    reset_value: 0xFFFFFFFF
+
+  - offset:      0x128
+    name:        CUSTOMER_WORD2
+    access:      R
+    description: "Shadow of non-secret customer configuration row 0x0052"
+    reset_value: 0xFFFFFFFF
+
+  - offset:      0x12C
+    name:        CUSTOMER_WORD3
+    access:      R
+    description: "Shadow of non-secret customer configuration row 0x0053"
+    reset_value: 0xFFFFFFFF

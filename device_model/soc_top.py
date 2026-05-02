@@ -97,6 +97,7 @@ from device_model.dma_client_demo   import DmaClientDemoDevice  # noqa: E402
 from device_model.crc_device        import CrcDevice            # noqa: E402
 from device_model.wdt_model         import WdtDevice            # noqa: E402
 from device_model.hsm_model         import HsmDevice            # noqa: E402
+from device_model.otp_model         import OtpControllerDevice   # noqa: E402
 from device_model.tracer            import Tracer               # noqa: E402
 
 
@@ -259,6 +260,21 @@ class HsmCfg:
     size:      int = 0x1000
 
 
+@dataclass
+class OtpCfg:
+    """Configuration for the ``OtpControllerDevice``.
+
+    OTP persists its rows in a host-side HEX file and exposes HSM key slots
+    through a direct provider API used by ``HsmDevice``.
+    """
+    base_addr:    int
+    rw_port:      int
+    irq_port:     int
+    nvic_irq:     int
+    storage_file: str = 'build/otp.hex'
+    size:         int = 0x1000
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SoCTop
 # ─────────────────────────────────────────────────────────────────────────────
@@ -301,6 +317,7 @@ class SoCTop:
         dma_client_demo: Optional[DmaClientDemoCfg] = None,
         crc:             Optional[CrcCfg]           = None,
         wdt:             Optional[WdtCfg]           = None,
+        otp:             Optional[OtpCfg]           = None,
         hsm:             Optional[HsmCfg]           = None,
         tick_port:       int                        = 7896,
         tracer:          Optional[Tracer]           = None,
@@ -327,6 +344,7 @@ class SoCTop:
             + ([(dma_client_demo.base_addr, dma_client_demo.size)] if dma_client_demo else [])
             + ([(crc.base_addr, crc.size)] if crc else [])
             + ([(wdt.base_addr, wdt.size)] if wdt else [])
+            + ([(otp.base_addr, otp.size)] if otp else [])
             + ([(hsm.base_addr, hsm.size)] if hsm else [])
         )
 
@@ -427,7 +445,21 @@ class SoCTop:
             self._add_server(RstServer(port=wdt.rst_port, rst_controller=wdt_rst_ctrl))
             self._add_server(RWServer(port=wdt.rw_port, bus=bus, base_addr=wdt.base_addr))
 
-        # ── 8. HSM ────────────────────────────────────────────────────────
+        # ── 8. OTP ────────────────────────────────────────────────────────
+        otp_dev: Optional[OtpControllerDevice] = None
+        if otp is not None:
+            otp_irq_ctrl = IRQController()
+            otp_dev = OtpControllerDevice(
+                storage_file   = otp.storage_file,
+                irq_controller = otp_irq_ctrl,
+                irq_idx        = 0,
+                tracer         = tracer,
+            )
+            bus.register(otp.base_addr, otp.size, otp_dev)
+            self._add_server(IRQServer(port=otp.irq_port, irq_controller=otp_irq_ctrl))
+            self._add_server(RWServer(port=otp.rw_port, bus=bus, base_addr=otp.base_addr))
+
+        # ── 9. HSM ────────────────────────────────────────────────────────
         if hsm is not None and dma_ctrl is not None:
             hsm_irq_ctrl = IRQController()
             hsm_dev = HsmDevice(
@@ -435,6 +467,7 @@ class SoCTop:
                 irq_controller = hsm_irq_ctrl,
                 irq_idx        = 0,   # device IRQ output index (always 0)
                 otp_file       = hsm.otp_file,
+                otp_provider   = otp_dev.read_key if otp_dev is not None else None,
                 tracer         = tracer,
             )
             bus.register(hsm.base_addr, hsm.size, hsm_dev)
@@ -522,7 +555,8 @@ def kx6625_default(
         demo    @ 0x40007000  rw=7898 irq=7899 nvic_irq=3
         crc     @ 0x40008000  rw=7900
         wdt     @ 0x40009000  rw=7901 irq=7902 nvic_irq=4 rst=7903
-        hsm     @ 0x4000C000  rw=7908 irq=7909 nvic_irq=6 otp=build/hsm_otp.json
+        otp     @ 0x4000D000  rw=7910 irq=7911 nvic_irq=7 file=build/otp.hex
+        hsm     @ 0x4000C000  rw=7908 irq=7909 nvic_irq=6 otp-provider=otp
     """
     return SoCTop(
         uarts=[
@@ -570,6 +604,13 @@ def kx6625_default(
             irq_port  = 7902,
             nvic_irq  = 4,
             rst_port  = 7903,
+        ),
+        otp=OtpCfg(
+            base_addr    = 0x4000D000,
+            rw_port      = 7910,
+            irq_port     = 7911,
+            nvic_irq     = 7,
+            storage_file = 'build/otp.hex',
         ),
         hsm=HsmCfg(
             base_addr = 0x4000C000,

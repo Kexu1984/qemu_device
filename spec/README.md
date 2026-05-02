@@ -11,6 +11,7 @@ spec/
 ├── timer.yaml            # Countdown timer register map
 ├── crc.yaml              # CRC-32 engine register map
 ├── hsm.yaml              # AES-128 / CMAC HSM register map
+├── otp.yaml              # One-time-programmable storage controller register map
 ├── sysctrl.yaml          # Native system controller register map
 ├── sv_timer.yaml         # SystemVerilog APB timer prototype register map
 ├── soc.yaml              # SoC-level configuration (clock, reset)
@@ -32,6 +33,7 @@ spec/
 | SYSCTRL          | `0x4000A000`  | 4 KB   | —        | native   | —        | —         | —        | —        | —         |
 | SV APB Timer     | `0x4000B000`  | 4 KB   | 5        | 7906     | 7907     | —         | —        | —        | —         |
 | HSM Crypto       | `0x4000C000`  | 4 KB   | 6        | 7908     | 7909     | —         | —        | —        | —         |
+| OTP Controller   | `0x4000D000`  | 4 KB   | 7        | 7910     | 7911     | —         | —        | —        | —         |
 | **FLASH**        | `0x00000000`  | 512 KB | —        | —        | —        | —         | —        | —        | —         |
 | **SRAM**         | `0x20000000`  | 128 KB | —        | —        | —        | —         | —        | —        | —         |
 
@@ -200,11 +202,11 @@ Accesses back into the SYSCTRL address range through `DEVCTL_*` are rejected to 
 
 ## HSM Crypto Accelerator (`hsm_model.py`)
 
-First Python-model scope: AES-128 ECB/CBC/CFB/CTR encrypt/decrypt and AES-128 CMAC. `KEY_ID` selects the key source: values 0..14 select OTP file slots, while value 15 selects the open write-only key registers. Register access is restricted by `master_id`: only CPU0 (`master_id == 0`) may read/write HSM registers; other masters get zero on reads, writes are ignored, and `STATUS.ACCESS_ERR` is latched until HSM module reset.
+First Python-model scope: AES-128 ECB/CBC/CFB/CTR encrypt/decrypt and AES-128 CMAC. `KEY_ID` selects the key source: values 0..14 select OTP controller key slots through a direct Python provider connection, while value 15 selects the open write-only key registers. Register access is restricted by `master_id`: only CPU0 (`master_id == 0`) may read/write HSM registers; other masters get zero on reads, writes are ignored, and `STATUS.ACCESS_ERR` is latched until HSM module reset.
 
 The HSM is designed as a DMA client. Firmware programs source/destination/length/mode/key registers and starts an operation. The HSM internally reads from `SRC_ADDR`, runs AES/CMAC over its internal buffer, then writes the generated output directly to `DST_ADDR`. No input/output FIFO is exposed in the CPU-visible register map. `SRC_ADDR` may point to FLASH or SRAM. `DST_ADDR` is expected to point to writable memory such as SRAM; a destination in read-only FLASH should surface as a DMA/memory bus error.
 
-OTP model file: `build/hsm_otp.json`.
+OTP key material is stored in `build/otp.hex` by the OTP controller. HSM key reads do not go through CPU MMIO and key rows are not mirrored in CPU-readable OTP shadow registers.
 
 | Offset | Name       | Access | Reset      | Description |
 |--------|------------|--------|------------|-------------|
@@ -248,6 +250,41 @@ Mode encoding in `MODE.bits[3:0]`:
 `MODE.bit8` selects decrypt for ECB/CBC/CFB. CTR uses the same transform for encryption/decryption. CMAC ignores `MODE.bit8` and produces a 16-byte tag.
 
 Length rules: ECB/CBC require a non-zero multiple of 16 bytes. CFB/CTR/CMAC accept any non-zero byte length. CMAC writes a 16-byte tag to `DST_ADDR` and mirrors it in `TAG_WORD0..3`.
+
+---
+
+## OTP Controller (`otp_model.py`)
+
+The OTP controller models one-time-programmable non-volatile storage in a host-side HEX text file, `build/otp.hex`. Each row is a 32-bit word plus an 8-bit deterministic SECDED-style ECC byte. Erased bits are 1, programming can only change bits from 1 to 0, erase is unsupported, and any attempted 0 to 1 program operation is rejected.
+
+HSM key rows 0x0000..0x003B hold AES-128 key slots 0..14. These rows are CPU read-protected: firmware `READ` commands targeting them fail with `ERROR.READ_PROTECTED`. HSM consumes these rows through the direct `OtpControllerDevice.read_key()` provider, modelling hardware wiring rather than a CPU-visible read path.
+
+| Offset | Name         | Access | Reset      | Description |
+|--------|--------------|--------|------------|-------------|
+| 0x00   | ID           | R      | 0x3150544F | ASCII `OTP1` little-endian |
+| 0x04   | VERSION      | R      | 0x00010000 | OTP model version 1.0 |
+| 0x08   | CTRL         | R/W    | 0          | bit0=START, bit1=READ, bit2=PROGRAM, bit3=RELOAD, bit4=SAVE, bit5=IRQ_ENABLE |
+| 0x0C   | STATUS       | R      | 0          | BUSY/DONE/ERROR/IRQ, file state, ECC corrected/uncorrectable, read-protected status |
+| 0x10   | INT_STATUS   | R/W    | 0          | W1C interrupt latch for DONE/ERROR/ECC events |
+| 0x14   | INT_ENABLE   | R/W    | 0          | Interrupt enable mask |
+| 0x18   | ERROR        | R      | 0          | Last error code: bad command, range, zero-to-one, locked, unlock, file, ECC, read-protected |
+| 0x1C   | STATUS_CLEAR | W      | —          | W1C sticky ECC/read-protected status bits |
+| 0x20   | ADDR         | R/W    | 0          | OTP row index for READ/PROGRAM |
+| 0x24   | WDATA        | R/W    | 0xFFFFFFFF | 32-bit program data, 1 to 0 only |
+| 0x28   | RDATA        | R      | 0xFFFFFFFF | Last successful non-secret row read |
+| 0x2C   | ECC_RDATA    | R      | 0          | ECC byte for last read |
+| 0x30   | UNLOCK0      | W      | —          | Write 0x4F545031 before PROGRAM |
+| 0x34   | UNLOCK1      | W      | —          | Write 0x50524F47 before PROGRAM |
+| 0x38   | LOCK_CTRL    | R/W    | 0          | W1 locks key/lifecycle/customer/general-purpose regions |
+| 0x3C   | LOCK_STATUS  | R      | 0          | Current lock bitmap |
+| 0x40   | ROW_COUNT    | R      | 256        | Implemented row count |
+| 0x44   | ROW_BITS     | R      | 32         | Bits per row |
+| 0x48   | ECC_STATUS   | R      | 0          | Corrected/uncorrectable counters and last ECC row |
+| 0x4C   | FILE_STATUS  | R      | 0          | File exists/loaded/dirty/strict/format status |
+| 0x100  | LIFECYCLE_WORD0..3 | R | 0xFFFFFFFF | Non-secret lifecycle shadow rows 0x0040..0x0043 |
+| 0x120  | CUSTOMER_WORD0..3  | R | 0xFFFFFFFF | Non-secret customer config shadow rows 0x0050..0x0053 |
+
+Program sequence: write `UNLOCK0`, write `UNLOCK1`, set `ADDR`, set `WDATA`, then write `CTRL = START | PROGRAM`. Read sequence: set `ADDR`, write `CTRL = START | READ`, poll `STATUS.DONE`, then read `RDATA`/`ECC_RDATA`. Key rows reject CPU reads but may be programmed before the key region is locked.
 
 ---
 

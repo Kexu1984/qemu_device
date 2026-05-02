@@ -7,8 +7,9 @@
 # Scope for the first Python model:
 #   - Algorithms/modes: AES-128 ECB, CBC, CFB, CTR, and AES-128 CMAC.
 #   - Key size: 128 bits only.
-#   - Key source: KEY_ID 0..14 selects OTP file key slots; KEY_ID 15 selects
-#     the open write-only KEY_WORD registers.
+#   - Key source: KEY_ID 0..14 selects OTP controller key slots via a direct
+#     Python-side provider connection; KEY_ID 15 selects the open write-only
+#     KEY_WORD registers.
 #   - DMA model: HSM behaves as a DMA client and reuses the existing DMA
 #     controller path. The HSM internally reads SRC_ADDR, runs crypto, then
 #     writes the generated output directly to DST_ADDR. No input/output FIFO is
@@ -24,16 +25,11 @@
 #     control is not modeled in this spec yet; a future CRU model should manage
 #     device clock/reset.
 #
-# Model configuration (consumed by the future Python HSM model, not by the
-# generic code generator):
-#   otp_file: path to a JSON file that simulates OTP key storage.
-#   otp_format example:
-#     {
-#       "slots": {
-#         "0":  {"aes128": "00112233445566778899AABBCCDDEEFF"},
-#         "14": {"aes128": "000102030405060708090A0B0C0D0E0F"}
-#       }
-#     }
+# Model configuration:
+#   otp_provider: direct connection to OtpControllerDevice.read_key(). This
+#     models hardware wiring from OTP key rows to HSM and avoids exposing key
+#     material through CPU-readable registers.
+#   otp_file: legacy JSON fallback used only if no provider is wired.
 #
 # Typical operation sequence:
 #   1. Firmware writes KEY_ID.
@@ -55,6 +51,7 @@
 
 model:
   otp_file: "build/hsm_otp.json"
+  otp_provider: "OtpControllerDevice.read_key"
   otp_key_size_bits: 128
   key_id_otp_range: [0, 14]
   key_id_register: 15

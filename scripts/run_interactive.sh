@@ -167,7 +167,7 @@ trap cleanup EXIT INT TERM
 
 # ── Release ports from any previous run ───────────────────────────────────────
 info "Releasing ports from any previous run..."
-for PORT in 7890 7891 7892 7893 7894 7895 7896 7897 7898 7899 7900 7901 7902 7903 7904 7905 7906 7907 7908 7909; do
+for PORT in 7890 7891 7892 7893 7894 7895 7896 7897 7898 7899 7900 7901 7902 7903 7904 7905 7906 7907 7908 7909 7910 7911; do
     fuser -k "${PORT}/tcp" 2>/dev/null || true
 done
 sleep 0.3
@@ -212,6 +212,9 @@ start_qemu() {
         -chardev socket,id=hsm_rw,host=127.0.0.1,port=7908 \
         -chardev socket,id=hsm_irq,host=127.0.0.1,port=7909 \
         -device mmio-sockdev,chardev=hsm_rw,irq-chardev=hsm_irq,addr=0x4000C000,irq-num=6 \
+        -chardev socket,id=otp_rw,host=127.0.0.1,port=7910 \
+        -chardev socket,id=otp_irq,host=127.0.0.1,port=7911 \
+        -device mmio-sockdev,chardev=otp_rw,irq-chardev=otp_irq,addr=0x4000D000,irq-num=7 \
         -kernel "$FIRMWARE_HEX" \
         </dev/null > "$QEMU_LOG" 2>&1 &
     QEMU_PID=$!
