@@ -139,7 +139,7 @@ SYSCTRL_DEVCTL_STATUS_REG                = 0x4000A050  # offset 0x0050  R  Indir
 SYSCTRL_DEVCTL_ERROR_REG                 = 0x4000A054  # offset 0x0054  R  Indirect access last error code. 0=NONE; 1=BAD_CTRL; 2=ADDR_ALIGN; 3=ADDR_RANGE; 4=BUS_ERROR.
 
 # ── SV_TIMER ────────────────────────────────────────────────────
-# SystemVerilog APB timer prototype — Verilator-backed external model
+# SystemVerilog APB peripheral subsystem — timer plus DMA prototype
 SV_TIMER_BASE         = 0x4000B000
 SV_TIMER_SIZE         = 0x1000
 SV_TIMER_IRQ_INTID    = 5
@@ -153,6 +153,15 @@ SV_TIMER_LOAD_REG                        = 0x4000B004  # offset 0x0004  RW  Coun
 SV_TIMER_VALUE_REG                       = 0x4000B008  # offset 0x0008  R  Current countdown value
 SV_TIMER_STATUS_REG                      = 0x4000B00C  # offset 0x000C  R  Status: bit0=IRQ_PENDING
 SV_TIMER_IRQ_CLEAR_REG                   = 0x4000B010  # offset 0x0010  W  Write bit0=1 to clear IRQ_PENDING and deassert IRQ
+SV_TIMER_DMA_ID_REG                      = 0x4000B100  # offset 0x0100  R  SV DMA ID: ASCII 'SDMA' little-endian
+SV_TIMER_DMA_CTRL_REG                    = 0x4000B104  # offset 0x0104  RW  SV DMA control: bit0=START, bit1=IRQ_EN
+SV_TIMER_DMA_STATUS_REG                  = 0x4000B108  # offset 0x0108  R  SV DMA status: bit0=BUSY, bit1=DONE, bit2=ERROR
+SV_TIMER_DMA_SRC_ADDR_REG                = 0x4000B10C  # offset 0x010C  RW  SV DMA source physical address; first prototype requires 32-bit alignment
+SV_TIMER_DMA_DST_ADDR_REG                = 0x4000B110  # offset 0x0110  RW  SV DMA destination physical address; first prototype requires 32-bit alignment
+SV_TIMER_DMA_LENGTH_REG                  = 0x4000B114  # offset 0x0114  RW  SV DMA transfer length in bytes; first prototype requires a non-zero multiple of 4
+SV_TIMER_DMA_ERROR_REG                   = 0x4000B118  # offset 0x0118  R  SV DMA error: 0=NONE, 1=BAD_CONFIG, 2=AHB_READ_ERROR, 3=AHB_WRITE_ERROR
+SV_TIMER_DMA_IRQ_CLEAR_REG               = 0x4000B11C  # offset 0x011C  W  Write bit0=1 to clear SV DMA DONE/ERROR IRQ and return DMA FSM to idle
+SV_TIMER_DMA_COUNT_REG                   = 0x4000B120  # offset 0x0120  R  Number of bytes completed by the SV DMA engine
 
 # ── HSM ─────────────────────────────────────────────────────────
 # HSM crypto accelerator — AES-128 ECB/CBC/CFB/CTR/CMAC with OTP KEY_ID or open-register key source

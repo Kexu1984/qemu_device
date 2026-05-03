@@ -15,7 +15,7 @@
  *   0x40008000  crc device          (mmio-sockdev, polled)
  *   0x40009000  wdt device          (mmio-sockdev, IRQ4)
  *   0x4000A000  sysctrl device      (QEMU-native system control)
- *   0x4000B000  sv_timer device     (mmio-sockdev -> Verilated SV, IRQ5)
+ *   0x4000B000  sv_periph device    (mmio-sockdev -> Verilated SV timer/DMA, IRQ5)
  *   0x4000C000  hsm device          (mmio-sockdev, IRQ6)
  *   0x4000D000  otp device          (mmio-sockdev, IRQ7)
  */
@@ -67,6 +67,11 @@
 #define HSM_TEST_DST       (SRAM_BASE + 0x6100U)
 #define HSM_CMAC_DST       (SRAM_BASE + 0x6200U)
 
+/* SV DMA test buffers */
+#define SV_DMA_SRC         (SRAM_BASE + 0x6300U)
+#define SV_DMA_DST         (SRAM_BASE + 0x6400U)
+#define SV_DMA_LEN         32U
+
 /* WDT register bit definitions */
 #define WDT_CTRL_ENABLE     0x1U
 #define WDT_CTRL_INT_ENABLE 0x2U
@@ -77,6 +82,14 @@
 #define SV_TIMER_CTRL_ENABLE 0x1U
 #define SV_TIMER_CTRL_IRQ_EN 0x2U
 #define SV_TIMER_STATUS_IRQ  0x1U
+
+/* SV DMA register bit definitions */
+#define SV_DMA_ID_EXPECTED     0x414D4453U
+#define SV_DMA_CTRL_START      0x1U
+#define SV_DMA_CTRL_IRQ_EN     0x2U
+#define SV_DMA_STATUS_BUSY     0x1U
+#define SV_DMA_STATUS_DONE     0x2U
+#define SV_DMA_STATUS_ERROR    0x4U
 
 /* HSM register bit definitions */
 #define HSM_CTRL_START       0x1U
@@ -209,6 +222,7 @@ volatile int dma_irq_fired      = 0;
 volatile int dma_client_done    = 0;
 volatile int wdt_irq_fired      = 0;
 volatile int sv_timer_irq_fired = 0;
+volatile int sv_dma_irq_fired   = 0;
 volatile int hsm_irq_fired      = 0;
 
 void uart_irq_handler(void)     /* vector table IRQ0 */
@@ -243,10 +257,20 @@ void wdt_irq_handler(void)         /* vector table IRQ4 */
 void sv_timer_irq_handler(void)    /* vector table IRQ5 */
 {
     uint32_t status = mmio_read32(SV_TIMER_STATUS_REG);
+    uint32_t dma_status = mmio_read32(SV_TIMER_DMA_STATUS_REG);
     if (status & SV_TIMER_STATUS_IRQ) {
         mmio_write32(SV_TIMER_IRQ_CLEAR_REG, SV_TIMER_STATUS_IRQ);
         sv_timer_irq_fired++;
         send_string("[IRQ] SV timer fired! INTID=5\n");
+    }
+    if (dma_status & (SV_DMA_STATUS_DONE | SV_DMA_STATUS_ERROR)) {
+        mmio_write32(SV_TIMER_DMA_IRQ_CLEAR_REG, 1U);
+        sv_dma_irq_fired++;
+        if (dma_status & SV_DMA_STATUS_DONE) {
+            send_string("[IRQ] SV DMA done! INTID=5\n");
+        } else {
+            send_string("[IRQ] SV DMA error! INTID=5\n");
+        }
     }
 }
 
@@ -451,6 +475,50 @@ static void test_sv_timer(void)
     } else {
         send_string("[SVTIMER] IRQ clear FAILED!\n");
     }
+}
+
+/* Test 7b: SystemVerilog DMA prototype through APB + AHB-master memory path */
+static void test_sv_dma(void)
+{
+    uint32_t i;
+    int ok = 1;
+
+    send_string("[SVDMA] SV DMA prototype test.\n");
+    send_string(mmio_read32(SV_TIMER_DMA_ID_REG) == SV_DMA_ID_EXPECTED
+                ? "[SVDMA] SV DMA ID SDMA PASSED!\n"
+                : "[SVDMA] SV DMA ID FAILED!\n");
+
+    {
+        volatile uint32_t *src = (volatile uint32_t *)(uintptr_t)SV_DMA_SRC;
+        volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)SV_DMA_DST;
+        for (i = 0; i < SV_DMA_LEN / 4U; i++) {
+            src[i] = 0xC0DE0000U + i;
+            dst[i] = 0xFFFFFFFFU;
+        }
+    }
+
+    sv_dma_irq_fired = 0;
+    mmio_write32(SV_TIMER_DMA_SRC_ADDR_REG, SV_DMA_SRC);
+    mmio_write32(SV_TIMER_DMA_DST_ADDR_REG, SV_DMA_DST);
+    mmio_write32(SV_TIMER_DMA_LENGTH_REG, SV_DMA_LEN);
+    mmio_write32(SV_TIMER_DMA_CTRL_REG, SV_DMA_CTRL_START | SV_DMA_CTRL_IRQ_EN);
+    while (!sv_dma_irq_fired) {
+        __asm__ volatile ("wfi");
+    }
+
+    if (mmio_read32(SV_TIMER_DMA_ERROR_REG) != 0U) {
+        ok = 0;
+    }
+    {
+        volatile uint32_t *src = (volatile uint32_t *)(uintptr_t)SV_DMA_SRC;
+        volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)SV_DMA_DST;
+        for (i = 0; i < SV_DMA_LEN / 4U; i++) {
+            if (dst[i] != src[i]) { ok = 0; break; }
+        }
+    }
+
+    send_string(ok ? "[SVDMA] SV DMA M2M copy PASSED!\n"
+                   : "[SVDMA] SV DMA M2M copy FAILED!\n");
 }
 
 /* Test 8: HSM AES-128 CBC and CMAC */
@@ -777,7 +845,7 @@ static void app_task(void *arg)
      *   3  DMA client interface
      *   4  CRC-32 accelerator (direct + DMA→CRC)
         *   5  Watchdog Timer demo
-        *   7  SV APB timer demo
+        *   7  SV APB timer + DMA demo
         *   8  HSM AES/CMAC demo
         *   9  SYSCTRL native controller demo
         *   0  OTP controller + HSM direct key demo
@@ -791,7 +859,7 @@ static void app_task(void *arg)
         send_string(" 4) CRC-32\n");
         send_string(" 5) WDT reset\n");
         send_string(" 6) Dual-CPU IPC\n");
-        send_string(" 7) SV APB timer\n");
+        send_string(" 7) SV APB timer/DMA\n");
         send_string(" 8) HSM AES/CMAC\n");
         send_string(" 9) SYSCTRL native controller\n");
         send_string(" 0) OTP controller\n");
@@ -816,6 +884,7 @@ static void app_task(void *arg)
             test_dual_cpu();
         } else if (cmd == '7') {
             test_sv_timer();
+            test_sv_dma();
         } else if (cmd == '8') {
             test_hsm();
         } else if (cmd == '9') {
@@ -830,6 +899,7 @@ static void app_task(void *arg)
             test_crc();
             test_dual_cpu();
             test_sv_timer();
+            test_sv_dma();
             test_otp();
             test_hsm();
             test_sysctrl();

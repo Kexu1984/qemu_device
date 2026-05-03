@@ -1,11 +1,15 @@
 # SystemVerilog-backed APB timer prototype.
 #
 # Register contract exposed to firmware through mmio-sockdev:
+#   0x000..0x0ff: APB timer
 #   CTRL       bit0=ENABLE, bit1=IRQ_EN
 #   LOAD       countdown cycles loaded when ENABLE is written
 #   VALUE      current countdown value
 #   STATUS     bit0=IRQ_PENDING
 #   IRQ_CLEAR  W1C bit0 clears IRQ_PENDING and deasserts IRQ
+#   0x100..0x1ff: SV DMA prototype
+#   DMA_CTRL   bit0=START, bit1=IRQ_EN
+#   DMA_STATUS bit0=BUSY, bit1=DONE, bit2=ERROR
 
 registers:
   - offset:      0x00
@@ -32,3 +36,49 @@ registers:
     name:        irq_clear
     access:      W
     description: "Write bit0=1 to clear IRQ_PENDING and deassert IRQ"
+
+  - offset:      0x100
+    name:        dma_id
+    access:      R
+    reset:       0x414D4453
+    description: "SV DMA ID: ASCII 'SDMA' little-endian"
+
+  - offset:      0x104
+    name:        dma_ctrl
+    access:      RW
+    description: "SV DMA control: bit0=START, bit1=IRQ_EN"
+
+  - offset:      0x108
+    name:        dma_status
+    access:      R
+    description: "SV DMA status: bit0=BUSY, bit1=DONE, bit2=ERROR"
+
+  - offset:      0x10C
+    name:        dma_src_addr
+    access:      RW
+    description: "SV DMA source physical address; first prototype requires 32-bit alignment"
+
+  - offset:      0x110
+    name:        dma_dst_addr
+    access:      RW
+    description: "SV DMA destination physical address; first prototype requires 32-bit alignment"
+
+  - offset:      0x114
+    name:        dma_length
+    access:      RW
+    description: "SV DMA transfer length in bytes; first prototype requires a non-zero multiple of 4"
+
+  - offset:      0x118
+    name:        dma_error
+    access:      R
+    description: "SV DMA error: 0=NONE, 1=BAD_CONFIG, 2=AHB_READ_ERROR, 3=AHB_WRITE_ERROR"
+
+  - offset:      0x11C
+    name:        dma_irq_clear
+    access:      W
+    description: "Write bit0=1 to clear SV DMA DONE/ERROR IRQ and return DMA FSM to idle"
+
+  - offset:      0x120
+    name:        dma_count
+    access:      R
+    description: "Number of bytes completed by the SV DMA engine"

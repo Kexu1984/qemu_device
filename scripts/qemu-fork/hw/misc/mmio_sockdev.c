@@ -25,7 +25,9 @@
  *
  * MEM Protocol (mem-chardev, Python -> QEMU, optional):
  * - DMA write: 'M'(1B) | 'W'(1B) | phys_addr(8B LE) | length(4B LE) | data(lengthB)
- *   QEMU executes cpu_physical_memory_write(phys_addr, data, length).
+ *   QEMU executes cpu_physical_memory_write(phys_addr, data, length), then
+ *   returns ack(1B), where 0=OK and non-zero values are reserved for future
+ *   bus-error injection.
  * - DMA read:  'M'(1B) | 'R'(1B) | phys_addr(8B LE) | length(4B LE)
  *   QEMU responds with data(lengthB) via cpu_physical_memory_read().
  *   Models bus-master DMA: Python device directly accesses system RAM.
@@ -80,6 +82,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(MMIOSockDevState, MMIO_SOCKDEV)
  *
  * Protocol (Python sends to QEMU):
  *   DMA write: 'M'(1B) | 'W'(1B) | phys_addr(8B LE) | length(4B LE) | data(lengthB)
+ *              QEMU responds: ack(1B), 0=OK.
  *   DMA read:  'M'(1B) | 'R'(1B) | phys_addr(8B LE) | length(4B LE)
  *              QEMU responds: data(lengthB)
  *
@@ -384,7 +387,9 @@ static void mmio_sockdev_mem_receive(void *opaque, const uint8_t *buf, int size)
             } else if (rx->op == 'W') {
                 /* DMA write: allocate buffer and collect payload */
                 if (rx->data_len == 0) {
-                    /* zero-length write: nothing to do */
+                    /* zero-length write: nothing to do, but still ACK */
+                    uint8_t ack = 0;
+                    qemu_chr_fe_write_all(&s->mem_chr, &ack, sizeof(ack));
                     rx->hdr_pos = 0;
                     continue;
                 }
@@ -408,8 +413,10 @@ static void mmio_sockdev_mem_receive(void *opaque, const uint8_t *buf, int size)
             i            += chunk;
             if (rx->data_pos == rx->data_len) {
                 /* All payload bytes received: execute DMA write */
+                uint8_t ack = 0;
                 cpu_physical_memory_write(rx->phys_addr, rx->data_buf,
                                          rx->data_len);
+                qemu_chr_fe_write_all(&s->mem_chr, &ack, sizeof(ack));
                 g_free(rx->data_buf);
                 rx->data_buf = NULL;
                 rx->hdr_pos  = 0;

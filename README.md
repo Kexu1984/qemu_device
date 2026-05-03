@@ -30,11 +30,11 @@ This project implements:
 - **Python Device Server** (`device_model/mmio_device_server.py`): Transport + address dispatcher (`MMIOBus`). Each peripheral is a `MMIODevice` subclass with `read()`, `write()`, and an optional `on_tick()` override.
 - **SoC Topology** (`device_model/soc_top.py`): Typed config dataclasses (`UartCfg`, `TimerCfg`, `DmaCfg`, …) and `SoCTop` — the top-level wiring class. `SoCTop` instantiates any number of each device type, assigns each its own `IRQController` / transport servers, and exposes `start()` / `stop()`. `kx6625_default()` returns the canonical KX6625 device map.
 - **Native SYSCTRL block**: QEMU-native system controller at `0x4000A000` for CPU identity, CPU1 reset release, boot status, device clock/reset policy state, and SYSCTRL-mediated indirect device-register access.
-- **Nine socket-backed peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT), SystemVerilog APB timer prototype, an HSM crypto accelerator with AES-128/CMAC support, and an OTP controller with 1-to-0 programming and ECC. See [`spec/README.md`](spec/README.md) for register maps.
-- **SystemVerilog Device Prototype** (`sv_device/`): A Verilator-built APB timer bridge listening on TCP ports 7906/7907. QEMU drives it through a normal `mmio-sockdev` instance at `0x4000B000`, and the SV model returns an IRQ through NVIC IRQ5.
+- **Nine socket-backed peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT), SystemVerilog APB timer/DMA subsystem, an HSM crypto accelerator with AES-128/CMAC support, and an OTP controller with 1-to-0 programming and ECC. See [`spec/README.md`](spec/README.md) for register maps.
+- **SystemVerilog Device Prototype** (`sv_device/`): A Verilator-built APB peripheral subsystem listening on TCP ports 7906/7907/7912. QEMU drives it through a normal `mmio-sockdev` instance at `0x4000B000`; the SV subsystem contains an APB timer at offset `0x000` and a first-version SV DMA at offset `0x100`, with completion IRQs returned through NVIC IRQ5.
 - **KX6625 Custom SoC** (`scripts/qemu-fork/hw/arm/kx6625.c`): Dual Cortex-M4 @ 48 MHz, 512 KB FLASH @ `0x00000000`, 128 KB SRAM @ `0x20000000`, NVIC with 16 external IRQs per ARMv7-M container.
-- **FreeRTOS Cortex-M4F Firmware**: CPU0 boots FreeRTOS using the official GCC `ARM_CM4F` port and Cortex-M SysTick; CPU1 runs a lightweight bare-metal IPC loop. The demo task exercises UART, DMA M2M, DMA peripheral DREQ/DACK, CRC-32, dual-core IPC, SV timer IRQ, OTP programming/read protection, HSM AES-CBC/CMAC including OTP-backed `KEY_ID`, SYSCTRL, and WDT countdown-reset warm-boot detection.
-- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server and the SV timer bridge, boots QEMU with `icount shift=5`, exercises all devices including OTP/HSM direct key wiring, HSM crypto, SYSCTRL indirect register access, and a WDT-triggered system reset, asserts firmware output, and generates an HTML trace report.
+- **FreeRTOS Cortex-M4F Firmware**: CPU0 boots FreeRTOS using the official GCC `ARM_CM4F` port and Cortex-M SysTick; CPU1 runs a lightweight bare-metal IPC loop. The demo task exercises UART, DMA M2M, DMA peripheral DREQ/DACK, CRC-32, dual-core IPC, SV timer IRQ, SV DMA M2M copy, OTP programming/read protection, HSM AES-CBC/CMAC including OTP-backed `KEY_ID`, SYSCTRL, and WDT countdown-reset warm-boot detection.
+- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server and the SV bridge, boots QEMU with `icount shift=5`, exercises all devices including SV timer/DMA, OTP/HSM direct key wiring, HSM crypto, SYSCTRL indirect register access, and a WDT-triggered system reset, asserts firmware output, and generates an HTML trace report.
 - **Event Tracer** (`device_model/tracer.py`): Non-blocking JSONL event trace for every device — records virtual time, wall time, and device-specific fields. Written by a background thread so device models never block on I/O. Visualised as a self-contained HTML report (`build/trace_report.html`) by `scripts/visualize_trace.py`.
 
 ## Architecture
@@ -222,7 +222,33 @@ DmaController._tick_channel() calls:
         │  'M'(1B)|'W'(1B)|phys_addr(8B LE)|length(4B LE)|data(lengthB)  → QEMU
         ▼
         QEMU executes cpu_physical_memory_write() into SRAM
+        │
+        └── ack(1B) ← QEMU  (0 = OK; non-zero reserved for future bus-error modelling)
 ```
+
+The same MEM channel is used by Python models and by the SystemVerilog bridge. DMA writes are acknowledged so device models can later distinguish a successful bus write from simulated bus faults, protection failures, or unmapped-address responses without changing the packet framing again.
+
+### SystemVerilog APB Peripheral Subsystem
+
+`sv_device/sv_device_top.sv` is the Verilated top for the SV prototype region at `0x4000B000`. It composes a standalone APB decoder, APB timer, split DMA register/core blocks, and a shared master adapter:
+
+| Module | Responsibility |
+|--------|----------------|
+| `sv_apb_decoder` | Decode QEMU-visible APB register windows and mux APB responses |
+| `sv_timer_apb` | APB timer smoke test and IRQ generation at offset `0x000`-`0x0ff` |
+| `sv_dma_regs` | DMA APB register file, start/clear pulses, and status presentation |
+| `sv_dma_core` | DMA transfer state machine using a generic master request/response interface |
+| `sv_master_router` | Route SV master transactions; first version forwards all requests to QEMU memory, later can target local APB/FIFO windows |
+| `sv_master_ahb_adapter` | Convert internal master transactions to the bridge-facing AHB-like signals |
+
+The public APB register map remains:
+
+| Offset window | Device | Purpose |
+|---------------|--------|---------|
+| `0x000`-`0x0ff` | `sv_timer_apb` | APB timer smoke test and IRQ generation |
+| `0x100`-`0x1ff` | `sv_dma_apb` | First-version 32-bit aligned M2M DMA prototype |
+
+The SV DMA keeps its own local RTL clock inside `sv_timer_bridge.cpp`. Firmware configures the DMA through MMIO/APB registers, the bridge returns the MMIO write response immediately, and the DMA core advances later during bridge idle cycles. When the DMA needs memory access, the shared master adapter presents an AHB-like request to the bridge, which translates it into `mem-chardev` reads/writes against QEMU physical memory. Completion is signalled by the shared SV IRQ line through NVIC IRQ5.
 
 ### DMA Controller Architecture
 

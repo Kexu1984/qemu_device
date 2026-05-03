@@ -262,8 +262,9 @@ class MemChannel:
             try:
                 hdr = b'M' + b'W' + struct.pack('<QI', phys_addr, len(data))
                 self._sock.sendall(hdr + data)
-                return True
-            except OSError as exc:
+                ack = recv_exact(self._sock, 1)
+                return ack == b'\x00'
+            except (OSError, ConnectionError) as exc:
                 print(f'[MEM]  dma_write error: {exc}', file=sys.stderr)
                 self._signal_close()
                 return False

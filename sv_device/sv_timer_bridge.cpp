@@ -5,17 +5,19 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <poll.h>
 #include <string>
 #include <unistd.h>
 
-#include "Vsv_timer_apb.h"
+#include "Vsv_device_top.h"
 #include "verilated.h"
 
 namespace {
 
 constexpr uint16_t kDefaultRwPort = 7906;
 constexpr uint16_t kDefaultIrqPort = 7907;
-constexpr uint32_t kRegCtrl = 0x00;
+constexpr uint16_t kDefaultMemPort = 7912;
+constexpr uint32_t kIdleCyclesPerPoll = 16;
 
 bool read_exact(int fd, void *buf, size_t len)
 {
@@ -72,6 +74,13 @@ void store_le32(uint8_t *buf, uint32_t value)
     buf[3] = static_cast<uint8_t>(value >> 24);
 }
 
+void store_le64(uint8_t *buf, uint64_t value)
+{
+    for (int i = 0; i < 8; ++i) {
+        buf[i] = static_cast<uint8_t>(value >> (8 * i));
+    }
+}
+
 int listen_on(uint16_t port)
 {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -96,7 +105,7 @@ int listen_on(uint16_t port)
         std::perror("listen");
         std::exit(1);
     }
-    std::printf("[SV-TIMER] Listening on 127.0.0.1:%u\n", port);
+    std::printf("[SV-PERIPH] Listening on 127.0.0.1:%u\n", port);
     std::fflush(stdout);
     return fd;
 }
@@ -110,16 +119,17 @@ int accept_one(int listen_fd, const char *name)
         std::perror("accept");
         std::exit(1);
     }
-    std::printf("[SV-TIMER] %s connected\n", name);
+    std::printf("[SV-PERIPH] %s connected\n", name);
     std::fflush(stdout);
     return fd;
 }
 
-class SvTimerBridge {
+class SvPeriphBridge {
 public:
-    SvTimerBridge()
+    explicit SvPeriphBridge(int mem_fd)
         : context_(std::make_unique<VerilatedContext>()),
-          dut_(std::make_unique<Vsv_timer_apb>(context_.get(), "sv_timer_apb"))
+          dut_(std::make_unique<Vsv_device_top>(context_.get(), "sv_device_top")),
+          mem_fd_(mem_fd)
     {
         dut_->clk = 0;
         dut_->rst_n = 0;
@@ -128,10 +138,13 @@ public:
         dut_->pwrite = 0;
         dut_->paddr = 0;
         dut_->pwdata = 0;
-        eval_cycle();
-        eval_cycle();
+        dut_->hrdata_i = 0;
+        dut_->hready_i = 0;
+        dut_->hresp_i = 0;
+        eval_cycle(false);
+        eval_cycle(false);
         dut_->rst_n = 1;
-        eval_cycle();
+        eval_cycle(false);
     }
 
     uint32_t apb_read(uint32_t offset)
@@ -142,11 +155,11 @@ public:
         dut_->penable = 0;
         eval_half();
         dut_->penable = 1;
-        eval_cycle();
+        eval_cycle(false);
         uint32_t value = dut_->prdata;
         dut_->psel = 0;
         dut_->penable = 0;
-        eval_half();
+        eval_cycle(false);
         return value;
     }
 
@@ -159,17 +172,17 @@ public:
         dut_->penable = 0;
         eval_half();
         dut_->penable = 1;
-        eval_cycle();
+        eval_cycle(false);
         dut_->psel = 0;
         dut_->penable = 0;
         dut_->pwrite = 0;
-        eval_half();
+        eval_cycle(false);
     }
 
     void run_cycles(uint32_t cycles)
     {
         for (uint32_t i = 0; i < cycles; ++i) {
-            eval_cycle();
+            eval_cycle(true);
         }
     }
 
@@ -185,32 +198,101 @@ private:
         context_->timeInc(1);
     }
 
-    void eval_cycle()
+    void eval_cycle(bool service_ahb)
     {
         dut_->clk = 0;
         eval_half();
+        if (service_ahb) {
+            service_ahb_if_needed();
+        }
         dut_->clk = 1;
         eval_half();
         dut_->clk = 0;
+        dut_->hready_i = 0;
+        dut_->hresp_i = 0;
         eval_half();
     }
 
+    void service_ahb_if_needed()
+    {
+        if (!dut_->hreq_o || dut_->htrans_o == 0) {
+            return;
+        }
+
+        uint32_t addr = dut_->haddr_o;
+        bool write = dut_->hwrite_o != 0;
+        bool ok = true;
+        uint32_t rdata = 0;
+
+        if (write) {
+            ok = mem_write32(addr, dut_->hwdata_o);
+            std::printf("[SV-DMA] AHB WRITE addr=0x%08x data=0x%08x %s\n",
+                        addr, static_cast<uint32_t>(dut_->hwdata_o), ok ? "OK" : "ERR");
+        } else {
+            ok = mem_read32(addr, &rdata);
+            std::printf("[SV-DMA] AHB READ  addr=0x%08x data=0x%08x %s\n",
+                        addr, rdata, ok ? "OK" : "ERR");
+        }
+        std::fflush(stdout);
+
+        dut_->hrdata_i = rdata;
+        dut_->hresp_i = ok ? 0 : 1;
+        dut_->hready_i = 1;
+    }
+
+    bool mem_read32(uint32_t addr, uint32_t *value)
+    {
+        uint8_t hdr[14] = {};
+        hdr[0] = 'M';
+        hdr[1] = 'R';
+        store_le64(hdr + 2, addr);
+        store_le32(hdr + 10, 4);
+        if (!write_all(mem_fd_, hdr, sizeof(hdr))) {
+            return false;
+        }
+        uint8_t data[4] = {};
+        if (!read_exact(mem_fd_, data, sizeof(data))) {
+            return false;
+        }
+        *value = load_le32(data);
+        return true;
+    }
+
+    bool mem_write32(uint32_t addr, uint32_t value)
+    {
+        uint8_t pkt[18] = {};
+        pkt[0] = 'M';
+        pkt[1] = 'W';
+        store_le64(pkt + 2, addr);
+        store_le32(pkt + 10, 4);
+        store_le32(pkt + 14, value);
+        if (!write_all(mem_fd_, pkt, sizeof(pkt))) {
+            return false;
+        }
+        uint8_t ack = 0xff;
+        if (!read_exact(mem_fd_, &ack, sizeof(ack))) {
+            return false;
+        }
+        return ack == 0;
+    }
+
     std::unique_ptr<VerilatedContext> context_;
-    std::unique_ptr<Vsv_timer_apb> dut_;
+    std::unique_ptr<Vsv_device_top> dut_;
+    int mem_fd_;
 };
 
 void send_irq(int irq_fd, bool level)
 {
     uint8_t msg[3] = {'I', 0, static_cast<uint8_t>(level ? 1 : 0)};
     if (write_all(irq_fd, msg, sizeof(msg))) {
-        std::printf("[SV-TIMER] IRQ %s\n", level ? "assert" : "deassert");
+        std::printf("[SV-PERIPH] IRQ %s\n", level ? "assert" : "deassert");
         std::fflush(stdout);
     }
 }
 
 void usage(const char *argv0)
 {
-    std::fprintf(stderr, "Usage: %s [--rw-port PORT] [--irq-port PORT]\n", argv0);
+    std::fprintf(stderr, "Usage: %s [--rw-port PORT] [--irq-port PORT] [--mem-port PORT]\n", argv0);
 }
 
 } // namespace
@@ -219,6 +301,7 @@ int main(int argc, char **argv)
 {
     uint16_t rw_port = kDefaultRwPort;
     uint16_t irq_port = kDefaultIrqPort;
+    uint16_t mem_port = kDefaultMemPort;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -226,6 +309,8 @@ int main(int argc, char **argv)
             rw_port = static_cast<uint16_t>(std::strtoul(argv[++i], nullptr, 0));
         } else if (arg == "--irq-port" && i + 1 < argc) {
             irq_port = static_cast<uint16_t>(std::strtoul(argv[++i], nullptr, 0));
+        } else if (arg == "--mem-port" && i + 1 < argc) {
+            mem_port = static_cast<uint16_t>(std::strtoul(argv[++i], nullptr, 0));
         } else {
             usage(argv[0]);
             return 2;
@@ -233,75 +318,90 @@ int main(int argc, char **argv)
     }
 
     Verilated::commandArgs(argc, argv);
-    SvTimerBridge bridge;
 
     int rw_listen = listen_on(rw_port);
     int irq_listen = listen_on(irq_port);
+    int mem_listen = listen_on(mem_port);
     int rw_fd = accept_one(rw_listen, "RW channel");
     int irq_fd = accept_one(irq_listen, "IRQ channel");
+    int mem_fd = accept_one(mem_listen, "MEM channel");
 
-    bool last_irq = false;
+    SvPeriphBridge bridge(mem_fd);
+    bool last_irq = bridge.irq();
+    if (last_irq) {
+        send_irq(irq_fd, true);
+    }
+
     while (true) {
-        uint8_t op = 0;
-        if (!read_exact(rw_fd, &op, 1)) {
+        pollfd pfd{};
+        pfd.fd = rw_fd;
+        pfd.events = POLLIN;
+        int ret = ::poll(&pfd, 1, 1);
+        if (ret < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            std::perror("poll");
             break;
         }
 
-        uint8_t hdr[6] = {};
-        if (!read_exact(rw_fd, hdr, sizeof(hdr))) {
+        if (ret == 0) {
+            bridge.run_cycles(kIdleCyclesPerPoll);
+        } else if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
             break;
-        }
-        uint32_t offset = load_le32(hdr + 1);
-        uint8_t size = hdr[5];
-
-        if (op == 'R') {
-            uint32_t value = bridge.apb_read(offset);
-            uint8_t out[4] = {};
-            store_le32(out, value);
-            if (!write_all(rw_fd, out, size <= 4 ? size : 4)) {
+        } else if ((pfd.revents & POLLIN) != 0) {
+            uint8_t op = 0;
+            if (!read_exact(rw_fd, &op, 1)) {
                 break;
             }
-        } else if (op == 'W') {
-            uint8_t payload[4] = {};
-            if (size > sizeof(payload) || !read_exact(rw_fd, payload, size)) {
+
+            uint8_t hdr[6] = {};
+            if (!read_exact(rw_fd, hdr, sizeof(hdr))) {
                 break;
             }
-            uint32_t value = load_le32(payload);
-            bridge.apb_write(offset, value);
+            uint32_t offset = load_le32(hdr + 1);
+            uint8_t size = hdr[5];
 
-            if (offset == kRegCtrl && (value & 0x1U)) {
-                uint32_t load = bridge.apb_read(0x04);
-                bridge.run_cycles(load + 2U);
-            } else {
+            if (op == 'R') {
+                uint32_t value = bridge.apb_read(offset);
                 bridge.run_cycles(1);
-            }
+                uint8_t out[4] = {};
+                store_le32(out, value);
+                if (!write_all(rw_fd, out, size <= 4 ? size : 4)) {
+                    break;
+                }
+            } else if (op == 'W') {
+                uint8_t payload[4] = {};
+                if (size > sizeof(payload) || !read_exact(rw_fd, payload, size)) {
+                    break;
+                }
+                uint32_t value = load_le32(payload);
+                bridge.apb_write(offset, value);
 
-            bool irq_now = bridge.irq();
-            if (irq_now != last_irq) {
-                send_irq(irq_fd, irq_now);
-                last_irq = irq_now;
-            }
+                uint8_t resp[8] = {};
+                if (!write_all(rw_fd, resp, sizeof(resp))) {
+                    break;
+                }
 
-            uint8_t resp[8] = {};
-            if (!write_all(rw_fd, resp, sizeof(resp))) {
+            } else {
+                std::fprintf(stderr, "[SV-PERIPH] Unknown op 0x%02x\n", op);
                 break;
             }
+        }
 
-            irq_now = bridge.irq();
-            if (irq_now != last_irq) {
-                send_irq(irq_fd, irq_now);
-                last_irq = irq_now;
-            }
-        } else {
-            std::fprintf(stderr, "[SV-TIMER] Unknown op 0x%02x\n", op);
-            break;
+        bool irq_now = bridge.irq();
+        if (irq_now != last_irq) {
+            send_irq(irq_fd, irq_now);
+            last_irq = irq_now;
         }
     }
 
-    std::printf("[SV-TIMER] disconnected\n");
+    std::printf("[SV-PERIPH] disconnected\n");
     ::close(rw_fd);
     ::close(irq_fd);
+    ::close(mem_fd);
     ::close(rw_listen);
     ::close(irq_listen);
+    ::close(mem_listen);
     return 0;
 }

@@ -79,7 +79,7 @@ echo ""
 # -----------------------------------------------------------------------
 # Kill any leftover processes from a previous run that may hold our ports
 # -----------------------------------------------------------------------
-for PORT in 7890 7891 7892 7893 7894 7895 7896 7897 7898 7899 7900 7901 7902 7903 7904 7905 7906 7907 7908 7909 7910 7911; do
+for PORT in 7890 7891 7892 7893 7894 7895 7896 7897 7898 7899 7900 7901 7902 7903 7904 7905 7906 7907 7908 7909 7910 7911 7912; do
     fuser -k "${PORT}/tcp" 2>/dev/null || true
 done
 sleep 0.3
@@ -151,8 +151,8 @@ info "UART terminal client PID: $UART_PID  (log: $UART_LOG)"
 # -----------------------------------------------------------------------
 # 2c. Start SystemVerilog/Verilator timer bridge
 # -----------------------------------------------------------------------
-info "Starting SV timer bridge (RW:7906, IRQ:7907)..."
-"$SV_BRIDGE" --rw-port 7906 --irq-port 7907 > "$SV_LOG" 2>&1 &
+info "Starting SV peripheral bridge (RW:7906, IRQ:7907, MEM:7912)..."
+"$SV_BRIDGE" --rw-port 7906 --irq-port 7907 --mem-port 7912 > "$SV_LOG" 2>&1 &
 SV_PID=$!
 info "SV timer bridge PID: $SV_PID  (log: $SV_LOG)"
 sleep 0.5
@@ -192,7 +192,8 @@ info "Starting QEMU..."
     -device mmio-sockdev,chardev=wdt_rw,irq-chardev=wdt_irq,rst-chardev=wdt_rst,addr=0x40009000,irq-num=4 \
     -chardev socket,id=sv_timer_rw,host=127.0.0.1,port=7906 \
     -chardev socket,id=sv_timer_irq,host=127.0.0.1,port=7907 \
-    -device mmio-sockdev,chardev=sv_timer_rw,irq-chardev=sv_timer_irq,addr=0x4000B000,irq-num=5 \
+    -chardev socket,id=sv_timer_mem,host=127.0.0.1,port=7912 \
+    -device mmio-sockdev,chardev=sv_timer_rw,irq-chardev=sv_timer_irq,mem-chardev=sv_timer_mem,addr=0x4000B000,irq-num=5 \
     -chardev socket,id=hsm_rw,host=127.0.0.1,port=7908 \
     -chardev socket,id=hsm_irq,host=127.0.0.1,port=7909 \
     -device mmio-sockdev,chardev=hsm_rw,irq-chardev=hsm_irq,addr=0x4000C000,irq-num=6 \
@@ -231,6 +232,9 @@ EXPECTED=(
     "SV APB timer"
     "SV timer fired"
     "IRQ observed and cleared PASSED"
+    "SV DMA prototype"
+    "SV DMA ID SDMA PASSED"
+    "SV DMA M2M copy PASSED"
     "HSM AES-CBC encrypt test"
     "HSM AES-CBC encrypt PASSED"
     "HSM AES-CMAC PASSED"
