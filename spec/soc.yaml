@@ -21,7 +21,7 @@
 
 soc:
   name:    KX6625
-  mc_desc: "KX6625 SoC (dual Cortex-M4F, 512K Flash, 128K SRAM)"
+  mc_desc: "KX6625 SoC (dual Cortex-M4F, 512K Flash, 128K SRAM, socket-backed DFLASH)"
 
 # ── CPU ─────────────────────────────────────────────────────────────────────
 cpu:

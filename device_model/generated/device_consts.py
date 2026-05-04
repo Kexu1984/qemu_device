@@ -259,6 +259,69 @@ OTP_CUSTOMER_WORD1_REG                   = 0x4000D124  # offset 0x0124  R  Shado
 OTP_CUSTOMER_WORD2_REG                   = 0x4000D128  # offset 0x0128  R  Shadow of non-secret customer configuration row 0x0052
 OTP_CUSTOMER_WORD3_REG                   = 0x4000D12C  # offset 0x012C  R  Shadow of non-secret customer configuration row 0x0053
 
+# ── FLASH_CTRL ──────────────────────────────────────────────────
+# FLASH controller — command sequencer for data FLASH read/program/erase
+FLASH_CTRL_BASE         = 0x4000E000
+FLASH_CTRL_SIZE         = 0x1000
+FLASH_CTRL_IRQ_INTID    = 8
+FLASH_CTRL_IRQ_DELAY_S  = 0.0
+FLASH_CTRL_IRQ_PORT     = 7914
+FLASH_CTRL_RW_PORT      = 7913
+
+# Registers
+FLASH_CTRL_ID_REG                        = 0x4000E000  # offset 0x0000  R  Device ID: ASCII 'FLSH' encoded little-endian
+FLASH_CTRL_VERSION_REG                   = 0x4000E004  # offset 0x0004  R  Model version: major.minor encoded as 0x00010000 for v1.0
+FLASH_CTRL_CTRL_REG                      = 0x4000E008  # offset 0x0008  RW  Control register. bit0 = START (write 1 to start command, self-clears); bit1 = IRQ_ENABLE; bit2 = ABORT reserved for future long-running command cancellation.
+
+FLASH_CTRL_STATUS_REG                    = 0x4000E00C  # offset 0x000C  R  Status register. bit0 = BUSY; bit1 = DONE; bit2 = ERROR; bit3 = IRQ_PENDING; bit4 = LOCKED; bit5 = PROGRAM_ALLOWED after valid PROGRAM unlock; bit6 = ERASE_ALLOWED after valid ERASE unlock; bit7 = ECC_CORRECTED; bit8 = ECC_UNCORRECTABLE; bit9 = FILE_LOADED; bit10 = FILE_DIRTY.
+
+FLASH_CTRL_INT_STATUS_REG                = 0x4000E010  # offset 0x0010  RW  Interrupt/status latch, W1C. bit0 = DONE_IRQ; bit1 = ERROR_IRQ; bit2 = ECC_CORRECTED_IRQ; bit3 = ECC_UNCORRECTABLE_IRQ.
+
+FLASH_CTRL_INT_ENABLE_REG                = 0x4000E014  # offset 0x0014  RW  Interrupt enable mask. bit0 enables DONE interrupt; bit1 enables ERROR interrupt; bit2 enables ECC_CORRECTED interrupt; bit3 enables ECC_UNCORRECTABLE interrupt.
+
+FLASH_CTRL_ERROR_REG                     = 0x4000E018  # offset 0x0018  R  Last error code. 0=NONE; 1=BUSY; 2=INVALID_CMD; 3=ADDR_RANGE; 4=LENGTH_RANGE; 5=ADDR_ALIGN; 6=LENGTH_ALIGN; 7=LOCKED; 8=UNLOCK_REQUIRED; 9=PROGRAM_ZERO_TO_ONE; 10=MEM_READ_ERROR; 11=MEM_WRITE_ERROR; 12=VERIFY_ERROR; 13=ECC_CORRECTED; 14=ECC_UNCORRECTABLE; 15=FILE_IO; 16=FILE_FORMAT.
+
+FLASH_CTRL_CMD_REG                       = 0x4000E01C  # offset 0x001C  RW  Command selector. 0=NONE; 1=READ; 2=PROGRAM; 3=ERASE_WORDLINE; 4=ERASE_CHIP; 5=VERIFY.
+
+FLASH_CTRL_ADDR_REG                      = 0x4000E020  # offset 0x0020  RW  Byte offset inside data FLASH for READ/PROGRAM/ERASE_WORDLINE/VERIFY
+FLASH_CTRL_SRC_ADDR_REG                  = 0x4000E024  # offset 0x0024  RW  QEMU physical source address for PROGRAM input buffer
+FLASH_CTRL_DST_ADDR_REG                  = 0x4000E028  # offset 0x0028  RW  QEMU physical destination address for READ output buffer
+FLASH_CTRL_LENGTH_REG                    = 0x4000E02C  # offset 0x002C  RW  Transfer length in bytes for READ/PROGRAM/VERIFY commands
+FLASH_CTRL_WORDLINE_SIZE_REG             = 0x4000E030  # offset 0x0030  R  Data wordline size in bytes
+FLASH_CTRL_FLASH_BASE_REG                = 0x4000E034  # offset 0x0034  R  Data FLASH memory window base address
+FLASH_CTRL_FLASH_SIZE_REG                = 0x4000E038  # offset 0x0038  R  Data FLASH memory window size in bytes
+FLASH_CTRL_ERASED_VALUE_REG              = 0x4000E03C  # offset 0x003C  R  Erased byte value in bits[7:0]
+FLASH_CTRL_UNLOCK0_REG                   = 0x4000E040  # offset 0x0040  W  Unlock word 0. Write 0x464C5331 ('FLS1') before PROGRAM or ERASE unlock word.
+FLASH_CTRL_UNLOCK1_REG                   = 0x4000E044  # offset 0x0044  W  Unlock word 1. Write 0x50524F47 ('PROG') after UNLOCK0 to allow one PROGRAM command; write 0x45524153 ('ERAS') after UNLOCK0 to allow one ERASE command.
+
+FLASH_CTRL_LOCK_REG                      = 0x4000E048  # offset 0x0048  W  Write any value to clear PROGRAM_ALLOWED/ERASE_ALLOWED and return to locked state
+FLASH_CTRL_STATUS_CLEAR_REG              = 0x4000E04C  # offset 0x004C  W  W1C sticky status bits. bit1 clears DONE; bit2 clears ERROR; bit3 clears IRQ_PENDING; bit7 clears ECC_CORRECTED; bit8 clears ECC_UNCORRECTABLE.
+
+FLASH_CTRL_TIMING_READ_REG               = 0x4000E050  # offset 0x0050  R  Nominal READ timing: bits[15:0]=base ns, bits[31:16]=per 64-bit wordline ns
+FLASH_CTRL_TIMING_PROGRAM_REG            = 0x4000E054  # offset 0x0054  R  Nominal PROGRAM timing: bits[15:0]=base ns, bits[31:16]=per 64-bit wordline ns
+FLASH_CTRL_TIMING_ERASE_WORDLINE_REG     = 0x4000E058  # offset 0x0058  R  Nominal ERASE_WORDLINE latency in nanoseconds
+FLASH_CTRL_TIMING_ERASE_CHIP_REG         = 0x4000E05C  # offset 0x005C  R  Nominal ERASE_CHIP latency in nanoseconds
+FLASH_CTRL_LAST_OP_ADDR_REG              = 0x4000E060  # offset 0x0060  R  Latched ADDR from the most recently completed command
+FLASH_CTRL_LAST_OP_LENGTH_REG            = 0x4000E064  # offset 0x0064  R  Latched LENGTH from the most recently completed READ/PROGRAM/VERIFY command
+FLASH_CTRL_LAST_OP_CRC32_REG             = 0x4000E068  # offset 0x0068  R  Optional CRC32/checksum of the most recent command payload; first model may leave zero
+FLASH_CTRL_ECC_STATUS_REG                = 0x4000E06C  # offset 0x006C  R  ECC status for the most recent checked wordline. bit0 = CHECKED; bit1 = CORRECTED; bit2 = UNCORRECTABLE; bits[15:8] = syndrome.
+
+FLASH_CTRL_ECC_ADDR_REG                  = 0x4000E070  # offset 0x0070  R  Byte offset of the most recent ECC event/check
+FLASH_CTRL_ECC_SYNDROME_REG              = 0x4000E074  # offset 0x0074  R  Raw ECC syndrome for the most recent ECC check
+FLASH_CTRL_ECC_CORRECTED_COUNT_REG       = 0x4000E078  # offset 0x0078  R  Number of corrected ECC events since model start
+FLASH_CTRL_ECC_UNCORRECTABLE_COUNT_REG   = 0x4000E07C  # offset 0x007C  R  Number of uncorrectable ECC events since model start
+FLASH_CTRL_INJECT_ADDR_REG               = 0x4000E080  # offset 0x0080  RW  Byte offset of the 64-bit wordline targeted by error injection
+FLASH_CTRL_INJECT_MASK_LO_REG            = 0x4000E084  # offset 0x0084  RW  Data-bit injection mask bits[31:0] for the selected wordline
+FLASH_CTRL_INJECT_MASK_HI_REG            = 0x4000E088  # offset 0x0088  RW  Data-bit injection mask bits[63:32] for the selected wordline
+FLASH_CTRL_INJECT_ECC_MASK_REG           = 0x4000E08C  # offset 0x008C  RW  ECC-bit injection mask bits[7:0] for the selected wordline
+FLASH_CTRL_INJECT_CTRL_REG               = 0x4000E090  # offset 0x0090  W  Error injection control. bit0 = APPLY once by XORing data/ecc masks into the backend without recomputing ECC; bit1 = CLEAR_MASKS after apply.
+
+
+# ── DATA_FLASH memory region ──────────────────────────────────────────────────
+# Data FLASH read-only memory window; program/erase via FLASH controller
+DATA_FLASH_BASE         = 0x10000000
+DATA_FLASH_SIZE         = 0x00080000
+
 # ── SRAM memory region ────────────────────────────────────────────────────────
 # Scratchpad SRAM for device DMA transfers
 SRAM_BASE         = 0x20000000

@@ -98,6 +98,7 @@ from device_model.crc_device        import CrcDevice            # noqa: E402
 from device_model.wdt_model         import WdtDevice            # noqa: E402
 from device_model.hsm_model         import HsmDevice            # noqa: E402
 from device_model.otp_model         import OtpControllerDevice   # noqa: E402
+from device_model.flash_controller  import FlashControllerDevice # noqa: E402
 from device_model.tracer            import Tracer               # noqa: E402
 
 
@@ -275,6 +276,21 @@ class OtpCfg:
     size:         int = 0x1000
 
 
+@dataclass
+class FlashCtrlCfg:
+    """Configuration for the FLASH controller and DFLASH memory window."""
+    base_addr:     int
+    rw_port:       int
+    irq_port:      int
+    nvic_irq:      int
+    mem_port:      int
+    ahb_base_addr: int
+    ahb_size:      int
+    ahb_rw_port:   int
+    storage_file:  str = 'build/dflash.hex'
+    size:          int = 0x1000
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # SoCTop
 # ─────────────────────────────────────────────────────────────────────────────
@@ -319,6 +335,7 @@ class SoCTop:
         wdt:             Optional[WdtCfg]           = None,
         otp:             Optional[OtpCfg]           = None,
         hsm:             Optional[HsmCfg]           = None,
+        flash_ctrl:      Optional[FlashCtrlCfg]     = None,
         tick_port:       int                        = 7896,
         tracer:          Optional[Tracer]           = None,
     ) -> None:
@@ -346,6 +363,8 @@ class SoCTop:
             + ([(wdt.base_addr, wdt.size)] if wdt else [])
             + ([(otp.base_addr, otp.size)] if otp else [])
             + ([(hsm.base_addr, hsm.size)] if hsm else [])
+            + ([(flash_ctrl.base_addr, flash_ctrl.size),
+                (flash_ctrl.ahb_base_addr, flash_ctrl.ahb_size)] if flash_ctrl else [])
         )
 
         # ── 2. DMA subsystem ──────────────────────────────────────────────
@@ -474,6 +493,32 @@ class SoCTop:
             self._add_server(IRQServer(port=hsm.irq_port, irq_controller=hsm_irq_ctrl))
             self._add_server(RWServer(port=hsm.rw_port, bus=bus, base_addr=hsm.base_addr))
 
+        # ── 10. FLASH controller + DFLASH memory window ──────────────────
+        if flash_ctrl is not None:
+            flash_irq_ctrl = IRQController()
+            flash_mem_channel = MemChannel()
+            flash_addr_space = AddressSpace(
+                mem_channel  = flash_mem_channel,
+                mmio_bus     = bus,
+                mmio_regions = mmio_regions,
+            )
+            flash_dev = FlashControllerDevice(
+                address_space  = flash_addr_space,
+                storage_file   = flash_ctrl.storage_file,
+                data_base      = flash_ctrl.ahb_base_addr,
+                data_size      = flash_ctrl.ahb_size,
+                irq_controller = flash_irq_ctrl,
+                irq_idx        = 0,
+                tracer         = tracer,
+            )
+            bus.register(flash_ctrl.base_addr, flash_ctrl.size, flash_dev)
+            bus.register(flash_ctrl.ahb_base_addr, flash_ctrl.ahb_size, flash_dev.window)
+            self._add_server(IRQServer(port=flash_ctrl.irq_port, irq_controller=flash_irq_ctrl))
+            self._add_server(MemServer(port=flash_ctrl.mem_port, mem_channel=flash_mem_channel))
+            self._add_server(RWServer(port=flash_ctrl.rw_port, bus=bus, base_addr=flash_ctrl.base_addr))
+            self._add_server(RWServer(port=flash_ctrl.ahb_rw_port, bus=bus,
+                                      base_addr=flash_ctrl.ahb_base_addr))
+
     # ── Internal helpers ──────────────────────────────────────────────────
 
     def _add_server(self, srv) -> None:
@@ -555,8 +600,10 @@ def kx6625_default(
         demo    @ 0x40007000  rw=7898 irq=7899 nvic_irq=3
         crc     @ 0x40008000  rw=7900
         wdt     @ 0x40009000  rw=7901 irq=7902 nvic_irq=4 rst=7903
-        otp     @ 0x4000D000  rw=7910 irq=7911 nvic_irq=7 file=build/otp.hex
         hsm     @ 0x4000C000  rw=7908 irq=7909 nvic_irq=6 otp-provider=otp
+        otp     @ 0x4000D000  rw=7910 irq=7911 nvic_irq=7 file=build/otp.hex
+        flash   @ 0x4000E000  rw=7913 irq=7914 mem=7915 nvic_irq=8
+        dflash  @ 0x10000000  rw=7916 size=512KB file=build/dflash.hex
     """
     return SoCTop(
         uarts=[
@@ -618,6 +665,17 @@ def kx6625_default(
             irq_port  = 7909,
             nvic_irq  = 6,
             otp_file  = 'build/hsm_otp.json',
+        ),
+        flash_ctrl=FlashCtrlCfg(
+            base_addr     = 0x4000E000,
+            rw_port       = 7913,
+            irq_port      = 7914,
+            nvic_irq      = 8,
+            mem_port      = 7915,
+            ahb_base_addr = 0x10000000,
+            ahb_size      = 0x00080000,
+            ahb_rw_port   = 7916,
+            storage_file  = 'build/dflash.hex',
         ),
         tick_port = 7896,
         tracer    = tracer,

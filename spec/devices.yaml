@@ -136,6 +136,21 @@ devices:
     irq_port:    7911
     spec:        otp.yaml
 
+  - name:        flash_ctrl
+    description: "FLASH controller — command sequencer for data FLASH read/program/erase"
+    base_addr:   0x4000E000
+    size:        0x1000
+    irq_num:     8           # External IRQ 8 on KX6625
+    irq_delay:   0.0
+    rw_port:     7913
+    irq_port:    7914
+    mem_port:    7915        # Python → QEMU physical memory channel for data FLASH operations
+    ahb_base_addr: 0x10000000 # CPU/bus-master read-only data FLASH memory window
+    ahb_size:      0x80000    # 512 KB
+    ahb_rw_port:   7916       # QEMU → Python data FLASH AHB-style memory slave channel
+    storage_file:  build/dflash.hex
+    spec:        flash_ctrl.yaml
+
 # ── Physical Memory Regions ──────────────────────────────────────────────────────────────────
 #
 # RAM regions visible to both firmware (CPU) and device models (via MemChannel).
@@ -149,6 +164,11 @@ devices:
 #   size        Region size in bytes (hex or decimal).
 
 memory:
+  - name:        data_flash
+    description: "Data FLASH read-only memory window; program/erase via FLASH controller"
+    base_addr:   0x10000000
+    size:        0x80000   # 512 KB
+
   - name:        sram
     description: "Scratchpad SRAM for device DMA transfers"
     base_addr:   0x20000000

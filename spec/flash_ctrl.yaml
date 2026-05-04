@@ -1,0 +1,393 @@
+# ============================================================================
+# FLASH Controller - APB controller + AHB-style data FLASH memory slave
+# ============================================================================
+#
+# Referenced by spec/devices.yaml:
+#   name:          flash_ctrl
+#   base_addr:     0x4000E000
+#   size:          0x1000
+#   rw_port:       7913       # APB register slave channel
+#   irq_port:      7914
+#   mem_port:      7915       # controller DMA into QEMU physical memory
+#   ahb_base_addr: 0x10000000 # data FLASH memory window
+#   ahb_size:      0x80000
+#   ahb_rw_port:   7916       # AHB-style memory slave channel
+#   storage_file:  build/dflash.hex
+#   spec:          flash_ctrl.yaml
+#
+# Design intent
+# -------------
+# The first DFLASH prototype models the FLASH macro as a Python backend with a
+# 64-bit data wordline plus an 8-bit ECC sidecar. CPU and bus masters access
+# user data through a memory-address-based read-only window at 0x10000000. That
+# window is not a native QEMU byte array; it is a socket-backed memory slave
+# served by this Python model, so direct reads can check/correct ECC and latch
+# controller status.
+#
+# Instruction FLASH remains QEMU-native and is still loaded from Intel HEX at
+# boot. This controller does not intercept instruction fetches.
+#
+# Storage model
+# -------------
+# The persistent DFLASH backend is a host-side text file. Each physical row is
+# one 64-bit data wordline plus an 8-bit ECC byte.
+#
+# Format, version 1:
+#   # KX6625 DFLASH v1: row_index data64_hex ecc_hex flags_hex
+#   00000000 FFFFFFFFFFFFFFFF 00 00000000
+#   00000001 FFFFFFFFFFFFFFFF 00 00000000
+#
+# Rules:
+# - Missing file means all rows are erased.
+# - Missing rows are treated as erased and materialized on save.
+# - data64_hex is an unsigned 64-bit big-endian text rendering of the row.
+#   CPU reads see normal little-endian bytes from the memory window.
+# - ecc_hex is an 8-bit deterministic SECDED-style ECC byte for the 64-bit row.
+# - flags_hex is reserved for fault injection / wear / repair metadata.
+#
+# First-version geometry
+# ----------------------
+# - Data FLASH base: 0x10000000
+# - Data FLASH size: 512 KB
+# - Erased byte: 0xFF
+# - Program rule: bits may transition 1 -> 0 only.
+# - Wordline data size: 8 bytes.
+# - Wordline ECC size: 1 byte.
+# - Program granularity: one 64-bit wordline.
+# - ADDR is a byte offset inside the data FLASH region, not an absolute address.
+#
+# Command summary
+# ---------------
+# - READ copies LENGTH bytes from DFLASH offset ADDR to QEMU physical memory at
+#   DST_ADDR. Direct memory-window reads are also supported and are preferred
+#   for normal data access.
+# - PROGRAM copies LENGTH bytes from QEMU physical memory at SRC_ADDR and
+#   programs them at DFLASH offset ADDR. ADDR and LENGTH must be 8-byte aligned.
+# - ERASE_WORDLINE erases the 64-bit wordline containing ADDR.
+# - ERASE_CHIP erases the full DFLASH region.
+# - VERIFY checks ECC over a range without copying data.
+#
+# ECC behavior
+# ------------
+# Direct memory reads and READ/VERIFY commands check the 64-bit row ECC.
+# Correctable single-bit data errors are corrected in the returned data and
+# latch STATUS.ECC_CORRECTED plus ECC_STATUS/ECC_ADDR/ECC_SYNDROME. Uncorrectable
+# errors latch STATUS.ECC_UNCORRECTABLE and STATUS.ERROR.
+#
+# The first model exposes explicit error injection registers so firmware/e2e can
+# validate ECC status without modifying QEMU core instruction-fetch behavior.
+
+model:
+  storage_file: "build/dflash.hex"
+  data_flash_base: 0x10000000
+  data_flash_size: 0x00080000
+  erased_byte: 0xFF
+  wordline_data_bits: 64
+  wordline_ecc_bits: 8
+  wordline_size: 8
+  program_granularity: 8
+  program_requires_unlock: true
+  erase_requires_unlock: true
+  program_1_to_0_only: true
+  direct_memory_window: socket_backed_read_only
+  backing_store: python_hex_file
+  command_latency_ns:
+    read_base: 200
+    read_per_wordline: 20
+    verify_base: 200
+    verify_per_wordline: 20
+    program_base: 50000
+    program_per_wordline: 1000
+    erase_wordline: 2000000
+    erase_chip: 20000000
+
+registers:
+  - offset:      0x00
+    name:        ID
+    access:      R
+    description: "Device ID: ASCII 'FLSH' encoded little-endian"
+    reset_value: 0x48534C46
+
+  - offset:      0x04
+    name:        VERSION
+    access:      R
+    description: "Model version: major.minor encoded as 0x00010000 for v1.0"
+    reset_value: 0x00010000
+
+  - offset:      0x08
+    name:        CTRL
+    access:      RW
+    description: >
+      Control register.
+      bit0 = START (write 1 to start command, self-clears);
+      bit1 = IRQ_ENABLE;
+      bit2 = ABORT reserved for future long-running command cancellation.
+    reset_value: 0x00000000
+
+  - offset:      0x0C
+    name:        STATUS
+    access:      R
+    description: >
+      Status register.
+      bit0 = BUSY;
+      bit1 = DONE;
+      bit2 = ERROR;
+      bit3 = IRQ_PENDING;
+      bit4 = LOCKED;
+      bit5 = PROGRAM_ALLOWED after valid PROGRAM unlock;
+      bit6 = ERASE_ALLOWED after valid ERASE unlock;
+      bit7 = ECC_CORRECTED;
+      bit8 = ECC_UNCORRECTABLE;
+      bit9 = FILE_LOADED;
+      bit10 = FILE_DIRTY.
+    reset_value: 0x00000010
+
+  - offset:      0x10
+    name:        INT_STATUS
+    access:      RW
+    description: >
+      Interrupt/status latch, W1C.
+      bit0 = DONE_IRQ;
+      bit1 = ERROR_IRQ;
+      bit2 = ECC_CORRECTED_IRQ;
+      bit3 = ECC_UNCORRECTABLE_IRQ.
+    reset_value: 0x00000000
+
+  - offset:      0x14
+    name:        INT_ENABLE
+    access:      RW
+    description: >
+      Interrupt enable mask.
+      bit0 enables DONE interrupt;
+      bit1 enables ERROR interrupt;
+      bit2 enables ECC_CORRECTED interrupt;
+      bit3 enables ECC_UNCORRECTABLE interrupt.
+    reset_value: 0x00000000
+
+  - offset:      0x18
+    name:        ERROR
+    access:      R
+    description: >
+      Last error code.
+      0=NONE;
+      1=BUSY;
+      2=INVALID_CMD;
+      3=ADDR_RANGE;
+      4=LENGTH_RANGE;
+      5=ADDR_ALIGN;
+      6=LENGTH_ALIGN;
+      7=LOCKED;
+      8=UNLOCK_REQUIRED;
+      9=PROGRAM_ZERO_TO_ONE;
+      10=MEM_READ_ERROR;
+      11=MEM_WRITE_ERROR;
+      12=VERIFY_ERROR;
+      13=ECC_CORRECTED;
+      14=ECC_UNCORRECTABLE;
+      15=FILE_IO;
+      16=FILE_FORMAT.
+    reset_value: 0x00000000
+
+  - offset:      0x1C
+    name:        CMD
+    access:      RW
+    description: >
+      Command selector.
+      0=NONE;
+      1=READ;
+      2=PROGRAM;
+      3=ERASE_WORDLINE;
+      4=ERASE_CHIP;
+      5=VERIFY.
+    reset_value: 0x00000000
+
+  - offset:      0x20
+    name:        ADDR
+    access:      RW
+    description: "Byte offset inside data FLASH for READ/PROGRAM/ERASE_WORDLINE/VERIFY"
+    reset_value: 0x00000000
+
+  - offset:      0x24
+    name:        SRC_ADDR
+    access:      RW
+    description: "QEMU physical source address for PROGRAM input buffer"
+    reset_value: 0x00000000
+
+  - offset:      0x28
+    name:        DST_ADDR
+    access:      RW
+    description: "QEMU physical destination address for READ output buffer"
+    reset_value: 0x00000000
+
+  - offset:      0x2C
+    name:        LENGTH
+    access:      RW
+    description: "Transfer length in bytes for READ/PROGRAM/VERIFY commands"
+    reset_value: 0x00000000
+
+  - offset:      0x30
+    name:        WORDLINE_SIZE
+    access:      R
+    description: "Data wordline size in bytes"
+    reset_value: 0x00000008
+
+  - offset:      0x34
+    name:        FLASH_BASE
+    access:      R
+    description: "Data FLASH memory window base address"
+    reset_value: 0x10000000
+
+  - offset:      0x38
+    name:        FLASH_SIZE
+    access:      R
+    description: "Data FLASH memory window size in bytes"
+    reset_value: 0x00080000
+
+  - offset:      0x3C
+    name:        ERASED_VALUE
+    access:      R
+    description: "Erased byte value in bits[7:0]"
+    reset_value: 0x000000FF
+
+  - offset:      0x40
+    name:        UNLOCK0
+    access:      W
+    description: "Unlock word 0. Write 0x464C5331 ('FLS1') before PROGRAM or ERASE unlock word."
+    reset_value: 0x00000000
+
+  - offset:      0x44
+    name:        UNLOCK1
+    access:      W
+    description: >
+      Unlock word 1.
+      Write 0x50524F47 ('PROG') after UNLOCK0 to allow one PROGRAM command;
+      write 0x45524153 ('ERAS') after UNLOCK0 to allow one ERASE command.
+    reset_value: 0x00000000
+
+  - offset:      0x48
+    name:        LOCK
+    access:      W
+    description: "Write any value to clear PROGRAM_ALLOWED/ERASE_ALLOWED and return to locked state"
+    reset_value: 0x00000000
+
+  - offset:      0x4C
+    name:        STATUS_CLEAR
+    access:      W
+    description: >
+      W1C sticky status bits.
+      bit1 clears DONE;
+      bit2 clears ERROR;
+      bit3 clears IRQ_PENDING;
+      bit7 clears ECC_CORRECTED;
+      bit8 clears ECC_UNCORRECTABLE.
+    reset_value: 0x00000000
+
+  - offset:      0x50
+    name:        TIMING_READ
+    access:      R
+    description: "Nominal READ timing: bits[15:0]=base ns, bits[31:16]=per 64-bit wordline ns"
+    reset_value: 0x001400C8
+
+  - offset:      0x54
+    name:        TIMING_PROGRAM
+    access:      R
+    description: "Nominal PROGRAM timing: bits[15:0]=base ns, bits[31:16]=per 64-bit wordline ns"
+    reset_value: 0x03E8C350
+
+  - offset:      0x58
+    name:        TIMING_ERASE_WORDLINE
+    access:      R
+    description: "Nominal ERASE_WORDLINE latency in nanoseconds"
+    reset_value: 0x001E8480
+
+  - offset:      0x5C
+    name:        TIMING_ERASE_CHIP
+    access:      R
+    description: "Nominal ERASE_CHIP latency in nanoseconds"
+    reset_value: 0x01312D00
+
+  - offset:      0x60
+    name:        LAST_OP_ADDR
+    access:      R
+    description: "Latched ADDR from the most recently completed command"
+    reset_value: 0x00000000
+
+  - offset:      0x64
+    name:        LAST_OP_LENGTH
+    access:      R
+    description: "Latched LENGTH from the most recently completed READ/PROGRAM/VERIFY command"
+    reset_value: 0x00000000
+
+  - offset:      0x68
+    name:        LAST_OP_CRC32
+    access:      R
+    description: "Optional CRC32/checksum of the most recent command payload; first model may leave zero"
+    reset_value: 0x00000000
+
+  - offset:      0x6C
+    name:        ECC_STATUS
+    access:      R
+    description: >
+      ECC status for the most recent checked wordline.
+      bit0 = CHECKED;
+      bit1 = CORRECTED;
+      bit2 = UNCORRECTABLE;
+      bits[15:8] = syndrome.
+    reset_value: 0x00000000
+
+  - offset:      0x70
+    name:        ECC_ADDR
+    access:      R
+    description: "Byte offset of the most recent ECC event/check"
+    reset_value: 0x00000000
+
+  - offset:      0x74
+    name:        ECC_SYNDROME
+    access:      R
+    description: "Raw ECC syndrome for the most recent ECC check"
+    reset_value: 0x00000000
+
+  - offset:      0x78
+    name:        ECC_CORRECTED_COUNT
+    access:      R
+    description: "Number of corrected ECC events since model start"
+    reset_value: 0x00000000
+
+  - offset:      0x7C
+    name:        ECC_UNCORRECTABLE_COUNT
+    access:      R
+    description: "Number of uncorrectable ECC events since model start"
+    reset_value: 0x00000000
+
+  - offset:      0x80
+    name:        INJECT_ADDR
+    access:      RW
+    description: "Byte offset of the 64-bit wordline targeted by error injection"
+    reset_value: 0x00000000
+
+  - offset:      0x84
+    name:        INJECT_MASK_LO
+    access:      RW
+    description: "Data-bit injection mask bits[31:0] for the selected wordline"
+    reset_value: 0x00000000
+
+  - offset:      0x88
+    name:        INJECT_MASK_HI
+    access:      RW
+    description: "Data-bit injection mask bits[63:32] for the selected wordline"
+    reset_value: 0x00000000
+
+  - offset:      0x8C
+    name:        INJECT_ECC_MASK
+    access:      RW
+    description: "ECC-bit injection mask bits[7:0] for the selected wordline"
+    reset_value: 0x00000000
+
+  - offset:      0x90
+    name:        INJECT_CTRL
+    access:      W
+    description: >
+      Error injection control.
+      bit0 = APPLY once by XORing data/ecc masks into the backend without
+      recomputing ECC; bit1 = CLEAR_MASKS after apply.
+    reset_value: 0x00000000

@@ -12,6 +12,7 @@ spec/
 ├── crc.yaml              # CRC-32 engine register map
 ├── hsm.yaml              # AES-128 / CMAC HSM register map
 ├── otp.yaml              # One-time-programmable storage controller register map
+├── flash_ctrl.yaml       # Data FLASH command controller register map
 ├── sysctrl.yaml          # Native system controller register map
 ├── sv_timer.yaml         # SystemVerilog APB timer prototype register map
 ├── soc.yaml              # SoC-level configuration (clock, reset)
@@ -34,7 +35,9 @@ spec/
 | SV APB Timer     | `0x4000B000`  | 4 KB   | 5        | 7906     | 7907     | —         | —        | —        | —         |
 | HSM Crypto       | `0x4000C000`  | 4 KB   | 6        | 7908     | 7909     | —         | —        | —        | —         |
 | OTP Controller   | `0x4000D000`  | 4 KB   | 7        | 7910     | 7911     | —         | —        | —        | —         |
+| FLASH Controller | `0x4000E000`  | 4 KB   | 8        | 7913     | 7914     | —         | 7915     | —        | —         |
 | **FLASH**        | `0x00000000`  | 512 KB | —        | —        | —        | —         | —        | —        | —         |
+| **DATA FLASH**   | `0x10000000`  | 512 KB | —        | 7916     | —        | —         | —        | —        | —         |
 | **SRAM**         | `0x20000000`  | 128 KB | —        | —        | —        | —         | —        | —        | —         |
 
 > **Tick ports**: Port 7896 is the shared 1 ms periodic tick (Timer → all devices via `MMIOBus.tick_all()`). Port 7905 is the DMA DES one-shot tick — QEMU fires it at exactly `arm_vtime + transfer_ns` in virtual time.

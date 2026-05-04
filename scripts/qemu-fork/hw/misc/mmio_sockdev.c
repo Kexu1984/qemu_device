@@ -40,6 +40,7 @@
  * - mem-chardev:    device DMA into physical memory channel (optional)
  * - tick-period-ms: tick interval in virtual milliseconds (default 1)
  * - addr:           MMIO base address
+ * - size:           MMIO window size in bytes (default 4 KB)
  * - irq-num:        GIC input pin number for auto-connect (default 32 = SPI 0)
  *                   set to 0 to disable auto-connect
  *
@@ -135,6 +136,7 @@ typedef struct MMIOSockDevState {
 
     /* Device properties */
     uint64_t base_addr;
+    uint64_t region_size;
     uint32_t irq_num;        /* GIC input pin for auto-connect; 0 = disabled */
     uint32_t tick_period_ms; /* virtual ms between tick messages (default 1) */
 } MMIOSockDevState;
@@ -512,6 +514,7 @@ static void mmio_sockdev_irq_receive(void *opaque, const uint8_t *buf, int size)
 
 static Property mmio_sockdev_properties[] = {
     DEFINE_PROP_UINT64("addr",           MMIOSockDevState, base_addr, 0),
+    DEFINE_PROP_UINT64("size",           MMIOSockDevState, region_size, 0x1000),
     DEFINE_PROP_CHR("chardev",           MMIOSockDevState, chr),
     DEFINE_PROP_CHR("irq-chardev",       MMIOSockDevState, irq_chr),
     DEFINE_PROP_CHR("tick-chardev",      MMIOSockDevState, tick_chr),
@@ -544,9 +547,14 @@ static void mmio_sockdev_realize(DeviceState *dev, Error **errp)
 
     qemu_mutex_init(&s->lock);
 
+    if (s->region_size == 0) {
+        error_setg(errp, "mmio-sockdev: size must be non-zero");
+        return;
+    }
+
     /* Set up MMIO region */
     memory_region_init_io(&s->mmio, OBJECT(s), &mmio_sockdev_ops, s,
-                          TYPE_MMIO_SOCKDEV, 0x1000);
+                          TYPE_MMIO_SOCKDEV, s->region_size);
     sysbus_init_mmio(sbd, &s->mmio);
 
     if (s->base_addr) {

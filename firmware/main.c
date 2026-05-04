@@ -18,6 +18,8 @@
  *   0x4000B000  sv_periph device    (mmio-sockdev -> Verilated SV timer/DMA, IRQ5)
  *   0x4000C000  hsm device          (mmio-sockdev, IRQ6)
  *   0x4000D000  otp device          (mmio-sockdev, IRQ7)
+ *   0x4000E000  flash controller    (mmio-sockdev, IRQ8)
+ *   0x10000000  data flash window   (mmio-sockdev, read-only memory slave)
  */
 
 #include <stdint.h>
@@ -66,6 +68,8 @@
 #define HSM_TEST_SRC       (SRAM_BASE + 0x6000U)
 #define HSM_TEST_DST       (SRAM_BASE + 0x6100U)
 #define HSM_CMAC_DST       (SRAM_BASE + 0x6200U)
+#define FLASH_TEST_SRC     (SRAM_BASE + 0x6500U)
+#define FLASH_TEST_DST     (SRAM_BASE + 0x6600U)
 
 /* SV DMA test buffers */
 #define SV_DMA_SRC         (SRAM_BASE + 0x6300U)
@@ -113,6 +117,22 @@
 #define OTP_UNLOCK0_VALUE    0x4F545031U
 #define OTP_UNLOCK1_VALUE    0x50524F47U
 #define OTP_ID_EXPECTED      0x3150544FU
+
+/* FLASH controller register bit definitions */
+#define FLASH_CTRL_ID_EXPECTED       0x48534C46U
+#define FLASH_CTRL_CTRL_START        0x1U
+#define FLASH_CTRL_STATUS_DONE       0x2U
+#define FLASH_CTRL_STATUS_ERROR      0x4U
+#define FLASH_CTRL_STATUS_ECC_CORR   0x80U
+#define FLASH_CTRL_STATUS_ECC_UNCORR 0x100U
+#define FLASH_CTRL_CMD_READ          1U
+#define FLASH_CTRL_CMD_PROGRAM       2U
+#define FLASH_CTRL_CMD_ERASE_WL      3U
+#define FLASH_CTRL_UNLOCK0_VALUE     0x464C5331U
+#define FLASH_CTRL_UNLOCK_PROGRAM    0x50524F47U
+#define FLASH_CTRL_UNLOCK_ERASE      0x45524153U
+#define FLASH_CTRL_STATUS_CLEAR_ALL  (FLASH_CTRL_STATUS_DONE | FLASH_CTRL_STATUS_ERROR | \
+                                      FLASH_CTRL_STATUS_ECC_CORR | FLASH_CTRL_STATUS_ECC_UNCORR)
 
 /* CRC-32 test vector: CRC-32("123456789") = 0xCBF43926  (ISO-HDLC / IEEE 802.3) */
 #define CRC_EXPECTED       0xCBF43926U
@@ -763,6 +783,101 @@ static void test_sysctrl(void)
     }
 }
 
+/* DFLASH controller + memory-window prototype */
+static int flash_wait_done(void)
+{
+    for (uint32_t timeout = 0; timeout < 2000000U; timeout++) {
+        uint32_t status = mmio_read32(FLASH_CTRL_STATUS_REG);
+        if (status & FLASH_CTRL_STATUS_DONE) {
+            return (status & FLASH_CTRL_STATUS_ERROR) == 0U;
+        }
+    }
+    return 0;
+}
+
+static void flash_unlock_program(void)
+{
+    mmio_write32(FLASH_CTRL_UNLOCK0_REG, FLASH_CTRL_UNLOCK0_VALUE);
+    mmio_write32(FLASH_CTRL_UNLOCK1_REG, FLASH_CTRL_UNLOCK_PROGRAM);
+}
+
+static void flash_unlock_erase(void)
+{
+    mmio_write32(FLASH_CTRL_UNLOCK0_REG, FLASH_CTRL_UNLOCK0_VALUE);
+    mmio_write32(FLASH_CTRL_UNLOCK1_REG, FLASH_CTRL_UNLOCK_ERASE);
+}
+
+static void test_flash_ctrl(void)
+{
+    volatile uint32_t *src = (volatile uint32_t *)(uintptr_t)FLASH_TEST_SRC;
+    volatile uint32_t *dst = (volatile uint32_t *)(uintptr_t)FLASH_TEST_DST;
+    uint32_t lo;
+    uint32_t hi;
+    uint32_t status;
+
+    send_string("[FLASH] FLASH controller test.\n");
+    send_string(mmio_read32(FLASH_CTRL_ID_REG) == FLASH_CTRL_ID_EXPECTED
+                ? "[FLASH] ID FLSH PASSED!\n"
+                : "[FLASH] ID FAILED!\n");
+
+    mmio_write32(FLASH_CTRL_STATUS_CLEAR_REG, FLASH_CTRL_STATUS_CLEAR_ALL);
+    flash_unlock_erase();
+    mmio_write32(FLASH_CTRL_ADDR_REG, 0U);
+    mmio_write32(FLASH_CTRL_CMD_REG, FLASH_CTRL_CMD_ERASE_WL);
+    mmio_write32(FLASH_CTRL_CTRL_REG, FLASH_CTRL_CTRL_START);
+    send_string(flash_wait_done() ? "[FLASH] ERASE wordline PASSED!\n"
+                                  : "[FLASH] ERASE wordline FAILED!\n");
+
+    lo = mmio_read32(DATA_FLASH_BASE + 0U);
+    hi = mmio_read32(DATA_FLASH_BASE + 4U);
+    send_string((lo == 0xFFFFFFFFU && hi == 0xFFFFFFFFU)
+                ? "[FLASH] DFLASH erased direct read PASSED!\n"
+                : "[FLASH] DFLASH erased direct read FAILED!\n");
+
+    src[0] = 0x11223344U;
+    src[1] = 0x55667788U;
+    dst[0] = 0U;
+    dst[1] = 0U;
+
+    mmio_write32(FLASH_CTRL_STATUS_CLEAR_REG, FLASH_CTRL_STATUS_CLEAR_ALL);
+    flash_unlock_program();
+    mmio_write32(FLASH_CTRL_ADDR_REG, 0U);
+    mmio_write32(FLASH_CTRL_SRC_ADDR_REG, FLASH_TEST_SRC);
+    mmio_write32(FLASH_CTRL_LENGTH_REG, 8U);
+    mmio_write32(FLASH_CTRL_CMD_REG, FLASH_CTRL_CMD_PROGRAM);
+    mmio_write32(FLASH_CTRL_CTRL_REG, FLASH_CTRL_CTRL_START);
+    send_string(flash_wait_done() ? "[FLASH] PROGRAM wordline PASSED!\n"
+                                  : "[FLASH] PROGRAM wordline FAILED!\n");
+
+    lo = mmio_read32(DATA_FLASH_BASE + 0U);
+    hi = mmio_read32(DATA_FLASH_BASE + 4U);
+    send_string((lo == 0x11223344U && hi == 0x55667788U)
+                ? "[FLASH] DFLASH direct read PASSED!\n"
+                : "[FLASH] DFLASH direct read FAILED!\n");
+
+    mmio_write32(FLASH_CTRL_STATUS_CLEAR_REG, FLASH_CTRL_STATUS_CLEAR_ALL);
+    mmio_write32(FLASH_CTRL_ADDR_REG, 0U);
+    mmio_write32(FLASH_CTRL_DST_ADDR_REG, FLASH_TEST_DST);
+    mmio_write32(FLASH_CTRL_LENGTH_REG, 8U);
+    mmio_write32(FLASH_CTRL_CMD_REG, FLASH_CTRL_CMD_READ);
+    mmio_write32(FLASH_CTRL_CTRL_REG, FLASH_CTRL_CTRL_START);
+    send_string((flash_wait_done() && dst[0] == 0x11223344U && dst[1] == 0x55667788U)
+                ? "[FLASH] READ command PASSED!\n"
+                : "[FLASH] READ command FAILED!\n");
+
+    mmio_write32(FLASH_CTRL_STATUS_CLEAR_REG, FLASH_CTRL_STATUS_CLEAR_ALL);
+    mmio_write32(FLASH_CTRL_INJECT_ADDR_REG, 0U);
+    mmio_write32(FLASH_CTRL_INJECT_MASK_LO_REG, 0x1U);
+    mmio_write32(FLASH_CTRL_INJECT_MASK_HI_REG, 0x0U);
+    mmio_write32(FLASH_CTRL_INJECT_ECC_MASK_REG, 0x0U);
+    mmio_write32(FLASH_CTRL_INJECT_CTRL_REG, 0x3U);
+    lo = mmio_read32(DATA_FLASH_BASE + 0U);
+    status = mmio_read32(FLASH_CTRL_STATUS_REG);
+    send_string((lo == 0x11223344U && (status & FLASH_CTRL_STATUS_ECC_CORR) != 0U)
+                ? "[FLASH] ECC corrected direct read PASSED!\n"
+                : "[FLASH] ECC corrected direct read FAILED!\n");
+}
+
 /* Test 5: Watchdog Timer (handles warm-boot detection internally) */
 static void test_wdt(void)
 {
@@ -828,7 +943,7 @@ static void app_task(void *arg)
 
     /* Initialise NVIC */
     nvic_init();
-    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer, IRQ5=SV timer, IRQ6=HSM, IRQ7=OTP).\n");
+    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer, IRQ5=SV timer, IRQ6=HSM, IRQ7=OTP, IRQ8=FLASH).\n");
 
     /* Enable IRQs globally */
     __asm__ volatile ("cpsie i" ::: "memory");
@@ -855,7 +970,8 @@ static void app_task(void *arg)
         *   8  HSM AES/CMAC demo
         *   9  SYSCTRL native controller demo
         *   0  OTP controller + HSM direct key demo
-        *   a  All tests in sequence (1→2→3→4→6→7→0→8→9→5)
+        *   f  FLASH controller + DFLASH demo
+        *   a  All tests in sequence (1→2→3→4→6→7→0→8→9→f→5)
      */
     while (1) {
         send_string("=== KX6625 Test Menu ===\n");
@@ -869,6 +985,7 @@ static void app_task(void *arg)
         send_string(" 8) HSM AES/CMAC\n");
         send_string(" 9) SYSCTRL native controller\n");
         send_string(" 0) OTP controller\n");
+        send_string(" f) FLASH controller/DFLASH\n");
         send_string(" a) All tests\n");
         send_string("# ");
 
@@ -897,6 +1014,8 @@ static void app_task(void *arg)
             test_sysctrl();
         } else if (cmd == '0') {
             test_otp();
+        } else if (cmd == 'f') {
+            test_flash_ctrl();
         } else if (cmd == 'a') {
             irq_count = 0;
             test_uart_irq();
@@ -909,10 +1028,11 @@ static void app_task(void *arg)
             test_otp();
             test_hsm();
             test_sysctrl();
+            test_flash_ctrl();
             test_wdt();
             /* If WDT path causes reset, we return here on warm boot */
         } else {
-            send_string("[FW] Unknown command. Enter 0-9 or 'a'.\n");
+            send_string("[FW] Unknown command. Enter 0-9, 'f', or 'a'.\n");
         }
     }
 }
