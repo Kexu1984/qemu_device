@@ -26,6 +26,7 @@
 #include "qom/object.h"
 #include "hw/core/cpu.h"         /* CPUState, CPU_FOREACH, qemu_cpu_kick */
 #include "exec/cpu-all.h"        /* EXCP_HLT */
+#include "qemu/thread.h"
 
 /* Generated SoC configuration — do not edit, regenerate with: make gen */
 #include "kx6625_soc.h"
@@ -70,6 +71,10 @@
 #define SYSCTRL_CPU_STATUS_CPU1_HELD  0x00000004U
 #define SYSCTRL_BOOT_FLASH_LOADED     0x00000001U
 #define SYSCTRL_BOOT_VECTOR_VALID     0x00000002U
+#define SYSCTRL_BOOT_SECURE_DONE      0x00000004U
+#define SYSCTRL_BOOT_SECURE_PASS      0x00000008U
+#define SYSCTRL_BOOT_SECURE_FAIL      0x00000010U
+#define SYSCTRL_BOOT_MODE_SECURE_EN   0x00000100U
 #define SYSCTRL_DEVICE_MASK           0x000000FFU
 #define SYSCTRL_DEVCTL_START          0x00000001U
 #define SYSCTRL_DEVCTL_READ           0x00000002U
@@ -85,6 +90,38 @@
 #define SYSCTRL_DEVCTL_ERR_RANGE      3U
 #define SYSCTRL_DEVCTL_ERR_BUS        4U
 
+#define OTP_BASE                      0x4000D000UL
+#define OTP_OFF_ID                    0x00U
+#define OTP_SHADOW_BOOT_MAGIC         0x100U
+#define OTP_SHADOW_BOOT_IMAGE_BASE    0x104U
+#define OTP_SHADOW_BOOT_IMAGE_SIZE    0x108U
+#define OTP_SHADOW_BOOT_CONFIG        0x10CU
+#define OTP_SHADOW_BOOT_CMAC0         0x120U
+#define OTP_BOOT_MAGIC_VALUE          0x31564253U  /* 'SBV1' little-endian */
+#define OTP_ID_VALUE                  0x3150544FU  /* 'OTP1' little-endian */
+#define OTP_BOOT_ALG_AES_CMAC         1U
+
+#define HSM_BASE                      0x4000C000UL
+#define HSM_OFF_ID                    0x00U
+#define HSM_OFF_CTRL                  0x08U
+#define HSM_OFF_STATUS                0x0CU
+#define HSM_OFF_MODE                  0x1CU
+#define HSM_OFF_SRC_ADDR              0x20U
+#define HSM_OFF_DST_ADDR              0x24U
+#define HSM_OFF_LENGTH                0x28U
+#define HSM_OFF_KEY_ID                0x30U
+#define HSM_OFF_TAG_WORD0             0x60U
+#define HSM_CTRL_START                0x00000001U
+#define HSM_STATUS_BUSY               0x00000001U
+#define HSM_STATUS_DONE               0x00000002U
+#define HSM_STATUS_ERROR              0x00000004U
+#define HSM_MODE_CMAC                 4U
+#define HSM_ID_VALUE                  0x314D5348U  /* 'HSM1' little-endian */
+
+#define KX6625_SECBOOT_SCRATCH        0x2001D000UL
+#define KX6625_SECBOOT_POLL_LIMIT     30000U
+#define KX6625_SECBOOT_DEVICE_RETRIES 2000U
+
 /* ── Machine state ─────────────────────────────────────────────────────── */
 struct KX6625MachineState {
     MachineState parent;
@@ -96,7 +133,9 @@ struct KX6625MachineState {
     MemoryRegion cpu1_board_mem;              /* alias of system_memory for CPU1 */
     Clock       *sysclk;
     Clock       *refclk;
+    CPUState    *cpu0;                        /* pointer to CPU0's CPUState */
     CPUState    *cpu1;                        /* pointer to CPU1's CPUState */
+    QemuThread   secure_boot_thread;
     bool         cpu1_released;
     uint32_t     sysctrl_reset_ctrl;
     uint32_t     sysctrl_reset_status;
@@ -326,6 +365,196 @@ static const MemoryRegionOps kx6625_sysctrl_ops = {
     },
 };
 
+/* ── SYSCTRL secure boot state machine ────────────────────────────────── */
+
+static bool kx6625_bus_read32(hwaddr addr, uint32_t *value)
+{
+    MemTxResult result;
+    uint32_t tmp = 0;
+
+    result = address_space_read(&address_space_memory, addr,
+                                MEMTXATTRS_UNSPECIFIED, &tmp, sizeof(tmp));
+    if (result != MEMTX_OK) {
+        return false;
+    }
+    *value = tmp;
+    return true;
+}
+
+static bool kx6625_bus_write32(hwaddr addr, uint32_t value)
+{
+    MemTxResult result;
+
+    result = address_space_write(&address_space_memory, addr,
+                                 MEMTXATTRS_UNSPECIFIED, &value, sizeof(value));
+    return result == MEMTX_OK;
+}
+
+static void kx6625_secure_boot_release_cpu0(KX6625MachineState *s)
+{
+    if (!s->cpu0) {
+        return;
+    }
+    s->cpu0->halted = 0;
+    s->cpu0->exception_index = -1;
+    qemu_cpu_kick(s->cpu0);
+}
+
+static bool kx6625_secure_boot_wait_for_otp(uint32_t *magic)
+{
+    uint32_t i;
+    uint32_t id;
+
+    for (i = 0; i < KX6625_SECBOOT_DEVICE_RETRIES; i++) {
+        if (kx6625_bus_read32(OTP_BASE + OTP_OFF_ID, &id) &&
+            id == OTP_ID_VALUE &&
+            kx6625_bus_read32(OTP_BASE + OTP_SHADOW_BOOT_MAGIC, magic)) {
+            return true;
+        }
+        g_usleep(1000);
+    }
+    return false;
+}
+
+static bool kx6625_secure_boot_read_metadata(uint32_t *image_base,
+                                             uint32_t *image_size,
+                                             uint32_t *config,
+                                             uint32_t expected[4])
+{
+    int i;
+
+    if (!kx6625_bus_read32(OTP_BASE + OTP_SHADOW_BOOT_IMAGE_BASE, image_base) ||
+        !kx6625_bus_read32(OTP_BASE + OTP_SHADOW_BOOT_IMAGE_SIZE, image_size) ||
+        !kx6625_bus_read32(OTP_BASE + OTP_SHADOW_BOOT_CONFIG, config)) {
+        return false;
+    }
+    for (i = 0; i < 4; i++) {
+        if (!kx6625_bus_read32(OTP_BASE + OTP_SHADOW_BOOT_CMAC0 + (hwaddr)i * 4,
+                               &expected[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool kx6625_secure_boot_run_hsm(uint32_t image_base,
+                                       uint32_t image_size,
+                                       uint32_t key_id,
+                                       uint32_t tag[4])
+{
+    uint32_t status = 0;
+    uint32_t id = 0;
+    uint32_t i;
+
+    for (i = 0; i < KX6625_SECBOOT_DEVICE_RETRIES; i++) {
+        if (kx6625_bus_read32(HSM_BASE + HSM_OFF_ID, &id) && id == HSM_ID_VALUE) {
+            break;
+        }
+        g_usleep(1000);
+    }
+    if (i == KX6625_SECBOOT_DEVICE_RETRIES) {
+        return false;
+    }
+
+    if (!kx6625_bus_write32(HSM_BASE + HSM_OFF_KEY_ID, key_id) ||
+        !kx6625_bus_write32(HSM_BASE + HSM_OFF_SRC_ADDR, image_base) ||
+        !kx6625_bus_write32(HSM_BASE + HSM_OFF_DST_ADDR, KX6625_SECBOOT_SCRATCH) ||
+        !kx6625_bus_write32(HSM_BASE + HSM_OFF_LENGTH, image_size) ||
+        !kx6625_bus_write32(HSM_BASE + HSM_OFF_MODE, HSM_MODE_CMAC) ||
+        !kx6625_bus_write32(HSM_BASE + HSM_OFF_CTRL, HSM_CTRL_START)) {
+        return false;
+    }
+
+    for (i = 0; i < KX6625_SECBOOT_POLL_LIMIT; i++) {
+        if (!kx6625_bus_read32(HSM_BASE + HSM_OFF_STATUS, &status)) {
+            return false;
+        }
+        if (status & HSM_STATUS_ERROR) {
+            return false;
+        }
+        if ((status & HSM_STATUS_DONE) && !(status & HSM_STATUS_BUSY)) {
+            break;
+        }
+        g_usleep(1000);
+    }
+    if (i == KX6625_SECBOOT_POLL_LIMIT) {
+        return false;
+    }
+    for (i = 0; i < 4; i++) {
+        if (!kx6625_bus_read32(HSM_BASE + HSM_OFF_TAG_WORD0 + (hwaddr)i * 4,
+                               &tag[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static void *kx6625_secure_boot_thread_fn(void *opaque)
+{
+    KX6625MachineState *s = opaque;
+    uint32_t magic = 0;
+    uint32_t image_base = 0;
+    uint32_t image_size = 0;
+    uint32_t config = 0;
+    uint32_t expected[4] = {0};
+    uint32_t actual[4] = {0};
+    uint32_t key_id;
+    uint32_t algorithm;
+    bool ok;
+
+    if (!kx6625_secure_boot_wait_for_otp(&magic)) {
+        warn_report("kx6625: secure boot: OTP device unavailable, continuing with secure boot disabled");
+        s->sysctrl_boot_status |= SYSCTRL_BOOT_VECTOR_VALID;
+        kx6625_secure_boot_release_cpu0(s);
+        return NULL;
+    }
+
+    if (magic != OTP_BOOT_MAGIC_VALUE) {
+        info_report("kx6625: secure boot disabled (OTP magic 0x%08x)", magic);
+        s->sysctrl_boot_status |= SYSCTRL_BOOT_VECTOR_VALID;
+        kx6625_secure_boot_release_cpu0(s);
+        return NULL;
+    }
+
+    s->sysctrl_boot_mode |= SYSCTRL_BOOT_MODE_SECURE_EN;
+    if (!kx6625_secure_boot_read_metadata(&image_base, &image_size, &config, expected)) {
+        goto fail;
+    }
+
+    key_id = config & 0xFFU;
+    algorithm = (config >> 8) & 0xFFU;
+    if (image_base != KX6625_FLASH0_BASE ||
+        image_size == 0 || image_size > KX6625_FLASH0_SIZE ||
+        key_id > 14 || algorithm != OTP_BOOT_ALG_AES_CMAC) {
+        error_report("kx6625: secure boot: invalid OTP metadata base=0x%08x size=0x%08x config=0x%08x",
+                     image_base, image_size, config);
+        goto fail;
+    }
+
+    info_report("kx6625: secure boot: HSM AES-CMAC key_id=%u base=0x%08x size=0x%08x",
+                key_id, image_base, image_size);
+    ok = kx6625_secure_boot_run_hsm(image_base, image_size, key_id, actual);
+    if (!ok || memcmp(actual, expected, sizeof(actual)) != 0) {
+        error_report("kx6625: secure boot: CMAC mismatch expected=%08x%08x%08x%08x actual=%08x%08x%08x%08x",
+                     expected[3], expected[2], expected[1], expected[0],
+                     actual[3], actual[2], actual[1], actual[0]);
+        goto fail;
+    }
+
+    s->sysctrl_boot_status |= SYSCTRL_BOOT_SECURE_DONE |
+                              SYSCTRL_BOOT_SECURE_PASS |
+                              SYSCTRL_BOOT_VECTOR_VALID;
+    info_report("kx6625: secure boot: CMAC verified, releasing CPU0");
+    kx6625_secure_boot_release_cpu0(s);
+    return NULL;
+
+fail:
+    s->sysctrl_boot_status |= SYSCTRL_BOOT_SECURE_DONE |
+                              SYSCTRL_BOOT_SECURE_FAIL;
+    error_report("kx6625: secure boot failed; CPU0 will not be released");
+    exit(1);
+}
+
 /* ── Board initialisation ──────────────────────────────────────────────── */
 
 static void kx6625_init_flash_erase_state(KX6625MachineState *s)
@@ -456,6 +685,7 @@ static void kx6625_init(MachineState *machine)
     if (!s->cpu1) {
         error_report("kx6625: failed to locate CPU1");
     }
+    s->cpu0 = first_cpu;
 
     /* SYSCTRL native MMIO — overlaps the peripheral stub with higher priority */
     memory_region_init_io(&s->sysctrl_mmio, NULL, &kx6625_sysctrl_ops, s,
@@ -470,7 +700,13 @@ static void kx6625_init(MachineState *machine)
     armv7m_load_kernel(ARM_CPU(first_cpu), NULL,
                        (hwaddr)KX6625_FLASH0_BASE, (int)KX6625_FLASH0_SIZE);
     kx6625_load_firmware_hex(machine);
-    s->sysctrl_boot_status |= SYSCTRL_BOOT_FLASH_LOADED | SYSCTRL_BOOT_VECTOR_VALID;
+    s->sysctrl_boot_status |= SYSCTRL_BOOT_FLASH_LOADED;
+
+    if (s->cpu0) {
+        cpu_reset(s->cpu0);
+        s->cpu0->halted = 1;
+        s->cpu0->exception_index = EXCP_HLT;
+    }
 
     /* Re-reset CPU1 now that firmware is loaded into flash.
      * start-powered-off applied cpu_reset() before the firmware HEX was written,
@@ -484,6 +720,10 @@ static void kx6625_init(MachineState *machine)
         s->cpu1_released = false;
         s->sysctrl_reset_status |= SYSCTRL_RESET_STATUS_CPU1HELD;
     }
+
+    qemu_thread_create(&s->secure_boot_thread, "kx6625-secboot",
+                       kx6625_secure_boot_thread_fn, s,
+                       QEMU_THREAD_DETACHED);
 }
 
 /* ── Machine class ─────────────────────────────────────────────────────── */

@@ -18,12 +18,13 @@
 #     to target writable memory such as SRAM. If firmware programs DST_ADDR in
 #     read-only FLASH, the DMA/memory backend should report a bus/write error
 #     and HSM should latch STATUS.ERROR / ERROR.DST_BUS_ERROR.
-#   - Access policy: every HSM register is accessible only by master_id == 0
-#     (CPU0). Other masters read zero and writes are ignored. Such illegal
-#     access latches STATUS.ACCESS_ERR and ERROR.ACCESS_DENIED; the sticky
-#     illegal-access state is cleared only by HSM module reset. Per-device reset
-#     control is not modeled in this spec yet; a future CRU model should manage
-#     device clock/reset.
+#   - Access policy: HSM registers are accessible by CPU0 (master_id == 0) and
+#     the privileged SYSCTRL secure-boot master (master_id == 0xF0). Other
+#     masters read zero and writes are ignored. Such illegal access latches
+#     STATUS.ACCESS_ERR and ERROR.ACCESS_DENIED; the sticky illegal-access state
+#     is cleared only by HSM module reset. Per-device reset control is not
+#     modeled in this spec yet; a future CRU model should manage device
+#     clock/reset.
 #
 # Model configuration:
 #   otp_provider: direct connection to OtpControllerDevice.read_key(). This
@@ -56,6 +57,7 @@ model:
   key_id_otp_range: [0, 14]
   key_id_register: 15
   allowed_register_master_id: 0
+  allowed_sysctrl_master_id: 0xF0
   dma_client: true
   algorithms:
     - AES-128-ECB-ENCRYPT

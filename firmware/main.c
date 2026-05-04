@@ -121,6 +121,8 @@
 #define SYSCTRL_ID_EXPECTED       0x4C544353U
 #define SYSCTRL_BOOT_FLASH_LOADED 0x1U
 #define SYSCTRL_BOOT_VECTOR_VALID 0x2U
+#define SYSCTRL_BOOT_SECURE_DONE  0x4U
+#define SYSCTRL_BOOT_SECURE_PASS  0x8U
 #define SYSCTRL_CPU1_RELEASED     0x2U
 
 /* -----------------------------------------------------------------------
@@ -681,7 +683,7 @@ static void test_otp(void)
                 ? "[OTP] Key read protection PASSED!\n"
                 : "[OTP] Key read protection FAILED!\n");
 
-    ok = otp_program_row(0x50U, 0x12345678U) && otp_read_row(0x50U, &value) && value == 0x12345678U;
+    ok = otp_program_row(0x60U, 0x12345678U) && otp_read_row(0x60U, &value) && value == 0x12345678U;
     send_string(ok ? "[OTP] Non-secret row read PASSED!\n"
                    : "[OTP] Non-secret row read FAILED!\n");
 
@@ -734,6 +736,10 @@ static void test_sysctrl(void)
                 (SYSCTRL_BOOT_FLASH_LOADED | SYSCTRL_BOOT_VECTOR_VALID)
                 ? "[SYSCTRL] BOOT_STATUS flash/vector PASSED!\n"
                 : "[SYSCTRL] BOOT_STATUS FAILED!\n");
+    send_string((boot_status & (SYSCTRL_BOOT_SECURE_DONE | SYSCTRL_BOOT_SECURE_PASS)) ==
+                (SYSCTRL_BOOT_SECURE_DONE | SYSCTRL_BOOT_SECURE_PASS)
+                ? "[SYSCTRL] SECURE_BOOT CMAC PASSED!\n"
+                : "[SYSCTRL] SECURE_BOOT CMAC FAILED!\n");
     send_string((cpu_status & SYSCTRL_CPU1_RELEASED) != 0U
                 ? "[SYSCTRL] CPU_STATUS CPU1 released PASSED!\n"
                 : "[SYSCTRL] CPU_STATUS FAILED!\n");

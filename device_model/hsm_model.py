@@ -7,8 +7,9 @@ CTRL.START.  The model then reads the source buffer from the QEMU physical
 address space, performs AES/CMAC internally, writes the result to DST_ADDR, and
 pulses its IRQ when complete.
 
-Register access is restricted to CPU0 (master_id == 0).  Other masters read
-zero, writes are ignored, and STATUS.ACCESS_ERR is sticky until module reset.
+Register access is restricted to CPU0 (master_id == 0) and the privileged
+SYSCTRL boot master (master_id == 0xF0).  Other masters read zero, writes are
+ignored, and STATUS.ACCESS_ERR is sticky until module reset.
 """
 
 from __future__ import annotations
@@ -108,6 +109,7 @@ class HsmDevice(MMIODevice):
 
     _KEY_ID_REGISTER = 15
     _ALLOWED_MASTER = 0
+    _SYSCTRL_MASTER = 0xF0
 
     _FLASH_BASE = 0x00000000
     _FLASH_SIZE = 0x00080000
@@ -194,7 +196,7 @@ class HsmDevice(MMIODevice):
         self._tr.emit('RESET')
 
     def _master_allowed(self, master_id: int) -> bool:
-        return master_id == self._ALLOWED_MASTER
+        return master_id in (self._ALLOWED_MASTER, self._SYSCTRL_MASTER)
 
     def _latch_access_error(self, master_id: int) -> None:
         self._set_error(self._ERR_ACCESS_DENIED)

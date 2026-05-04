@@ -8,7 +8,8 @@
  * - Read:  'R' (1B) | master_id(1B) | addr(4B LE) | size(1B) -> Python returns data(sizeB)
  * - Write: 'W' (1B) | master_id(1B) | addr(4B LE) | size(1B) | data(sizeB)
  *          -> Python returns next_event_ns(8B LE)
- * master_id: cpu_index of the CPU that triggered the MMIO access (0=CPU0, 1=CPU1, ...)
+ * master_id: cpu_index of the CPU that triggered the MMIO access (0=CPU0, 1=CPU1, ...),
+ *            or 0xF0 for privileged QEMU/SYSCTRL-originated accesses.
  *   next_event_ns == 0: no scheduled event (e.g. a simple config write)
  *   next_event_ns  > 0: QEMU reschedules this device's tick timer to fire
  *                       at now + next_event_ns (Discrete Event Simulation)
@@ -91,6 +92,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(MMIOSockDevState, MMIO_SOCKDEV)
  */
 #define MEM_HDR_SIZE         14     /* 'M'(1) + op(1) + addr(8 LE) + len(4 LE) */
 #define MEM_MAX_LEN          65536  /* max single DMA transfer, 64 KB */
+#define MASTER_ID_SYSCTRL    0xF0
 
 typedef struct MemRxState {
     uint8_t  hdr[MEM_HDR_SIZE];
@@ -150,7 +152,7 @@ static uint64_t mmio_sockdev_read(void *opaque, hwaddr offset, unsigned size)
 
     /* Build request packet */
     req[0] = 'R';
-    req[1] = current_cpu ? (uint8_t)current_cpu->cpu_index : 0;
+    req[1] = current_cpu ? (uint8_t)current_cpu->cpu_index : MASTER_ID_SYSCTRL;
     stl_le_p(req + 2, (uint32_t)offset);
     req[6] = (uint8_t)size;
 
@@ -201,7 +203,7 @@ static void mmio_sockdev_write(void *opaque, hwaddr offset, uint64_t value, unsi
 
     /* Build request packet */
     req[0] = 'W';
-    req[1] = current_cpu ? (uint8_t)current_cpu->cpu_index : 0;
+    req[1] = current_cpu ? (uint8_t)current_cpu->cpu_index : MASTER_ID_SYSCTRL;
     stl_le_p(req + 2, (uint32_t)offset);
     req[6] = (uint8_t)size;
 

@@ -207,6 +207,7 @@ class MemChannel:
         self._lock      = threading.Lock()    # serialises all socket I/O
         self._connected = threading.Event()
         self._close_evt = threading.Event()   # set on I/O error or stop()
+        self._max_transfer = 65536
 
     # -- called by MemServer ----------------------------------------------
 
@@ -260,10 +261,16 @@ class MemChannel:
             if self._sock is None:
                 return False
             try:
-                hdr = b'M' + b'W' + struct.pack('<QI', phys_addr, len(data))
-                self._sock.sendall(hdr + data)
-                ack = recv_exact(self._sock, 1)
-                return ack == b'\x00'
+                offset = 0
+                while offset < len(data):
+                    chunk = data[offset:offset + self._max_transfer]
+                    hdr = b'M' + b'W' + struct.pack('<QI', phys_addr + offset, len(chunk))
+                    self._sock.sendall(hdr + chunk)
+                    ack = recv_exact(self._sock, 1)
+                    if ack != b'\x00':
+                        return False
+                    offset += len(chunk)
+                return True
             except (OSError, ConnectionError) as exc:
                 print(f'[MEM]  dma_write error: {exc}', file=sys.stderr)
                 self._signal_close()
@@ -285,9 +292,15 @@ class MemChannel:
             if self._sock is None:
                 return None
             try:
-                hdr = b'M' + b'R' + struct.pack('<QI', phys_addr, length)
-                self._sock.sendall(hdr)
-                return recv_exact(self._sock, length)
+                out = bytearray()
+                offset = 0
+                while offset < length:
+                    chunk_len = min(self._max_transfer, length - offset)
+                    hdr = b'M' + b'R' + struct.pack('<QI', phys_addr + offset, chunk_len)
+                    self._sock.sendall(hdr)
+                    out.extend(recv_exact(self._sock, chunk_len))
+                    offset += chunk_len
+                return bytes(out)
             except (OSError, ConnectionError) as exc:
                 print(f'[MEM]  dma_read error: {exc}', file=sys.stderr)
                 self._signal_close()

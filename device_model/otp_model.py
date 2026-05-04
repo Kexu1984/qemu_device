@@ -103,6 +103,14 @@ class OtpControllerDevice(MMIODevice):
     _CUSTOMER_BASE_ROW = 0x0050
     _GP_BASE_ROW = 0x0060
 
+    BOOT_MAGIC_ROW = 0x0040
+    BOOT_IMAGE_BASE_ROW = 0x0041
+    BOOT_IMAGE_SIZE_ROW = 0x0042
+    BOOT_CONFIG_ROW = 0x0043
+    BOOT_CMAC_BASE_ROW = 0x0050
+    BOOT_CMAC_ROWS = 4
+    BOOT_MAGIC_VALUE = 0x31564253
+
     def __init__(
         self,
         storage_file: str = 'build/otp.hex',
@@ -231,6 +239,35 @@ class OtpControllerDevice(MMIODevice):
             return None
         self._tr.emit('KEY_READ', slot=slot_id)
         return b''.join(word.to_bytes(4, 'little') for word in words)
+
+    def read_boot_metadata(self) -> Optional[dict]:
+        with self._lock:
+            words = []
+            for row in range(self.BOOT_CMAC_BASE_ROW, self.BOOT_CMAC_BASE_ROW + self.BOOT_CMAC_ROWS):
+                value, ok = self._read_row_checked(row, update_status=True)
+                if not ok:
+                    return None
+                words.append(value)
+            policy, ok = self._read_row_checked(self.BOOT_MAGIC_ROW, update_status=True)
+            if not ok:
+                return None
+            image_base, ok = self._read_row_checked(self.BOOT_IMAGE_BASE_ROW, update_status=True)
+            if not ok:
+                return None
+            image_size, ok = self._read_row_checked(self.BOOT_IMAGE_SIZE_ROW, update_status=True)
+            if not ok:
+                return None
+            config, ok = self._read_row_checked(self.BOOT_CONFIG_ROW, update_status=True)
+            if not ok:
+                return None
+        return {
+            'enabled': policy == self.BOOT_MAGIC_VALUE,
+            'magic': policy,
+            'image_base': image_base,
+            'image_size': image_size,
+            'config': config,
+            'cmac': b''.join(word.to_bytes(4, 'little') for word in words),
+        }
 
     @staticmethod
     def _put32(buf: bytearray, offset: int, value: int) -> None:

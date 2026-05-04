@@ -25,6 +25,7 @@ FIRMWARE_HEX="$PROJECT_ROOT/build/firmware.hex"
 SERVER_SCRIPT="$PROJECT_ROOT/device_model/mmio_device_server.py"
 CONSOLE_SCRIPT="$PROJECT_ROOT/scripts/uart_console.py"
 SV_BRIDGE="$PROJECT_ROOT/sv_device/build/sv_timer_bridge"
+SECBOOT_SCRIPT="$PROJECT_ROOT/scripts/secure_boot_otp.py"
 
 UART_TERM_PORT=7904
 RW_PORT=7890
@@ -57,7 +58,7 @@ warn()  { echo -e "${YELLOW}[demo]${NC} $*"; }
 err()   { echo -e "${RED}[demo]${NC} $*" >&2; }
 
 # ── Sanity checks ──────────────────────────────────────────────────────────────
-for f in "$QEMU_BIN" "$FIRMWARE_HEX" "$SERVER_SCRIPT" "$CONSOLE_SCRIPT" "$SV_BRIDGE"; do
+for f in "$QEMU_BIN" "$FIRMWARE_HEX" "$SERVER_SCRIPT" "$CONSOLE_SCRIPT" "$SV_BRIDGE" "$SECBOOT_SCRIPT"; do
     if [[ ! -f "$f" ]]; then
         err "Required file not found: $f"
         exit 1
@@ -174,6 +175,9 @@ sleep 0.3
 
 mkdir -p "$LOG_DIR"
 rm -f "$QEMU_PID_FILE"
+
+info "Installing secure boot OTP metadata..."
+python3 "$SECBOOT_SCRIPT" --firmware-hex "$FIRMWARE_HEX" --otp "$LOG_DIR/otp.hex" --fresh
 
 start_qemu() {
     info "Starting QEMU..."

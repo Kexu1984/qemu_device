@@ -26,6 +26,18 @@
 #   Writing DEVCTL_CTRL.START with READ or WRITE performs one 32-bit access.
 #   DEVCTL_STATUS reports BUSY/DONE/ERROR and DEVCTL_RDATA returns read data.
 #   Accesses to SYSCTRL itself through DEVCTL are invalid to avoid recursion.
+#
+# Secure boot v1:
+#   When OTP boot metadata row 0x0040 contains magic 0x31564253 ('SBV1'),
+#   SYSCTRL treats secure boot as enabled. During power-on initialization it
+#   holds CPU0/CPU1, reads non-secret OTP shadow metadata, drives HSM registers
+#   as a privileged bus master, computes AES-CMAC over the configured flash
+#   image region with HSM KEY_ID0, compares the result with OTP expected CMAC
+#   rows 0x0050..0x0053, and only then marks BOOT_VECTOR_VALID.
+#
+#   SYSCTRL uses polling, not HSM IRQs, because no firmware/NVIC handler is
+#   available before CPU release. The HSM remains a crypto engine; the boot
+#   policy state machine lives here.
 
 registers:
   - offset:      0x00
@@ -79,13 +91,13 @@ registers:
   - offset:      0x20
     name:        BOOT_MODE
     access:      RW
-    description: "Boot mode straps/policy. bits[1:0]=BOOT_SRC (0=FLASH_HEX, 1=BOOTROM reserved, 2=SRAM reserved); bit8=SECURE_BOOT_EN reserved."
+    description: "Boot mode straps/policy. bits[1:0]=BOOT_SRC (0=FLASH_HEX, 1=BOOTROM reserved, 2=SRAM reserved); bit8 reflects SECURE_BOOT_EN after OTP metadata is decoded."
     reset_value: 0x00000000
 
   - offset:      0x24
     name:        BOOT_STATUS
     access:      R
-    description: "Boot status. bit0=FLASH_IMAGE_LOADED; bit1=BOOT_VECTOR_VALID; bit2=SECURE_BOOT_DONE reserved; bit3=SECURE_BOOT_PASS reserved."
+    description: "Boot status. bit0=FLASH_IMAGE_LOADED; bit1=BOOT_VECTOR_VALID; bit2=SECURE_BOOT_DONE; bit3=SECURE_BOOT_PASS; bit4=SECURE_BOOT_FAIL."
     reset_value: 0x00000003
 
   - offset:      0x30

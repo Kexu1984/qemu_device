@@ -20,6 +20,7 @@ QEMU_BIN="$PROJECT_ROOT/scripts/qemu-fork/build/qemu-system-arm"
 FIRMWARE_HEX="$PROJECT_ROOT/build/firmware.hex"
 SERVER_SCRIPT="$PROJECT_ROOT/device_model/mmio_device_server.py"
 SV_BRIDGE="$PROJECT_ROOT/sv_device/build/sv_timer_bridge"
+SECBOOT_SCRIPT="$PROJECT_ROOT/scripts/secure_boot_otp.py"
 
 RW_PORT=7890
 IRQ_PORT=7891
@@ -63,7 +64,7 @@ trap cleanup EXIT
 # -----------------------------------------------------------------------
 # Sanity checks
 # -----------------------------------------------------------------------
-for f in "$QEMU_BIN" "$FIRMWARE_HEX" "$SERVER_SCRIPT" "$SV_BRIDGE"; do
+for f in "$QEMU_BIN" "$FIRMWARE_HEX" "$SERVER_SCRIPT" "$SV_BRIDGE" "$SECBOOT_SCRIPT"; do
     if [ ! -f "$f" ]; then
         fail "Required file not found: $f"
         exit 1
@@ -72,6 +73,8 @@ done
 
 mkdir -p "$LOG_DIR"
 rm -f "$LOG_DIR/otp.hex"
+info "Installing secure boot OTP metadata..."
+python3 "$SECBOOT_SCRIPT" --firmware-hex "$FIRMWARE_HEX" --otp "$LOG_DIR/otp.hex" --fresh || exit 1
 info "QEMU    : $QEMU_BIN"
 info "Firmware HEX: $FIRMWARE_HEX"
 echo ""
@@ -248,6 +251,7 @@ EXPECTED=(
     "Native SYSCTRL register test"
     "SYSCTRL] ID SCTL PASSED"
     "SYSCTRL] BOOT_STATUS flash/vector PASSED"
+    "SYSCTRL] SECURE_BOOT CMAC PASSED"
     "SYSCTRL] CPU_STATUS CPU1 released PASSED"
     "SYSCTRL] DEVICE reset policy PASSED"
     "SYSCTRL] DEVCTL UART STATUS read PASSED"
@@ -360,6 +364,7 @@ UART_EXPECTED=(
     "HSM AES-CMAC PASSED"
     "HSM OTP KEY_ID0 AES-CBC PASSED"
     "DEVCTL UART STATUS read PASSED"
+    "SECURE_BOOT CMAC PASSED"
     "Warm boot detected"
     "WDT demo complete"
 )

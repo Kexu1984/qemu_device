@@ -94,8 +94,14 @@
 # - Rows 0x0000..0x003B: HSM AES-128 key slots 0..14
 #   slot N uses rows 4*N + 0 .. 4*N + 3, little-endian word order matching the
 #   HSM KEY_WORD registers.
-# - Rows 0x0040..0x0043: lifecycle / boot policy reservation.
-# - Rows 0x0050..0x005F: customer configuration / board ID reservation.
+# - Rows 0x0040..0x0043: secure boot metadata v1:
+#   row 0x0040 = magic 0x31564253 ('SBV1') enables secure boot; erased disables it.
+#   row 0x0041 = image base (first version uses 0x00000000).
+#   row 0x0042 = image size in bytes (first version uses 0x00080000).
+#   row 0x0043 = config: bits[7:0]=HSM key id, bits[15:8]=algorithm id
+#                (1=AES-CMAC), other bits reserved.
+# - Rows 0x0050..0x0053: expected secure boot CMAC, 16 bytes in little-endian word order.
+# - Rows 0x0054..0x005F: customer configuration / board ID reservation.
 # - Rows 0x0060..0x00FF: general-purpose OTP reservation.
 #
 # Shadow/register-load behavior
@@ -104,8 +110,8 @@
 # rows into a CPU-readable shadow window. Key rows are never mirrored here.
 #
 # First-model shadow window:
-# - 0x100..0x10C: lifecycle / boot policy rows 0x0040..0x0043
-# - 0x120..0x12C: customer configuration rows 0x0050..0x0053
+# - 0x100..0x10C: secure boot metadata rows 0x0040..0x0043
+# - 0x120..0x12C: secure boot expected CMAC rows 0x0050..0x0053
 #
 # Typical firmware command sequences
 # ----------------------------------
@@ -148,6 +154,16 @@ model:
   hsm_key_rows_per_slot: 4
   cpu_read_protected_ranges:
     - [0x0000, 0x003B]
+  secure_boot:
+    magic_row: 0x0040
+    magic_value: 0x31564253
+    image_base_row: 0x0041
+    image_size_row: 0x0042
+    config_row: 0x0043
+    cmac_base_row: 0x0050
+    cmac_rows: 4
+    key_id: 0
+    algorithm_id: 1
 
 registers:
   - offset:      0x00
