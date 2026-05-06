@@ -73,6 +73,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Transport layer + bus — imported from mmio_device_server.
 # See NOTE in module docstring about circular-import safety.
 from device_model.mmio_device_server import (   # noqa: E402
+    CruNotifyServer,
     IRQServer,
     MemServer,
     MMIOBus,
@@ -337,6 +338,7 @@ class SoCTop:
         hsm:             Optional[HsmCfg]           = None,
         flash_ctrl:      Optional[FlashCtrlCfg]     = None,
         tick_port:       int                        = 7896,
+        cru_notify_port: Optional[int]              = None,
         tracer:          Optional[Tracer]           = None,
     ) -> None:
         if dma_client_demo is not None and dma is None:
@@ -518,6 +520,28 @@ class SoCTop:
             self._add_server(RWServer(port=flash_ctrl.rw_port, bus=bus, base_addr=flash_ctrl.base_addr))
             self._add_server(RWServer(port=flash_ctrl.ahb_rw_port, bus=bus,
                                       base_addr=flash_ctrl.ahb_base_addr))
+
+        # ── CRU notify server (optional) ──────────────────────────────────
+        # Maps CRU device indices (matching kx6625_cru_devices[] in kx6625.c)
+        # to Python device instances so on_device_reset() can be dispatched.
+        if cru_notify_port is not None:
+            cru_dev_map: dict = {}
+            _cru_base_to_idx = {
+                0x40004000: 0,   # console_uart
+                0x40005000: 1,   # dma
+                0x40006000: 2,   # timer0
+                0x40007000: 3,   # dma_demo
+                0x40008000: 4,   # crc
+                0x40009000: 5,   # wdt
+                0x4000B000: 6,   # sv_timer (no Python model; idx still reserved)
+                0x4000C000: 7,   # hsm
+                0x4000D000: 8,   # otp
+            }
+            for base, _size, device in bus._entries:
+                idx = _cru_base_to_idx.get(base)
+                if idx is not None:
+                    cru_dev_map[idx] = device
+            self._add_server(CruNotifyServer(port=cru_notify_port, device_map=cru_dev_map))
 
     # ── Internal helpers ──────────────────────────────────────────────────
 

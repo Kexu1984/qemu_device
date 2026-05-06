@@ -27,6 +27,8 @@
 #include "hw/core/cpu.h"         /* CPUState, CPU_FOREACH, qemu_cpu_kick */
 #include "exec/cpu-all.h"        /* EXCP_HLT */
 #include "qemu/thread.h"
+#include "qemu/log.h"
+#include "hw/misc/mmio_sockdev.h"  /* CRU guard registration */
 
 /* Generated SoC configuration — do not edit, regenerate with: make gen */
 #include "kx6625_soc.h"
@@ -122,6 +124,52 @@
 #define KX6625_SECBOOT_POLL_LIMIT     30000U
 #define KX6625_SECBOOT_DEVICE_RETRIES 2000U
 
+/* ── CRU: Clock Reset Unit native MMIO ───────────────────────────────── */
+#define KX6625_CRU_BASE            0x4000F000UL
+#define KX6625_CRU_SIZE            0x1000UL
+
+#define CRU_OFF_ID                 0x00U   /* RO: 0x31555243 = 'CRU1' LE */
+#define CRU_OFF_VERSION            0x04U   /* RO: 0x00010000              */
+#define CRU_OFF_CLK_EN0            0x08U   /* RW: bit per device, 1=enabled */
+#define CRU_OFF_CLK_EN1            0x0CU   /* RW: reserved                */
+#define CRU_OFF_RST_CTRL0          0x10U   /* RW: bit per device, 1=deasserted */
+#define CRU_OFF_RST_CTRL1          0x14U   /* RW: reserved                */
+#define CRU_OFF_RESET_REASON       0x18U   /* RO: retention 0=POR 1=WDT 2=SWSYS */
+#define CRU_OFF_SOFT_SYSRST_REQ    0x1CU   /* WO: write magic → SW sys reset */
+
+#define CRU_ID_VALUE               0x31555243U  /* 'CRU1' little-endian */
+#define CRU_VERSION_VALUE          0x00010000U
+
+#define CRU_RESET_REASON_POR       0x00U
+#define CRU_RESET_REASON_WDT       0x01U
+#define CRU_RESET_REASON_SW_SYS    0x02U
+
+#define CRU_SOFT_SYSRST_KEY        0xDEADBEEFU
+
+/* Number of mmio-sockdev devices controlled by CRU */
+#define KX6625_CRU_NDEVICES        9U
+
+/* Table of mmio-sockdev devices under CRU control.
+ * Bit position in CLK_EN0/RST_CTRL0 == array index.
+ * Addresses must match the -device mmio-sockdev,addr=… command-line options. */
+typedef struct {
+    const char *name;
+    uint64_t    base;
+    uint64_t    end;    /* exclusive upper bound */
+} KX6625CruEntry;
+
+static const KX6625CruEntry kx6625_cru_devices[KX6625_CRU_NDEVICES] = {
+    { "console_uart", 0x40004000UL, 0x40005000UL },  /* bit 0 */
+    { "dma",          0x40005000UL, 0x40006000UL },  /* bit 1 */
+    { "timer0",       0x40006000UL, 0x40007000UL },  /* bit 2 */
+    { "dma_demo",     0x40007000UL, 0x40008000UL },  /* bit 3 */
+    { "crc",          0x40008000UL, 0x40009000UL },  /* bit 4 */
+    { "wdt",          0x40009000UL, 0x4000A000UL },  /* bit 5 */
+    { "sv_timer",     0x4000B000UL, 0x4000C000UL },  /* bit 6 */
+    { "hsm",          0x4000C000UL, 0x4000D000UL },  /* bit 7 */
+    { "otp",          0x4000D000UL, 0x4000E000UL },  /* bit 8 */
+};
+
 /* ── Machine state ─────────────────────────────────────────────────────── */
 struct KX6625MachineState {
     MachineState parent;
@@ -130,6 +178,7 @@ struct KX6625MachineState {
     MemoryRegion flash[KX6625_FLASH_COUNT];   /* one slot per flash region */
     MemoryRegion sram[KX6625_SRAM_COUNT];     /* one slot per SRAM region  */
     MemoryRegion sysctrl_mmio;                /* SYSCTRL native MMIO region */
+    MemoryRegion cru_mmio;                    /* CRU native MMIO region */
     MemoryRegion cpu1_board_mem;              /* alias of system_memory for CPU1 */
     Clock       *sysclk;
     Clock       *refclk;
@@ -149,9 +198,114 @@ struct KX6625MachineState {
     uint32_t     sysctrl_devctl_ctrl;
     uint32_t     sysctrl_devctl_status;
     uint32_t     sysctrl_devctl_error;
+    /* CRU state */
+    uint32_t     cru_clk_en0;       /* CLK_EN0: bit N=clock enabled for device N */
+    uint32_t     cru_rst_ctrl0;     /* RST_CTRL0: bit N=reset deasserted (device released) */
+    uint32_t     cru_reset_reason;  /* retention register: survives Level-1 reset */
 };
 
 OBJECT_DECLARE_SIMPLE_TYPE(KX6625MachineState, KX6625_MACHINE)
+
+/* ── CRU: access guard (called by mmio-sockdev before every TCP forward) ── */
+
+static bool kx6625_cru_check_access(void *opaque, uint64_t phys_addr)
+{
+    KX6625MachineState *s = KX6625_MACHINE(opaque);
+    unsigned i;
+
+    for (i = 0; i < KX6625_CRU_NDEVICES; i++) {
+        if (phys_addr >= kx6625_cru_devices[i].base &&
+            phys_addr <  kx6625_cru_devices[i].end) {
+            uint32_t bit = 1U << i;
+            /* Access allowed only if clock enabled AND reset deasserted */
+            return (s->cru_clk_en0  & bit) &&
+                   (s->cru_rst_ctrl0 & bit);
+        }
+    }
+    /* Address not under CRU control: allow by default */
+    return true;
+}
+
+/* ── CRU: MMIO register read/write ───────────────────────────────────── */
+
+static uint64_t kx6625_cru_read(void *opaque, hwaddr offset, unsigned size)
+{
+    KX6625MachineState *s = KX6625_MACHINE(opaque);
+
+    switch (offset) {
+    case CRU_OFF_ID:           return CRU_ID_VALUE;
+    case CRU_OFF_VERSION:      return CRU_VERSION_VALUE;
+    case CRU_OFF_CLK_EN0:      return s->cru_clk_en0;
+    case CRU_OFF_CLK_EN1:      return 0U;
+    case CRU_OFF_RST_CTRL0:    return s->cru_rst_ctrl0;
+    case CRU_OFF_RST_CTRL1:    return 0U;
+    case CRU_OFF_RESET_REASON: return s->cru_reset_reason;
+    case CRU_OFF_SOFT_SYSRST_REQ: return 0U;  /* WO: reads return 0 */
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "kx6625: CRU: unimplemented read at offset 0x%x\n",
+                      (unsigned)offset);
+        return 0U;
+    }
+}
+
+static void kx6625_cru_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
+{
+    KX6625MachineState *s = KX6625_MACHINE(opaque);
+
+    switch (offset) {
+    case CRU_OFF_CLK_EN0:
+        s->cru_clk_en0 = (uint32_t)value;
+        info_report("kx6625: CRU: CLK_EN0 = 0x%08x", s->cru_clk_en0);
+        break;
+    case CRU_OFF_CLK_EN1:
+        /* reserved, ignore */
+        break;
+    case CRU_OFF_RST_CTRL0:
+        s->cru_rst_ctrl0 = (uint32_t)value;
+        info_report("kx6625: CRU: RST_CTRL0 = 0x%08x", s->cru_rst_ctrl0);
+        break;
+    case CRU_OFF_RST_CTRL1:
+        /* reserved, ignore */
+        break;
+    case CRU_OFF_RESET_REASON:
+        /* RO: ignore firmware writes */
+        break;
+    case CRU_OFF_SOFT_SYSRST_REQ:
+        if ((uint32_t)value == CRU_SOFT_SYSRST_KEY) {
+            info_report("kx6625: CRU: software system reset requested");
+            s->cru_reset_reason = CRU_RESET_REASON_SW_SYS;
+            qemu_system_reset_request(SHUTDOWN_CAUSE_SUBSYSTEM_RESET);
+        }
+        break;
+    default:
+        qemu_log_mask(LOG_UNIMP,
+                      "kx6625: CRU: unimplemented write at offset 0x%x value=0x%"PRIx64"\n",
+                      (unsigned)offset, value);
+        break;
+    }
+}
+
+static const MemoryRegionOps kx6625_cru_ops = {
+    .read       = kx6625_cru_read,
+    .write      = kx6625_cru_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4,
+    },
+};
+
+static void kx6625_cru_init_state(KX6625MachineState *s)
+{
+    /* Start with all devices gated (clock disabled, held in reset).
+     * Firmware must write CLK_EN0 and RST_CTRL0 before accessing any device.
+     * reset_reason is a retention register: initialised to POR value here,
+     * and NOT cleared on subsequent system resets (only on power-on). */
+    s->cru_clk_en0     = 0x0U;
+    s->cru_rst_ctrl0   = 0x0U;
+    s->cru_reset_reason = CRU_RESET_REASON_POR;
+}
 
 /* ── SYSCTRL MemoryRegionOps ───────────────────────────────────────────── */
 
@@ -596,6 +750,7 @@ static void kx6625_init(MachineState *machine)
     int           i;
 
     kx6625_sysctrl_init_state(s);
+    kx6625_cru_init_state(s);
 
     /* Fixed-frequency clocks (no migration needed) */
     s->sysclk = clock_new(OBJECT(machine), "SYSCLK");
@@ -692,6 +847,15 @@ static void kx6625_init(MachineState *machine)
                           "kx6625.sysctrl", KX6625_SYSCTRL_SIZE);
     memory_region_add_subregion_overlap(system_memory, KX6625_SYSCTRL_BASE,
                                         &s->sysctrl_mmio, 1);
+
+    /* CRU native MMIO — overlaps the peripheral stub with higher priority */
+    memory_region_init_io(&s->cru_mmio, NULL, &kx6625_cru_ops, s,
+                          "kx6625.cru", KX6625_CRU_SIZE);
+    memory_region_add_subregion_overlap(system_memory, KX6625_CRU_BASE,
+                                        &s->cru_mmio, 1);
+
+    /* Install CRU access guard on mmio-sockdev (must be after struct init) */
+    mmio_sockdev_register_cru_guard(kx6625_cru_check_access, s);
 
     /* Register Cortex-M reset handling, then preload flash from Intel HEX.
      * The HEX file is treated as an already-programmed flash image: QEMU fills

@@ -1,0 +1,114 @@
+# =============================================================================
+# CRU — Clock Reset Unit  (KX6625 native MMIO block, 0x4000F000 – 0x4000FFFF)
+# =============================================================================
+#
+# The CRU is implemented as a QEMU-native MemoryRegionOps block inside
+# scripts/qemu-fork/hw/arm/kx6625.c.  It has no mmio-sockdev transport; there
+# is no Python back-end.
+#
+# Every mmio-sockdev peripheral is gated by the CRU.  Before accessing any
+# device, firmware must:
+#   1. Enable the device clock  : CRU_BASE + CLK_EN0  |= (1 << dev_bit)
+#   2. Release the device reset : CRU_BASE + RST_CTRL0 |= (1 << dev_bit)
+#
+# Device bit assignments in CLK_EN0 / RST_CTRL0
+# ───────────────────────────────────────────────
+#   Bit 0  console_uart  0x40004000
+#   Bit 1  dma           0x40005000
+#   Bit 2  timer0        0x40006000
+#   Bit 3  dma_demo      0x40007000
+#   Bit 4  crc           0x40008000
+#   Bit 5  wdt           0x40009000
+#   Bit 6  sv_timer      0x4000B000
+#   Bit 7  hsm           0x4000C000
+#   Bit 8  otp           0x4000D000
+
+name:        cru
+description: "Clock Reset Unit — device clock gating and reset control"
+base_addr:   0x4000F000
+size:        0x1000
+native:      true        # QEMU-native MMIO block; no mmio-sockdev transport
+spec:        cru.yaml    # this file
+
+registers:
+  - name:     ID
+    offset:   0x00
+    access:   R
+    reset:    0x31555243   # 'CRU1' little-endian
+    description: "Device identifier"
+
+  - name:     VERSION
+    offset:   0x04
+    access:   R
+    reset:    0x00010000
+    description: "Hardware version (major.minor.patch)"
+
+  - name:     CLK_EN0
+    offset:   0x08
+    access:   RW
+    reset:    0x00000000
+    description: >
+      Clock enable register for devices 0–8.
+      Bit N=1 enables the clock for device N.
+      Must be set before accessing the device; clear to save power.
+    fields:
+      - { name: CLK_CONSOLE_UART, bit: 0 }
+      - { name: CLK_DMA,          bit: 1 }
+      - { name: CLK_TIMER0,       bit: 2 }
+      - { name: CLK_DMA_DEMO,     bit: 3 }
+      - { name: CLK_CRC,          bit: 4 }
+      - { name: CLK_WDT,          bit: 5 }
+      - { name: CLK_SV_TIMER,     bit: 6 }
+      - { name: CLK_HSM,          bit: 7 }
+      - { name: CLK_OTP,          bit: 8 }
+
+  - name:     CLK_EN1
+    offset:   0x0C
+    access:   RW
+    reset:    0x00000000
+    description: "Reserved for future devices 9–31 (reads 0, writes ignored)"
+
+  - name:     RST_CTRL0
+    offset:   0x10
+    access:   RW
+    reset:    0x00000000
+    description: >
+      Reset control for devices 0–8.
+      Bit N=0 holds the device in reset (default at POR).
+      Bit N=1 releases the device from reset.
+      Both CLK_EN0 and RST_CTRL0 bit must be set to allow device access.
+    fields:
+      - { name: RST_CONSOLE_UART, bit: 0 }
+      - { name: RST_DMA,          bit: 1 }
+      - { name: RST_TIMER0,       bit: 2 }
+      - { name: RST_DMA_DEMO,     bit: 3 }
+      - { name: RST_CRC,          bit: 4 }
+      - { name: RST_WDT,          bit: 5 }
+      - { name: RST_SV_TIMER,     bit: 6 }
+      - { name: RST_HSM,          bit: 7 }
+      - { name: RST_OTP,          bit: 8 }
+
+  - name:     RST_CTRL1
+    offset:   0x14
+    access:   RW
+    reset:    0x00000000
+    description: "Reserved for future devices 9–31 (reads 0, writes ignored)"
+
+  - name:     RESET_REASON
+    offset:   0x18
+    access:   R
+    reset:    0x00000000
+    description: >
+      Retention register — survives Level-1 system resets, cleared only on POR.
+      0 = Power-on reset (POR)
+      1 = Watchdog timeout reset
+      2 = Software system reset (SOFT_SYSRST_REQ)
+
+  - name:     SOFT_SYSRST_REQ
+    offset:   0x1C
+    access:   W
+    reset:    0x00000000
+    description: >
+      Write the magic value 0xDEADBEEF to request a software system reset.
+      Sets RESET_REASON = 2, then triggers QEMU subsystem reset.
+      All other write values are ignored.  Reads return 0.

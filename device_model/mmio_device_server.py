@@ -1,39 +1,74 @@
 #!/usr/bin/env python3
 """
-MMIO Device Server — transport + dispatch layer.
-=================================================
+MMIO Device Server — transport + dispatch layer for KX6625 peripheral models.
+=============================================================================
 
 Architecture
 ------------
 
-  ┌─────────────────────────────────────────────────────────────────────────────┐
-  │  RWServer (:7890/:7892/:7894)     IRQServer (:7891/:7895)                  │ Transport
-  │  TCP + binary MMIO protocol      TCP + IRQ injection channel               │
-  └──────────────────┬────────────────────────────┬───────────────────────────┘
-                     │ abs_addr = base + offset    │ per-device IRQController
-  ┌──────────────────▼────────────────────────────▼───────────────────────────┐
-  │                               MMIOBus                                     │ Dispatch
-  │           abs_addr → find registered device → compute offset              │
-  └───────────┬────────────────────────┬───────────────────────┬──────────────┘
-  ┌───────────▼───────────┐  ┌─────────▼──────────┐  ┌─────────▼──────────┐
-  │  ConsoleUartDevice    │  │     DmaDevice       │  │    TimerDevice     │ Models
-  │  @ 0x10020000         │  │     @ 0x10030000    │  │    @ 0x10040000    │
-  │  (uart_model.py)      │  │     (dma_model.py)  │  │    (timer_model.py)│
-  └───────────────────────┘  └────────────────────┘  └────────────────────┘
+  QEMU kx6625 machine (scripts/qemu-fork/hw/arm/kx6625.c)
+    │  one TCP chardev pair per mmio-sockdev instance
+    ▼
+  ┌──────────────────────────────────────────────────────────────────────────┐
+  │  Transport servers (this file)                                           │
+  │  RWServer        — MMIO R/W channel (one per device, QEMU → Python)     │
+  │  IRQServer       — IRQ injection channel (Python → QEMU, per device)    │
+  │  TickServer      — virtual-clock tick channel (QEMU → Python)           │
+  │  MemServer       — bus-master DMA memory channel (Python ↔ QEMU RAM)    │
+  │  RstServer       — WDT system-reset channel (Python → QEMU)            │
+  │  CruNotifyServer — CRU device-reset notifications (QEMU → Python, opt) │
+  └──────────────────────────────┬───────────────────────────────────────────┘
+                                 │ absolute-address dispatch
+  ┌──────────────────────────────▼───────────────────────────────────────────┐
+  │  MMIOBus  (address-range router → MMIODevice instances)                  │
+  └─┬──────┬──────┬─────────┬─────┬─────┬─────┬─────┬──────────────────────┘
+    │      │      │         │     │     │     │     │
+  UART   DMA  Timer  DmaDemo CRC  WDT  HSM  OTP  FlashCtrl
+ 40004  40005  40006   40007 40008 40009 4000C 4000D  4000E   (base ×0x1000)
+
+  Native QEMU devices (no Python model, implemented in kx6625.c):
+    SYSCTRL @ 0x4000A000,  CRU @ 0x4000F000
+
+  SystemVerilog bridge (separate sv_timer_bridge process, ports 7906/7907/7912):
+    sv_timer @ 0x4000B000
+
+Port assignments (all 127.0.0.1):
+  UART      RW=7890  IRQ=7891  TERM=7904
+  DMA       RW=7892  IRQ=7893  MEM=7897  TICK=7905
+  Timer     RW=7894  IRQ=7895  TICK=7896
+  DmaDemo   RW=7898  IRQ=7899
+  CRC       RW=7900
+  WDT       RW=7901  IRQ=7902  RST=7903
+  sv_timer  RW=7906  IRQ=7907  MEM=7912  (sv_timer_bridge, not this server)
+  HSM       RW=7908  IRQ=7909
+  OTP       RW=7910  IRQ=7911
+  FlashCtrl RW=7913  IRQ=7914  MEM=7915
+  DFlash    RW=7916
+  CRU-NOTIFY=7917  (optional; not yet wired in e2e_test.sh / run_interactive.sh)
 
 Adding a new device
 -------------------
 1. Create ``device_model/<name>_model.py`` subclassing ``MMIODevice``.
-2. Import it here and register it on the bus in ``main()``.
-3. Add a matching ``-chardev``/``-device`` pair to the QEMU command line.
+2. Register it in ``device_model/soc_top.py`` (``kx6625_default()``).
+3. Add matching ``-chardev``/``-device`` pairs to the QEMU command lines in
+   ``scripts/e2e_test.sh`` and ``scripts/run_interactive.sh``.
 
-R/W Protocol  (QEMU → Python, per mmio-sockdev instance)
-  Read:   'R'(1B) | master_id(1B) | offset(4B LE) | size(1B)  →  data(sizeB LE)
-  Write:  'W'(1B) | master_id(1B) | offset(4B LE) | size(1B) | data(sizeB LE)
-IRQ Protocol  (Python → QEMU, shared irq-chardev)
-  'I'(1B) | irq_idx(1B) | level(1B)
-  irq_idx: index of the IRQ output line on the mmio-sockdev (0-based)
-  level:   1 = assert, 0 = deassert
+Wire protocols
+--------------
+R/W  (QEMU → Python, per mmio-sockdev chardev)
+  Read:  'R'(1B) | master_id(1B) | offset(4B LE) | size(1B)
+         ← data(sizeB LE)
+  Write: 'W'(1B) | master_id(1B) | offset(4B LE) | size(1B) | data(sizeB LE)
+         ← next_event_ns(8B LE)  — 0: no event; >0: DES tick at that virtual time
+IRQ  (Python → QEMU, irq-chardev)
+  'I'(1B) | irq_idx(1B) | level(1B)   — level: 1=assert, 0=deassert
+Tick  (QEMU → Python, tick-chardev)
+  'T'(1B) | vtime_ns(8B LE)
+MEM  (Python ↔ QEMU, mem-chardev — bus-master DMA)
+  Write: 'M'(1B) | 'W'(1B) | phys_addr(8B LE) | length(4B LE) | data(lengthB)
+  Read:  'M'(1B) | 'R'(1B) | phys_addr(8B LE) | length(4B LE)  ← data(lengthB)
+RST  (Python → QEMU, rst-chardev)
+  any byte → QEMU calls qemu_system_reset_request()
 """
 
 from __future__ import annotations
@@ -568,6 +603,104 @@ class RstServer:
 
 
 # ---------------------------------------------------------------------------
+# Transport: CRU notify channel  (QEMU CRU → Python, optional)
+# ---------------------------------------------------------------------------
+
+class CruNotifyServer:
+    """
+    Accepts QEMU's cru-notify-chardev TCP connection.
+
+    Receives 'D'(1B) | dev_idx(1B) | action(1B) notifications from the QEMU
+    CRU whenever a device reset state changes.
+
+    action values:
+      0x01 = device held in reset  (RST_CTRL bit cleared)
+      0x02 = device released from reset  (RST_CTRL bit set)
+
+    Dispatches to the device's on_device_reset() callback.
+    """
+
+    _MSG_SIZE = 3   # 'D'(1B) + dev_idx(1B) + action(1B)
+    ACTION_ASSERT   = 0x01
+    ACTION_DEASSERT = 0x02
+
+    def __init__(self, port: int, device_map: dict) -> None:
+        """
+        @port:       TCP port to listen on.
+        @device_map: dict mapping dev_idx (int) → MMIODevice instance.
+        """
+        self.port       = port
+        self._dev_map   = device_map
+        self._sock: Optional[socket.socket] = None
+        self._running   = False
+
+    def _handle_client(self, conn: socket.socket, addr) -> None:
+        print(f'[CRU-NOTIFY] QEMU connected from {addr}')
+        try:
+            while self._running:
+                hdr = conn.recv(self._MSG_SIZE)
+                if not hdr:
+                    break
+                if len(hdr) < self._MSG_SIZE:
+                    # accumulate remaining bytes
+                    try:
+                        hdr += recv_exact(conn, self._MSG_SIZE - len(hdr))
+                    except ConnectionError:
+                        break
+                if hdr[0] != ord('D'):
+                    print(f'[CRU-NOTIFY] unexpected byte 0x{hdr[0]:02x}', file=sys.stderr)
+                    continue
+                dev_idx = hdr[1]
+                action  = hdr[2]
+                device  = self._dev_map.get(dev_idx)
+                if device is None:
+                    print(f'[CRU-NOTIFY] unknown dev_idx={dev_idx}', file=sys.stderr)
+                    continue
+                if action == self.ACTION_ASSERT:
+                    print(f'[CRU-NOTIFY] dev[{dev_idx}] {device.name}: held in reset')
+                    device.on_device_reset()
+                elif action == self.ACTION_DEASSERT:
+                    print(f'[CRU-NOTIFY] dev[{dev_idx}] {device.name}: released from reset')
+                else:
+                    print(f'[CRU-NOTIFY] dev[{dev_idx}] unknown action=0x{action:02x}', file=sys.stderr)
+        except (ConnectionError, OSError) as exc:
+            if self._running:
+                print(f'[CRU-NOTIFY] {addr}: {exc}', file=sys.stderr)
+        finally:
+            conn.close()
+            print(f'[CRU-NOTIFY] QEMU disconnected from {addr}')
+
+    def start(self) -> None:
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(('127.0.0.1', self.port))
+        self._sock.listen(1)
+        self._running = True
+        print(f'[CRU-NOTIFY] Listening on port {self.port}')
+        try:
+            while self._running:
+                try:
+                    conn, addr = self._sock.accept()
+                    threading.Thread(
+                        target=self._handle_client,
+                        args=(conn, addr),
+                        daemon=True,
+                    ).start()
+                except OSError:
+                    if self._running:
+                        print('[CRU-NOTIFY] accept error', file=sys.stderr)
+                    break
+        finally:
+            self.stop()
+
+    def stop(self) -> None:
+        self._running = False
+        if self._sock:
+            self._sock.close()
+            self._sock = None
+
+
+# ---------------------------------------------------------------------------
 # System reset coordinator
 # ---------------------------------------------------------------------------
 
@@ -600,6 +733,14 @@ class SystemResetManager:
             print('[SYS] WARNING: rst-chardev not connected — '
                   'QEMU reset not sent.',
                   file=sys.stderr)
+
+    def software_system_reset(self) -> None:
+        """Called when QEMU's CRU processes a SOFT_SYSRST_REQ write.
+        Resets all Python device volatile state then waits for QEMU to
+        deliver the reset via the existing rst-chardev channel."""
+        print('[SYS] Software system reset: resetting all device volatile state...')
+        for _base, _size, device in self._bus._entries:
+            device.on_reset()
 
 
 def main() -> None:

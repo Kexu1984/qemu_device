@@ -7,6 +7,18 @@
 # Import in scripts or tests that need symbolic device constants:
 #
 #     from device_model.generated.device_consts import CONSOLE_UART_BASE
+
+# ── Bus master IDs (from spec/soc.yaml) ─────────────────────────────────────
+MASTER_ID_CPU0                     = 0x00  # Cortex-M4F CPU0
+MASTER_ID_CPU1                     = 0x01  # Cortex-M4F CPU1
+MASTER_ID_DMA                      = 0x10  # Python DMA controller bus master
+MASTER_ID_HSM                      = 0x11  # Python HSM internal DMA bus master
+MASTER_ID_FLASH_CTRL               = 0x12  # Python FLASH controller bus master
+MASTER_ID_SV_DMA                   = 0x20  # SystemVerilog DMA prototype bus master
+MASTER_ID_SYSCTRL                  = 0xF0  # Native QEMU SYSCTRL privileged SoC master
+MASTER_ID_QEMU_INTERNAL            = 0xFE  # Generic QEMU internal access with no explicit SoC master
+MASTER_ID_UNKNOWN                  = 0xFF  # Unknown or legacy bus master
+
 # ── CONSOLE_UART ────────────────────────────────────────────────
 # Console UART — byte-at-a-time character output + one-shot IRQ
 CONSOLE_UART_BASE         = 0x40004000
@@ -137,6 +149,26 @@ SYSCTRL_DEVCTL_RDATA_REG                 = 0x4000A048  # offset 0x0048  R  Indir
 SYSCTRL_DEVCTL_CTRL_REG                  = 0x4000A04C  # offset 0x004C  RW  Indirect access control. bit0=START (self-clears); bit1=READ; bit2=WRITE. Exactly one of READ/WRITE must be set with START.
 SYSCTRL_DEVCTL_STATUS_REG                = 0x4000A050  # offset 0x0050  R  Indirect access status. bit0=BUSY; bit1=DONE; bit2=ERROR; bit3=ADDR_ALIGN_ERR; bit4=ADDR_RANGE_ERR; bit5=BUS_ERROR.
 SYSCTRL_DEVCTL_ERROR_REG                 = 0x4000A054  # offset 0x0054  R  Indirect access last error code. 0=NONE; 1=BAD_CTRL; 2=ADDR_ALIGN; 3=ADDR_RANGE; 4=BUS_ERROR.
+
+# ── CRU ─────────────────────────────────────────────────────────
+# Clock Reset Unit — device clock gating and reset control (QEMU-native)
+CRU_BASE         = 0x4000F000
+CRU_SIZE         = 0x1000
+CRU_NATIVE_MMIO  = True
+
+# Registers
+CRU_ID_REG                               = 0x4000F000  # offset 0x0000  R  Device identifier
+CRU_VERSION_REG                          = 0x4000F004  # offset 0x0004  R  Hardware version (major.minor.patch)
+CRU_CLK_EN0_REG                          = 0x4000F008  # offset 0x0008  RW  Clock enable register for devices 0–8. Bit N=1 enables the clock for device N. Must be set before accessing the device; clear to save power.
+
+CRU_CLK_EN1_REG                          = 0x4000F00C  # offset 0x000C  RW  Reserved for future devices 9–31 (reads 0, writes ignored)
+CRU_RST_CTRL0_REG                        = 0x4000F010  # offset 0x0010  RW  Reset control for devices 0–8. Bit N=0 holds the device in reset (default at POR). Bit N=1 releases the device from reset. Both CLK_EN0 and RST_CTRL0 bit must be set to allow device access.
+
+CRU_RST_CTRL1_REG                        = 0x4000F014  # offset 0x0014  RW  Reserved for future devices 9–31 (reads 0, writes ignored)
+CRU_RESET_REASON_REG                     = 0x4000F018  # offset 0x0018  R  Retention register — survives Level-1 system resets, cleared only on POR. 0 = Power-on reset (POR) 1 = Watchdog timeout reset 2 = Software system reset (SOFT_SYSRST_REQ)
+
+CRU_SOFT_SYSRST_REQ_REG                  = 0x4000F01C  # offset 0x001C  W  Write the magic value 0xDEADBEEF to request a software system reset. Sets RESET_REASON = 2, then triggers QEMU subsystem reset. All other write values are ignored.  Reads return 0.
+
 
 # ── SV_TIMER ────────────────────────────────────────────────────
 # SystemVerilog APB peripheral subsystem — timer plus DMA prototype

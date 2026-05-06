@@ -1,16 +1,41 @@
 """
-mmio_base — Shared base classes for MMIO device models.
+mmio_base — Shared base classes and transport primitives for MMIO device models.
 
-Provides:
+Provides
+--------
+Helpers:
   recv_exact(sock, n) → bytes   — reliable socket receive helper
-  MMIODevice                    — abstract base class for all device models
-  IRQController                 — thread-safe IRQ injection into QEMU
-  MemChannel                    — bus-master DMA channel into QEMU physical memory
-  AddressSpace                  — address-based router: MMIO → bus (in-process),
-                                  other → MemChannel (QEMU physical memory via TCP)
+
+SoC clock constants (KX6625):
+  HCLK_HZ = 48_000_000          — Cortex-M4 / AHB bus clock
+  PCLK_HZ = 12_000_000          — APB peripheral clock (HCLK ÷ 4)
+  NS_PER_HCLK, NS_PER_PCLK      — nanoseconds per clock cycle
+
+Device base class:
+  MMIODevice                    — abstract base class for all peripheral models.
+                                  Subclasses implement read() / write() and
+                                  optionally on_reset() / on_device_reset() /
+                                  on_tick().  on_device_reset() is invoked by
+                                  CruNotifyServer when the CRU holds a device in
+                                  reset; by default it delegates to on_reset().
+
+Transport channel controllers (Python ↔ QEMU TCP):
+  IRQController                 — thread-safe IRQ injection into QEMU (irq-chardev)
+  MemChannel                    — bus-master DMA read/write into QEMU physical
+                                  memory (mem-chardev)
+  RstController                 — sends a byte that triggers a QEMU system reset
+                                  (rst-chardev, used by WDT)
+  UartChannel                   — TCP server that forwards the UART byte stream
+                                  to external terminal clients (port 7904)
+
+Address routing:
+  AddressSpace                  — unified accessor for bus-master devices; routes
+                                  accesses by physical address: MMIO ranges →
+                                  in-process MMIOBus, all other addresses →
+                                  MemChannel (QEMU physical memory via TCP)
 
 This module has no device-specific logic; it is imported by every device
-model (uart_model.py, dma_model.py, …) and by mmio_device_server.py.
+model (uart_model.py, dma_controller.py, …) and by mmio_device_server.py.
 """
 
 from __future__ import annotations
@@ -95,6 +120,11 @@ class MMIODevice(ABC):
 
     def on_reset(self) -> None:
         """Optional: called when the system is reset."""
+
+    def on_device_reset(self) -> None:
+        """Optional: called by CRU when this device is held in reset via RST_CTRL.
+        Default delegates to on_reset() so devices only need to override one method."""
+        self.on_reset()
 
     def on_tick(self, vtime_ns: int) -> int:
         """

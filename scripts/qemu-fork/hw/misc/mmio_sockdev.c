@@ -63,9 +63,24 @@
 #include "qemu/bswap.h"
 #include "qemu/thread.h"
 #include "qemu/timer.h"
+#include "qemu/log.h"
 #include "exec/cpu-common.h"    /* cpu_physical_memory_write/read */
 #include "sysemu/runstate.h"    /* qemu_system_reset_request / ShutdownCause */
 #include "hw/core/cpu.h"        /* current_cpu, CPUState */
+#include "hw/misc/mmio_sockdev.h"
+
+/* ── CRU access guard (optional, installed by the platform machine) ───── */
+
+static bool (*g_cru_check_fn)(void *opaque, uint64_t phys_addr);
+static void *g_cru_opaque;
+
+void mmio_sockdev_register_cru_guard(
+    bool (*fn)(void *opaque, uint64_t phys_addr),
+    void *opaque)
+{
+    g_cru_check_fn = fn;
+    g_cru_opaque   = opaque;
+}
 
 #define TYPE_MMIO_SOCKDEV "mmio-sockdev"
 OBJECT_DECLARE_SIMPLE_TYPE(MMIOSockDevState, MMIO_SOCKDEV)
@@ -135,6 +150,7 @@ typedef struct MMIOSockDevState {
 
     /* Device properties */
     uint64_t base_addr;
+    uint64_t mmio_size;      /* MMIO region size in bytes (default 0x1000) */
     uint32_t irq_num;        /* GIC input pin for auto-connect; 0 = disabled */
     uint32_t tick_period_ms; /* virtual ms between tick messages (default 1) */
 } MMIOSockDevState;
@@ -149,6 +165,16 @@ static uint64_t mmio_sockdev_read(void *opaque, hwaddr offset, unsigned size)
     int ret;
 
     qemu_mutex_lock(&s->lock);
+
+    /* CRU access guard: block if device clock or reset is not enabled */
+    if (g_cru_check_fn &&
+        !g_cru_check_fn(g_cru_opaque, s->base_addr + (uint64_t)offset)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "mmio-sockdev: CRU guard blocked read at 0x%"PRIx64"\n",
+                      s->base_addr + (uint64_t)offset);
+        qemu_mutex_unlock(&s->lock);
+        return 0xDEAD0000ULL;
+    }
 
     /* Build request packet */
     req[0] = 'R';
@@ -200,6 +226,15 @@ static void mmio_sockdev_write(void *opaque, hwaddr offset, uint64_t value, unsi
     int ret;
 
     qemu_mutex_lock(&s->lock);
+
+    /* CRU access guard: block if device clock or reset is not enabled */
+    if (g_cru_check_fn &&
+        !g_cru_check_fn(g_cru_opaque, s->base_addr + (uint64_t)offset)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "mmio-sockdev: CRU guard blocked write at 0x%"PRIx64"\n",
+                      s->base_addr + (uint64_t)offset);
+        goto unlock;
+    }
 
     /* Build request packet */
     req[0] = 'W';
@@ -512,6 +547,7 @@ static void mmio_sockdev_irq_receive(void *opaque, const uint8_t *buf, int size)
 
 static Property mmio_sockdev_properties[] = {
     DEFINE_PROP_UINT64("addr",           MMIOSockDevState, base_addr, 0),
+    DEFINE_PROP_UINT64("size",           MMIOSockDevState, mmio_size, 0x1000),
     DEFINE_PROP_CHR("chardev",           MMIOSockDevState, chr),
     DEFINE_PROP_CHR("irq-chardev",       MMIOSockDevState, irq_chr),
     DEFINE_PROP_CHR("tick-chardev",      MMIOSockDevState, tick_chr),
@@ -546,7 +582,7 @@ static void mmio_sockdev_realize(DeviceState *dev, Error **errp)
 
     /* Set up MMIO region */
     memory_region_init_io(&s->mmio, OBJECT(s), &mmio_sockdev_ops, s,
-                          TYPE_MMIO_SOCKDEV, 0x1000);
+                          TYPE_MMIO_SOCKDEV, s->mmio_size ? s->mmio_size : 0x1000);
     sysbus_init_mmio(sbd, &s->mmio);
 
     if (s->base_addr) {

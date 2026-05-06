@@ -105,6 +105,13 @@ devices:
     native:      true        # QEMU-native MMIO block; no mmio-sockdev transport
     spec:        sysctrl.yaml
 
+  - name:        cru
+    description: "Clock Reset Unit — device clock gating and reset control (QEMU-native)"
+    base_addr:   0x4000F000
+    size:        0x1000
+    native:      true        # QEMU-native MMIO block; no mmio-sockdev transport
+    spec:        cru.yaml
+
   - name:        sv_timer
     description: "SystemVerilog APB peripheral subsystem — timer plus DMA prototype"
     base_addr:   0x4000B000

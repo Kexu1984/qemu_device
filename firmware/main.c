@@ -126,6 +126,34 @@
 #define SYSCTRL_CPU1_RELEASED     0x2U
 
 /* -----------------------------------------------------------------------
+ * CRU register definitions  (KX6625 Clock Reset Unit, native MMIO)
+ * ----------------------------------------------------------------------- */
+#define CRU_BASE                  0x4000F000U
+#define CRU_CLK_EN0_REG           (*(volatile uint32_t *)(CRU_BASE + 0x08U))
+#define CRU_CLK_EN1_REG           (*(volatile uint32_t *)(CRU_BASE + 0x0CU))
+#define CRU_RST_CTRL0_REG         (*(volatile uint32_t *)(CRU_BASE + 0x10U))
+#define CRU_RST_CTRL1_REG         (*(volatile uint32_t *)(CRU_BASE + 0x14U))
+#define CRU_RESET_REASON_REG      (*(volatile uint32_t *)(CRU_BASE + 0x18U))
+#define CRU_SOFT_SYSRST_REQ_REG   (*(volatile uint32_t *)(CRU_BASE + 0x1CU))
+
+/* Bit positions in CLK_EN0 / RST_CTRL0 */
+#define CRU_BIT_CONSOLE_UART   (1U << 0)
+#define CRU_BIT_DMA            (1U << 1)
+#define CRU_BIT_TIMER0         (1U << 2)
+#define CRU_BIT_DMA_DEMO       (1U << 3)
+#define CRU_BIT_CRC            (1U << 4)
+#define CRU_BIT_WDT            (1U << 5)
+#define CRU_BIT_SV_TIMER       (1U << 6)
+#define CRU_BIT_HSM            (1U << 7)
+#define CRU_BIT_OTP            (1U << 8)
+#define CRU_ALL_DEVICES        (0x1FFU)  /* bits 0–8 */
+
+#define CRU_RESET_REASON_POR    0x00U
+#define CRU_RESET_REASON_WDT    0x01U
+#define CRU_RESET_REASON_SW_SYS 0x02U
+#define CRU_SOFT_SYSRST_KEY     0xDEADBEEFU
+
+/* -----------------------------------------------------------------------
  * Low-level MMIO helpers
  * ----------------------------------------------------------------------- */
 static inline void mmio_write32(uint32_t addr, uint32_t value)
@@ -818,6 +846,13 @@ static void app_task(void *arg)
 {
     (void)arg;
     char cmd_buf[4];
+
+    /* ── CRU init: enable clocks and release resets for all devices ──────
+     * The CRU guard in QEMU blocks any mmio-sockdev access until both
+     * CLK_EN0 and RST_CTRL0 bits are set for the target device.  Set both
+     * registers in a single write before touching any peripheral. */
+    CRU_CLK_EN0_REG   = CRU_ALL_DEVICES;
+    CRU_RST_CTRL0_REG = CRU_ALL_DEVICES;
 
     /* Enable UART (TX-only until menu loop enables RX IRQ) */
     mmio_write32(CTRL_REG, UART_CTRL_ENABLE);
