@@ -1,7 +1,19 @@
 """
-uart_model — Console UART device model.
+uart_model — UART device model: channel server and register model.
 
-Register map (offsets from device base address, see spec/uart.yaml):
+Provides
+--------
+UartChannel
+    TCP server that broadcasts the firmware UART character stream to external
+    terminal clients (nc / uart_console.py) and delivers their keystrokes back
+    to the firmware RX FIFO.  Owned by ``ConsoleUartDevice``.
+
+ConsoleUartDevice
+    MMIO register model for the KX6625 console UART.  Translates register
+    reads/writes into terminal I/O through ``UartChannel`` and asserts a
+    one-shot TX-ready IRQ a configurable number of seconds after connect.
+
+Register map (offsets from device base, see spec/uart.yaml):
   0x00  TXDATA  W    Transmit data byte (bits [7:0] → stdout)
   0x04  STATUS  R    bit0 = TXREADY (always 1), bit1 = RXREADY (RX FIFO non-empty)
   0x08  CTRL    R/W  bit0 = ENABLE (default 1), bit1 = RX_IRQ_EN
@@ -20,18 +32,162 @@ connects, then deasserted immediately (edge-trigger).  Simulates a TX-empty IRQ.
 from __future__ import annotations
 
 import collections
+import socket
 import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 # Ensure the project root is on sys.path so sibling package imports work
 # whether this module is imported as a package or run directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from device_model.mmio_base import IRQController, IrqLine, MMIODevice, RegisterBank, UartChannel  # noqa: E402
-from device_model.tracer    import NULL_DEVICE_TRACER, DeviceTracer, Tracer                       # noqa: E402
+from device_model.mmio_base import IRQController, IrqLine, MMIODevice, RegisterBank  # noqa: E402
+from device_model.tracer    import NULL_DEVICE_TRACER, DeviceTracer, Tracer           # noqa: E402
+
+
+# ---------------------------------------------------------------------------
+# UartChannel — TCP server that exposes the UART byte stream to a terminal
+# ---------------------------------------------------------------------------
+
+class UartChannel:
+    """
+    TCP server that broadcasts the firmware UART character stream to any
+    number of external terminal clients (e.g. ``nc`` / ``uart_console.py``)
+    and delivers their keystrokes back into the firmware RX FIFO.
+
+    Architecture
+    ------------
+    ::
+
+        ConsoleUartDevice.write(TXDATA)
+             │ raw byte (LF → CRLF for terminal)
+             ▼
+        UartChannel.send(data)          — in device-model thread
+             │  (iterates client list under lock; removes dead sockets)
+             ├─► client socket 1  (e.g. nc 127.0.0.1 7904)
+             ├─► client socket 2  (e.g. uart_console.py)
+             └─► ...
+
+        UartChannel._accept_loop()      — daemon thread
+             │  accept new TCP connections on self._port
+             └─► spawns _watch_client(conn) daemon thread per client
+                  (detects clean close / RST; delivers RX bytes)
+
+    Usage (server side)::
+
+        uart_ch  = UartChannel(port=7904)
+        uart_ch.start()          # spawns accept thread; non-blocking
+        uart_dev = ConsoleUartDevice(..., uart_channel=uart_ch)
+
+    Client side::
+
+        nc 127.0.0.1 7904
+        # or:
+        python3 scripts/uart_console.py
+    """
+
+    def __init__(self, port: int, host: str = '127.0.0.1',
+                 rx_callback: Optional[Callable[[bytes], None]] = None) -> None:
+        self._host    = host
+        self._port    = port
+        self._clients: list[socket.socket] = []
+        self._lock    = threading.Lock()
+        self._server: Optional[socket.socket] = None
+        self._running = False
+        self._rx_callback = rx_callback
+
+    # ── Lifecycle ────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """Bind and listen; spawn the accept loop in a daemon thread."""
+        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server.bind((self._host, self._port))
+        self._server.listen(4)
+        self._running = True
+        print(
+            f'[UART] Terminal server on port {self._port}'
+            f' — connect: nc {self._host} {self._port}'
+        )
+        threading.Thread(target=self._accept_loop, daemon=True).start()
+
+    def stop(self) -> None:
+        """Stop accepting new connections and close the server socket."""
+        self._running = False
+        if self._server:
+            self._server.close()
+            self._server = None
+
+    # ── Accept loop ───────────────────────────────────────────────────
+
+    def _accept_loop(self) -> None:
+        while self._running:
+            try:
+                conn, addr = self._server.accept()
+            except OSError:
+                break
+            with self._lock:
+                self._clients.append(conn)
+            print(f'[UART] Terminal client connected from {addr}')
+            threading.Thread(
+                target=self._watch_client,
+                args=(conn, addr),
+                daemon=True,
+            ).start()
+
+    def _watch_client(self, conn: socket.socket, addr) -> None:
+        """Deliver RX bytes and detect client disconnection."""
+        try:
+            while True:
+                data = conn.recv(256)
+                if not data:
+                    break
+                if self._rx_callback is not None:
+                    self._rx_callback(data)
+        except OSError:
+            pass
+        finally:
+            with self._lock:
+                try:
+                    self._clients.remove(conn)
+                except ValueError:
+                    pass
+            try:
+                conn.close()
+            except OSError:
+                pass
+            print(f'[UART] Terminal client disconnected from {addr}')
+
+    # ── Device-model API ─────────────────────────────────────────────
+
+    def send(self, data: bytes) -> None:
+        """Forward *data* to all connected terminal clients.
+
+        Called from the device-model write thread; must be fast.
+        Clients that have gone away are pruned from the list silently.
+        """
+        if not data:
+            return
+        with self._lock:
+            dead: list[socket.socket] = []
+            for client in self._clients:
+                try:
+                    client.sendall(data)
+                except OSError:
+                    dead.append(client)
+            for c in dead:
+                try:
+                    self._clients.remove(c)
+                except ValueError:
+                    pass
+
+    @property
+    def connected(self) -> bool:
+        """True if at least one terminal client is currently connected."""
+        with self._lock:
+            return bool(self._clients)
 
 
 class ConsoleUartDevice(MMIODevice):

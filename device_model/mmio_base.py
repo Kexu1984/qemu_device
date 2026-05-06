@@ -1,5 +1,5 @@
 """
-mmio_base — Shared base classes and transport primitives for MMIO device models.
+mmio_base — System-level base classes and transport primitives for MMIO device models.
 
 Provides
 --------
@@ -19,20 +19,20 @@ Device base class:
                                   CruNotifyServer when the CRU holds a device in
                                   reset; by default it delegates to on_reset().
 
-Transport channel controllers (Python ↔ QEMU TCP):
+Transport channel primitives (Python ↔ QEMU TCP):
   IRQController                 — thread-safe IRQ injection into QEMU (irq-chardev)
   MemChannel                    — bus-master DMA read/write into QEMU physical
                                   memory (mem-chardev)
-  RstController                 — sends a byte that triggers a QEMU system reset
-                                  (rst-chardev, used by WDT)
-  UartChannel                   — TCP server that forwards the UART byte stream
-                                  to external terminal clients (port 7904)
 
 Address routing:
   AddressSpace                  — unified accessor for bus-master devices; routes
                                   accesses by physical address: MMIO ranges →
                                   in-process MMIOBus, all other addresses →
                                   MemChannel (QEMU physical memory via TCP)
+
+Device-specific transports live in their own modules:
+  UartChannel   → device_model/uart_model.py
+  RstController → device_model/cru_device.py  (also CruNotifyServer, SystemResetManager)
 
 This module has no device-specific logic; it is imported by every device
 model (uart_model.py, dma_controller.py, …) and by mmio_device_server.py.
@@ -46,7 +46,7 @@ import struct
 import sys
 import threading
 from abc import ABC, abstractmethod
-from typing import Callable, Dict, Optional
+from typing import Dict, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -405,227 +405,6 @@ class AddressSpace:
             self._bus.write(addr, len(data), data)
             return True
         return self._mem.dma_write(addr, data)
-
-
-# ---------------------------------------------------------------------------
-# System-reset controller  (Python → QEMU via rst-chardev)
-# ---------------------------------------------------------------------------
-
-class RstController:
-    """
-    Triggers a QEMU system reset over the rst-chardev TCP channel.
-
-    Python sends a single byte; QEMU's mmio_sockdev calls
-    ``qemu_system_reset_request(SHUTDOWN_CAUSE_SUBSYSTEM_RESET)``, which
-    reboots the firmware without exiting QEMU (even with -no-reboot).
-
-    The channel has the same connect/disconnect lifecycle as IRQController:
-    QEMU connects as client, Python holds the server-side socket and writes
-    to trigger the reset.
-    """
-
-    def __init__(self) -> None:
-        self._sock: Optional[socket.socket] = None
-        self._lock      = threading.Lock()
-        self._connected = threading.Event()
-
-    # -- called by RstServer ----------------------------------------------
-
-    def _on_connect(self, sock: socket.socket) -> None:
-        with self._lock:
-            self._sock = sock
-        self._connected.set()
-        print('[RST] rst-chardev connected')
-
-    def _on_disconnect(self) -> None:
-        with self._lock:
-            self._sock = None
-        self._connected.clear()
-        print('[RST] rst-chardev disconnected')
-
-    # -- public API -----------------------------------------------------------
-
-    def wait_connected(self, timeout: Optional[float] = None) -> bool:
-        """Block until QEMU connects the rst channel (or ``timeout`` expires)."""
-        return self._connected.wait(timeout)
-
-    def send_reset(self) -> bool:
-        """
-        Send a single byte to trigger QEMU system reset.
-
-        Returns ``True`` on success, ``False`` if the channel is not open.
-        """
-        with self._lock:
-            if self._sock is None:
-                print('[RST] send_reset: no connection — reset not sent',
-                      file=sys.stderr)
-                return False
-            try:
-                self._sock.sendall(b'\x52')   # 'R' — any byte triggers reset
-                return True
-            except OSError as exc:
-                print(f'[RST] send_reset error: {exc}', file=sys.stderr)
-                return False
-
-
-# ---------------------------------------------------------------------------
-# UartChannel — TCP server that exposes the UART byte stream to a terminal
-# ---------------------------------------------------------------------------
-
-class UartChannel:
-    """
-    TCP server that forwards the firmware UART character stream to any number
-    of external terminal clients.
-
-    Placing this in ``mmio_base`` keeps it alongside the other TCP transport
-    primitives (``IRQController``, ``MemChannel``, ``RstController``).  The
-    device model calls ``send()``; the channel handles all client multiplexing
-    and disconnection detection transparently.
-
-    Architecture
-    ------------
-    ::
-
-        ConsoleUartDevice.write(TXDATA)
-             │ raw byte (LF → CRLF for terminal)
-             ▼
-        UartChannel.send(data)          — in device-model thread
-             │  (iterates client list under lock; removes dead sockets)
-             ├──► client socket 1  (e.g. nc 127.0.0.1 7904)
-             ├──► client socket 2  (e.g. uart_console.py)
-             └──► ...
-
-        UartChannel._accept_loop()      — daemon thread
-             │  accept new TCP connections on self._port
-             └──► spawns _watch_client(conn) daemon thread per client
-                  (detects clean close / RST from client side)
-
-    The channel is **write-only** from the device side.  Any bytes sent by a
-    connected terminal client are silently discarded (RX support can be added
-    later by wiring _watch_client data back to a UART RX FIFO).
-
-    Usage
-    -----
-    Server side (``mmio_device_server.py``)::
-
-        uart_ch = UartChannel(port=7904)
-        uart_ch.start()           # spawns daemon accept thread; non-blocking
-        uart_dev = ConsoleUartDevice(..., uart_channel=uart_ch)
-
-    Client side::
-
-        nc 127.0.0.1 7904
-        # or:
-        python3 scripts/uart_console.py
-    """
-
-    def __init__(self, port: int, host: str = '127.0.0.1',
-                 rx_callback: Optional[Callable[[bytes], None]] = None) -> None:
-        self._host    = host
-        self._port    = port
-        self._clients: list[socket.socket] = []
-        self._lock    = threading.Lock()
-        self._server: Optional[socket.socket] = None
-        self._running = False
-        self._rx_callback = rx_callback   # called with received bytes from any client
-
-    # ── Lifecycle ─────────────────────────────────────────────────────────
-
-    def start(self) -> None:
-        """Bind and listen; spawn the accept loop in a daemon thread."""
-        self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server.bind((self._host, self._port))
-        self._server.listen(4)
-        self._running = True
-        print(
-            f'[UART] Terminal server on port {self._port}'
-            f' — connect: nc {self._host} {self._port}'
-        )
-        threading.Thread(target=self._accept_loop, daemon=True).start()
-
-    def stop(self) -> None:
-        """Stop accepting new connections and close the server socket."""
-        self._running = False
-        if self._server:
-            self._server.close()
-            self._server = None
-
-    # ── Accept loop ───────────────────────────────────────────────────────
-
-    def _accept_loop(self) -> None:
-        while self._running:
-            try:
-                conn, addr = self._server.accept()
-            except OSError:
-                break
-            with self._lock:
-                self._clients.append(conn)
-            print(f'[UART] Terminal client connected from {addr}')
-            threading.Thread(
-                target=self._watch_client,
-                args=(conn, addr),
-                daemon=True,
-            ).start()
-
-    def _watch_client(self, conn: socket.socket, addr) -> None:
-        """
-        Detect client disconnection and deliver RX data.
-
-        Blocks on recv() — returns empty bytes on clean close, raises OSError
-        on TCP RST.  Any data sent by the client is forwarded to rx_callback
-        if one was provided (UART RX FIFO).
-        """
-        try:
-            while True:
-                data = conn.recv(256)
-                if not data:
-                    break
-                if self._rx_callback is not None:
-                    self._rx_callback(data)
-        except OSError:
-            pass
-        finally:
-            with self._lock:
-                try:
-                    self._clients.remove(conn)
-                except ValueError:
-                    pass
-            try:
-                conn.close()
-            except OSError:
-                pass
-            print(f'[UART] Terminal client disconnected from {addr}')
-
-    # ── Device-model API ──────────────────────────────────────────────────
-
-    def send(self, data: bytes) -> None:
-        """
-        Forward *data* to all connected terminal clients.
-
-        Called from the device-model write thread; must be fast.
-        Clients that have gone away are pruned from the list silently.
-        """
-        if not data:
-            return
-        with self._lock:
-            dead: list[socket.socket] = []
-            for client in self._clients:
-                try:
-                    client.sendall(data)
-                except OSError:
-                    dead.append(client)
-            for c in dead:
-                try:
-                    self._clients.remove(c)
-                except ValueError:
-                    pass
-
-    @property
-    def connected(self) -> bool:
-        """True if at least one terminal client is currently connected."""
-        with self._lock:
-            return bool(self._clients)
 
 
 # ---------------------------------------------------------------------------

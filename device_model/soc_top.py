@@ -73,13 +73,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Transport layer + bus — imported from mmio_device_server.
 # See NOTE in module docstring about circular-import safety.
 from device_model.mmio_device_server import (   # noqa: E402
-    CruNotifyServer,
     IRQServer,
     MemServer,
     MMIOBus,
     RstServer,
     RWServer,
-    SystemResetManager,
     TickServer,
 )
 
@@ -87,11 +85,18 @@ from device_model.mmio_base import (            # noqa: E402
     AddressSpace,
     IRQController,
     MemChannel,
-    RstController,
-    UartChannel,
 )
 
-from device_model.uart_model        import ConsoleUartDevice    # noqa: E402
+from device_model.cru_device import (           # noqa: E402
+    CruNotifyServer,
+    RstController,
+    SystemResetManager,
+)
+
+from device_model.uart_model import (           # noqa: E402
+    ConsoleUartDevice,
+    UartChannel,
+)
 from device_model.timer_model       import TimerDevice          # noqa: E402
 from device_model.dma_controller    import DmaController        # noqa: E402
 from device_model.dma_client_demo   import DmaClientDemoDevice  # noqa: E402
