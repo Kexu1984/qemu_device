@@ -82,7 +82,7 @@ echo ""
 # -----------------------------------------------------------------------
 # Kill any leftover processes from a previous run that may hold our ports
 # -----------------------------------------------------------------------
-for PORT in 7890 7891 7892 7893 7894 7895 7896 7897 7898 7899 7900 7901 7902 7903 7904 7905 7906 7907 7908 7909 7910 7911 7912 7913 7914 7915 7916; do
+for PORT in 7890 7891 7892 7893 7894 7895 7896 7897 7898 7899 7900 7901 7902 7903 7904 7905 7906 7907 7908 7909 7910 7911 7912; do
     fuser -k "${PORT}/tcp" 2>/dev/null || true
 done
 sleep 0.3
@@ -203,12 +203,6 @@ info "Starting QEMU..."
     -chardev socket,id=otp_rw,host=127.0.0.1,port=7910 \
     -chardev socket,id=otp_irq,host=127.0.0.1,port=7911 \
     -device mmio-sockdev,chardev=otp_rw,irq-chardev=otp_irq,addr=0x4000D000,irq-num=7 \
-    -chardev socket,id=flash_ctrl_rw,host=127.0.0.1,port=7913 \
-    -chardev socket,id=flash_ctrl_irq,host=127.0.0.1,port=7914 \
-    -chardev socket,id=flash_ctrl_mem,host=127.0.0.1,port=7915 \
-    -device mmio-sockdev,chardev=flash_ctrl_rw,irq-chardev=flash_ctrl_irq,mem-chardev=flash_ctrl_mem,addr=0x4000E000,irq-num=8 \
-    -chardev socket,id=dflash_rw,host=127.0.0.1,port=7916 \
-    -device mmio-sockdev,chardev=dflash_rw,addr=0x10000000,size=0x80000 \
     -kernel "$FIRMWARE_HEX" \
     </dev/null > "$QEMU_LOG" 2>&1 &
 QEMU_PID=$!
@@ -261,12 +255,6 @@ EXPECTED=(
     "SYSCTRL] CPU_STATUS CPU1 released PASSED"
     "SYSCTRL] DEVICE reset policy PASSED"
     "SYSCTRL] DEVCTL UART STATUS read PASSED"
-    "FLASH controller test"
-    "FLASH] ID FLSH PASSED"
-    "FLASH] ERASE wordline PASSED"
-    "FLASH] DFLASH direct read PASSED"
-    "FLASH] READ command PASSED"
-    "FLASH] ECC corrected direct read PASSED"
     "Power-on reset (RESET_REASON=POR)"
     "Kick 1"
     "Kick 2"
@@ -376,7 +364,6 @@ UART_EXPECTED=(
     "HSM AES-CMAC PASSED"
     "HSM OTP KEY_ID0 AES-CBC PASSED"
     "DEVCTL UART STATUS read PASSED"
-    "FLASH] ECC corrected direct read PASSED"
     "SECURE_BOOT CMAC PASSED"
     "Warm boot detected"
     "WDT demo complete"

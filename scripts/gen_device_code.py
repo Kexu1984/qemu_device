@@ -184,7 +184,7 @@ _C_NVIC_REGS = """\
 """
 
 
-def generate_c_header(cfg: dict, config_path: str) -> str:
+def generate_c_header(cfg: dict, config_path: str, soc_cfg: dict | None = None) -> str:
     lines: list[str] = []
 
     lines.append(_C_HEADER_BANNER.format(config_path=config_path))
@@ -197,6 +197,16 @@ def generate_c_header(cfg: dict, config_path: str) -> str:
         )
     )
     lines.append(_C_NVIC_REGS)
+
+    masters = _bus_masters(soc_cfg)
+    if masters:
+        lines.append("/* ── Bus master IDs (from spec/soc.yaml) ───────────────────────────── */\n")
+        for master in masters:
+            name = _upper(master["name"])
+            master_id = _parse_int(master["id"])
+            desc = master.get("description", "")
+            lines.append(f"#define MASTER_ID_{name:<24} {_hex(master_id, 2)}U   /* {desc} */\n")
+        lines.append("\n")
 
     for dev in cfg["devices"]:
         prefix     = _upper(dev["name"])
@@ -271,8 +281,18 @@ _PY_CONSTS_BANNER = """\
 """
 
 
-def generate_python_consts(cfg: dict, config_path: str) -> str:
+def generate_python_consts(cfg: dict, config_path: str, soc_cfg: dict | None = None) -> str:
     lines: list[str] = [_PY_CONSTS_BANNER.format(config_path=config_path)]
+
+    masters = _bus_masters(soc_cfg)
+    if masters:
+        lines.append("\n# ── Bus master IDs (from spec/soc.yaml) ─────────────────────────────────────\n")
+        for master in masters:
+            name = _upper(master["name"])
+            master_id = _parse_int(master["id"])
+            desc = master.get("description", "")
+            lines.append(f"MASTER_ID_{name:<24} = {_hex(master_id, 2)}  # {desc}\n")
+        lines.append("\n")
 
     for dev in cfg["devices"]:
         prefix      = _upper(dev["name"])
@@ -360,6 +380,11 @@ def _parse_int(val: object) -> int:
     return int(val)
 
 
+def _bus_masters(soc_cfg: dict | None) -> list[dict[str, Any]]:
+    """Return the SoC-level bus master table, if present."""
+    return list((soc_cfg or {}).get("bus_masters", []))
+
+
 def generate_soc_header(soc_cfg: dict, dev_cfg: dict,
                         soc_path: str, dev_path: str) -> str:
     """
@@ -391,6 +416,19 @@ def generate_soc_header(soc_cfg: dict, dev_cfg: dict,
     lines.append(f"#define {soc_n}_CPU_BITBAND     {bitband}"
                  "  /* 0 = disabled, 1 = enabled */\n")
     lines.append("\n")
+
+    # ── Bus masters ──────────────────────────────────────────────────────
+    masters = _bus_masters(soc_cfg)
+    if masters:
+        lines.append(f"/* ── Bus master IDs {sep} */\n")
+        for master in masters:
+            name = _soc_upper(master["name"])
+            master_id = _parse_int(master["id"])
+            desc = master.get("description", "")
+            lines.append(
+                f"#define {soc_n}_MASTER_ID_{name:<24} 0x{master_id:02X}U   /* {desc} */\n"
+            )
+        lines.append("\n")
 
     # ── Clocks ───────────────────────────────────────────────────────────
     lines.append(f"/* ── Clocks {sep} */\n")
@@ -529,6 +567,10 @@ def main() -> None:
         sys.exit(f"ERROR: config file not found: {config_path}")
 
     cfg = _load_config(config_path)
+    soc_cfg = None
+    if soc_config_path.exists():
+        with open(soc_config_path, encoding="utf-8") as fh:
+            soc_cfg = yaml.safe_load(fh)
 
     # Relative path for display inside generated files
     try:
@@ -538,13 +580,13 @@ def main() -> None:
 
     # ── Generate C header ──────────────────────────────────────────────────
     c_out_path.parent.mkdir(parents=True, exist_ok=True)
-    c_header = generate_c_header(cfg, str(display_path))
+    c_header = generate_c_header(cfg, str(display_path), soc_cfg)
     c_out_path.write_text(c_header, encoding="utf-8")
     print(f"[gen] C header       → {c_out_path}")
 
     # ── Generate Python constants ──────────────────────────────────────────
     py_out_path.parent.mkdir(parents=True, exist_ok=True)
-    py_consts = generate_python_consts(cfg, str(display_path))
+    py_consts = generate_python_consts(cfg, str(display_path), soc_cfg)
     py_out_path.write_text(py_consts, encoding="utf-8")
     print(f"[gen] Python consts  → {py_out_path}")
 
@@ -552,9 +594,6 @@ def main() -> None:
     if not soc_config_path.exists():
         print(f"[gen] WARNING: SoC config not found: {soc_config_path} — skipping kx6625_soc.h")
     else:
-        with open(soc_config_path, encoding="utf-8") as fh:
-            soc_cfg = yaml.safe_load(fh)
-
         try:
             soc_display = soc_config_path.relative_to(repo_root)
         except ValueError:

@@ -29,6 +29,51 @@ cpu:
   num_irq:        16          # External interrupt lines wired to NVIC
   enable_bitband: false       # ARMv7-M optional bit-band region
 
+# ── Bus masters ─────────────────────────────────────────────────────────────
+#
+# Every block that can actively initiate a bus transaction owns a stable master
+# ID. CPU-originated MMIO uses the CPU index. Native QEMU/SoC controllers pass
+# their ID through MemTxAttrs.requester_id. Python device models use these IDs
+# when routing in-process MMIO through AddressSpace, and MEM-channel traffic
+# carries the same ID for future bus firewall/fault attribution.
+#
+bus_masters:
+  - name:        cpu0
+    id:          0x00
+    description: "Cortex-M4F CPU0"
+
+  - name:        cpu1
+    id:          0x01
+    description: "Cortex-M4F CPU1"
+
+  - name:        dma
+    id:          0x10
+    description: "Python DMA controller bus master"
+
+  - name:        hsm
+    id:          0x11
+    description: "Python HSM internal DMA bus master"
+
+  - name:        flash_ctrl
+    id:          0x12
+    description: "Python FLASH controller bus master"
+
+  - name:        sv_dma
+    id:          0x20
+    description: "SystemVerilog DMA prototype bus master"
+
+  - name:        sysctrl
+    id:          0xF0
+    description: "Native QEMU SYSCTRL privileged SoC master"
+
+  - name:        qemu_internal
+    id:          0xFE
+    description: "Generic QEMU internal access with no explicit SoC master"
+
+  - name:        unknown
+    id:          0xFF
+    description: "Unknown or legacy bus master"
+
 # ── Clocks ───────────────────────────────────────────────────────────────────
 #
 # Each entry produces:
