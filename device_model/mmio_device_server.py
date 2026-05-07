@@ -1,30 +1,25 @@
 #!/usr/bin/env python3
 """
-MMIO Device Server — transport + dispatch layer for KX6625 peripheral models.
+MMIO Device Server — transport boundary for the Python Device Domain.
 =============================================================================
 
 Architecture
 ------------
 
-  QEMU kx6625 machine (scripts/qemu-fork/hw/arm/kx6625.c)
-    │  one TCP chardev pair per mmio-sockdev instance
-    ▼
-  ┌──────────────────────────────────────────────────────────────────────────┐
-  │  Transport servers (this file)                                           │
-  │  RWServer        — MMIO R/W channel (one per device, QEMU → Python)     │
-  │  IRQServer       — IRQ injection channel (Python → QEMU, per device)    │
-  │  TickServer      — virtual-clock tick channel (QEMU → Python)           │
-  │  MemServer       — bus-master DMA memory channel (Python ↔ QEMU RAM)    │
-  │  RstServer       — WDT system-reset channel (Python → QEMU)            │
-  │  CruNotifyServer — CRU device-reset notifications (QEMU → Python, opt) │
-  └──────────────────────────────┬───────────────────────────────────────────┘
-                                 │ absolute-address dispatch
-  ┌──────────────────────────────▼───────────────────────────────────────────┐
-  │  MMIOBus  (address-range router → MMIODevice instances)                  │
-  └─┬──────┬──────┬─────────┬─────┬─────┬─────┬─────┬──────────────────────┘
-    │      │      │         │     │     │     │     │
-  UART   DMA  Timer  DmaDemo CRC  WDT  HSM  OTP  FlashCtrl
- 40004  40005  40006   40007 40008 40009 4000C 4000D  4000E   (base ×0x1000)
+    QEMU kx6625 machine (scripts/qemu-fork/hw/arm/kx6625.c)
+        - one TCP chardev set per mmio-sockdev instance
+
+    PythonDeviceDomain transport servers (this file)
+        - RWServer: MMIO R/W channel (QEMU → Python)
+        - IRQServer: IRQ injection channel (Python → QEMU)
+        - TickServer: virtual-clock tick channel (QEMU → Python)
+        - MemServer: bus-master DMA memory channel (Python ↔ QEMU RAM)
+        - RstServer: system-reset channel (Python → QEMU)
+        - CruNotifyServer: CRU device-reset notifications (QEMU → Python, optional)
+
+    PeripheralBus
+        - absolute-address dispatcher to MMIODevice instances
+        - devices are abstract model instances, not architecture-level domains
 
   Native QEMU devices (no Python model, implemented in kx6625.c):
     SYSCTRL @ 0x4000A000,  CRU @ 0x4000F000
@@ -84,7 +79,7 @@ from typing import Optional
 # Ensure project root is on sys.path for sibling package imports.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from device_model.mmio_base         import AddressSpace, IRQController, MemChannel, MMIODevice, recv_exact  # noqa: E402
+from device_model.mmio_base         import IRQController, MemChannel, MMIODevice, recv_exact  # noqa: E402
 from device_model.uart_model        import ConsoleUartDevice                      # noqa: E402
 from device_model.timer_model       import TimerDevice                            # noqa: E402
 from device_model.dma_controller    import DmaController                          # noqa: E402
@@ -98,10 +93,13 @@ from device_model.tracer            import Tracer                               
 # Address-range dispatcher
 # ---------------------------------------------------------------------------
 
-class MMIOBus:
+class PeripheralBus:
     """
+    Python-domain peripheral transaction bus.
+
     Maps absolute address ranges to ``MMIODevice`` instances and dispatches
-    read/write operations.
+    read/write operations. This is the Python-side counterpart of the
+    peripheral transaction path shown in the architecture diagram.
 
     The ``RWServer`` adds the mmio-sockdev base address to the QEMU-supplied
     offset before calling ``read()``/``write()``, so all addresses here are
@@ -111,7 +109,7 @@ class MMIOBus:
     -------
     ::
 
-        bus = MMIOBus()
+        bus = PeripheralBus()
         bus.register(0x10020000, 0x1000, ConsoleUartDevice(...))
         bus.register(0x10030000, 0x1000, DmaDevice(...))
     """
@@ -177,6 +175,10 @@ class MMIOBus:
         return 0
 
 
+# Backward-compatible public name used by older docs/tests/imports.
+MMIOBus = PeripheralBus
+
+
 # ---------------------------------------------------------------------------
 # Transport: R/W channel
 # ---------------------------------------------------------------------------
@@ -190,7 +192,7 @@ class RWServer:
     Pure transport: no device semantics here.
     """
 
-    def __init__(self, port: int, bus: MMIOBus, base_addr: int) -> None:
+    def __init__(self, port: int, bus: PeripheralBus, base_addr: int) -> None:
         self.port      = port
         self.bus       = bus
         self.base_addr = base_addr
@@ -641,20 +643,20 @@ def main() -> None:
         tracer = Tracer(args.trace_file)
         print(f'[tracer] recording to {args.trace_file}')
 
-    # ── SoCTop: KX6625 default topology ──────────────────────────────────
+    # ── PythonDeviceDomain: KX6625 default topology ──────────────────────
     # Function-level import avoids the circular-import that would arise from
     # a top-level import: soc_top imports transport classes from this module,
     # so this module must not import soc_top at the top level.
     from device_model.soc_top import kx6625_default  # noqa: PLC0415
 
-    soc = kx6625_default(
+    domain = kx6625_default(
         uart_rw_port   = uart_rw_port,
         uart_irq_port  = uart_irq_port,
         uart_irq_delay = uart_irq_delay,
         uart_term_port = args.uart_term_port,
         tracer         = tracer,
     )
-    soc.start()
+    domain.start()
 
 if __name__ == '__main__':
     main()

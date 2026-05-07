@@ -23,7 +23,7 @@ from typing import Callable, Optional
 from Crypto.Cipher import AES
 from Crypto.Hash import CMAC
 
-from device_model.mmio_base import AddressSpace, IRQController, IrqLine, MMIODevice, RegAccess, RegisterBank
+from device_model.mmio_base import BusMasterAddressSpace, IRQController, IrqLine, MMIODevice, RegAccess, RegisterBank
 from device_model.tracer import NULL_DEVICE_TRACER, DeviceTracer, Tracer
 
 
@@ -116,7 +116,7 @@ class HsmDevice(MMIODevice):
 
     def __init__(
         self,
-        address_space: AddressSpace,
+        address_space: BusMasterAddressSpace,
         irq_controller: Optional[IRQController] = None,
         irq_idx: int = 0,
         otp_file: str = 'build/hsm_otp.json',

@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <cerrno>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +12,7 @@
 
 #include "Vsv_device_top.h"
 #include "verilated.h"
+#include "verilated_vcd_c.h"
 
 namespace {
 
@@ -18,6 +20,15 @@ constexpr uint16_t kDefaultRwPort = 7906;
 constexpr uint16_t kDefaultIrqPort = 7907;
 constexpr uint16_t kDefaultMemPort = 7912;
 constexpr uint32_t kIdleCyclesPerPoll = 16;
+constexpr uint64_t kTraceFlushPeriod = 4096;
+constexpr const char *kDefaultWaveFile = "build/sv_timer_bridge.vcd";
+
+volatile std::sig_atomic_t g_stop_requested = 0;
+
+void request_stop(int)
+{
+    g_stop_requested = 1;
+}
 
 bool read_exact(int fd, void *buf, size_t len)
 {
@@ -30,6 +41,9 @@ bool read_exact(int fd, void *buf, size_t len)
         }
         if (n < 0) {
             if (errno == EINTR) {
+                if (g_stop_requested) {
+                    return false;
+                }
                 continue;
             }
             std::perror("recv");
@@ -48,6 +62,9 @@ bool write_all(int fd, const void *buf, size_t len)
         ssize_t n = ::send(fd, ptr + done, len - done, MSG_NOSIGNAL);
         if (n < 0) {
             if (errno == EINTR) {
+                if (g_stop_requested) {
+                    return false;
+                }
                 continue;
             }
             std::perror("send");
@@ -126,11 +143,20 @@ int accept_one(int listen_fd, const char *name)
 
 class SvPeriphBridge {
 public:
-    explicit SvPeriphBridge(int mem_fd)
+    SvPeriphBridge(int mem_fd, const std::string &wave_file)
         : context_(std::make_unique<VerilatedContext>()),
           dut_(std::make_unique<Vsv_device_top>(context_.get(), "sv_device_top")),
           mem_fd_(mem_fd)
     {
+        if (!wave_file.empty()) {
+            Verilated::traceEverOn(true);
+            trace_ = std::make_unique<VerilatedVcdC>();
+            dut_->trace(trace_.get(), 99);
+            trace_->open(wave_file.c_str());
+            std::printf("[SV-PERIPH] Wave dump: %s\n", wave_file.c_str());
+            std::fflush(stdout);
+        }
+
         dut_->clk = 0;
         dut_->rst_n = 0;
         dut_->psel = 0;
@@ -145,6 +171,14 @@ public:
         eval_cycle(false);
         dut_->rst_n = 1;
         eval_cycle(false);
+    }
+
+    ~SvPeriphBridge()
+    {
+        if (trace_) {
+            trace_->flush();
+            trace_->close();
+        }
     }
 
     uint32_t apb_read(uint32_t offset)
@@ -195,6 +229,13 @@ private:
     void eval_half()
     {
         dut_->eval();
+        if (trace_) {
+            trace_->dump(context_->time());
+            trace_dump_count_++;
+            if ((trace_dump_count_ % kTraceFlushPeriod) == 0) {
+                trace_->flush();
+            }
+        }
         context_->timeInc(1);
     }
 
@@ -278,6 +319,8 @@ private:
 
     std::unique_ptr<VerilatedContext> context_;
     std::unique_ptr<Vsv_device_top> dut_;
+    std::unique_ptr<VerilatedVcdC> trace_;
+    uint64_t trace_dump_count_ = 0;
     int mem_fd_;
 };
 
@@ -292,7 +335,10 @@ void send_irq(int irq_fd, bool level)
 
 void usage(const char *argv0)
 {
-    std::fprintf(stderr, "Usage: %s [--rw-port PORT] [--irq-port PORT] [--mem-port PORT]\n", argv0);
+    std::fprintf(stderr,
+                 "Usage: %s [--rw-port PORT] [--irq-port PORT] [--mem-port PORT] "
+                 "[--wave-file PATH] [--no-wave]\n",
+                 argv0);
 }
 
 } // namespace
@@ -302,6 +348,7 @@ int main(int argc, char **argv)
     uint16_t rw_port = kDefaultRwPort;
     uint16_t irq_port = kDefaultIrqPort;
     uint16_t mem_port = kDefaultMemPort;
+    std::string wave_file = kDefaultWaveFile;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -311,6 +358,10 @@ int main(int argc, char **argv)
             irq_port = static_cast<uint16_t>(std::strtoul(argv[++i], nullptr, 0));
         } else if (arg == "--mem-port" && i + 1 < argc) {
             mem_port = static_cast<uint16_t>(std::strtoul(argv[++i], nullptr, 0));
+        } else if (arg == "--wave-file" && i + 1 < argc) {
+            wave_file = argv[++i];
+        } else if (arg == "--no-wave") {
+            wave_file.clear();
         } else {
             usage(argv[0]);
             return 2;
@@ -318,6 +369,8 @@ int main(int argc, char **argv)
     }
 
     Verilated::commandArgs(argc, argv);
+    std::signal(SIGINT, request_stop);
+    std::signal(SIGTERM, request_stop);
 
     int rw_listen = listen_on(rw_port);
     int irq_listen = listen_on(irq_port);
@@ -326,19 +379,22 @@ int main(int argc, char **argv)
     int irq_fd = accept_one(irq_listen, "IRQ channel");
     int mem_fd = accept_one(mem_listen, "MEM channel");
 
-    SvPeriphBridge bridge(mem_fd);
+    SvPeriphBridge bridge(mem_fd, wave_file);
     bool last_irq = bridge.irq();
     if (last_irq) {
         send_irq(irq_fd, true);
     }
 
-    while (true) {
+    while (!g_stop_requested) {
         pollfd pfd{};
         pfd.fd = rw_fd;
         pfd.events = POLLIN;
         int ret = ::poll(&pfd, 1, 1);
         if (ret < 0) {
             if (errno == EINTR) {
+                if (g_stop_requested) {
+                    break;
+                }
                 continue;
             }
             std::perror("poll");

@@ -1,37 +1,43 @@
 /*
- * MMIO Socket Device - Custom QEMU SysBus device that proxies MMIO access
- * to external Python process via TCP socket, with interrupt support.
+ * MMIO Socket Device - Custom QEMU SysBus proxy used at the boundary between
+ * the QEMU Native Domain and external device domains.
+ *
+ * One mmio-sockdev instance exposes one guest-visible MMIO window and optional
+ * IRQ, virtual-time tick, bus-master memory, and reset channels. The external
+ * endpoint may be the Python Device Domain transport server or a SystemVerilog
+ * bridge process; this device deliberately contains no peripheral semantics.
  *
  * Copyright (c) 2024
  *
- * R/W Protocol (main chardev, QEMU -> Python):
- * - Read:  'R' (1B) | master_id(1B) | addr(4B LE) | size(1B) -> Python returns data(sizeB)
+ * R/W Protocol (main chardev, QEMU -> external device domain):
+ * - Read:  'R' (1B) | master_id(1B) | addr(4B LE) | size(1B) -> endpoint returns data(sizeB)
  * - Write: 'W' (1B) | master_id(1B) | addr(4B LE) | size(1B) | data(sizeB)
- *          -> Python returns next_event_ns(8B LE)
+ *          -> endpoint returns next_event_ns(8B LE)
  * master_id: cpu_index of the CPU that triggered the MMIO access (0=CPU0, 1=CPU1, ...),
  *            or 0xF0 for privileged QEMU/SYSCTRL-originated accesses.
  *   next_event_ns == 0: no scheduled event (e.g. a simple config write)
  *   next_event_ns  > 0: QEMU reschedules this device's tick timer to fire
  *                       at now + next_event_ns (Discrete Event Simulation)
  *
- * IRQ Protocol (irq-chardev, Python -> QEMU):
+ * IRQ Protocol (irq-chardev, external device domain -> QEMU):
  * - Assert/Deassert: 'I' (1B) | irq_num(1B) | level(1B)
  *   level=1 asserts the IRQ line, level=0 deasserts it.
  *
- * Tick Protocol (tick-chardev, QEMU -> Python, optional):
+ * Tick Protocol (tick-chardev, QEMU -> external device domain, optional):
  * - 'T' (1B) | vtime_ns(8B LE)  -- current QEMU_CLOCK_VIRTUAL nanoseconds
  *   Sent every tick-period-ms milliseconds of virtual time.
- *   Python uses these to drive timer expiry based on virtual time, not
- *   wall-clock, so timing is correct even during QEMU pause/step/debug.
+ *   The external endpoint uses these to drive device-domain events based on
+ *   virtual time, not wall-clock, so timing is correct during pause/step/debug.
  *
- * MEM Protocol (mem-chardev, Python -> QEMU, optional):
+ * MEM Protocol (mem-chardev, external device domain -> QEMU, optional):
  * - DMA write: 'M'(1B) | 'W'(1B) | phys_addr(8B LE) | length(4B LE) | data(lengthB)
  *   QEMU executes cpu_physical_memory_write(phys_addr, data, length), then
  *   returns ack(1B), where 0=OK and non-zero values are reserved for future
  *   bus-error injection.
  * - DMA read:  'M'(1B) | 'R'(1B) | phys_addr(8B LE) | length(4B LE)
  *   QEMU responds with data(lengthB) via cpu_physical_memory_read().
- *   Models bus-master DMA: Python device directly accesses system RAM.
+ *   Models bus-master DMA: Python BusMasterAddressSpace or the SV bridge can
+ *   directly access QEMU physical memory.
  *
  * Device properties:
  * - chardev:        main R/W channel
@@ -43,10 +49,8 @@
  * - irq-num:        GIC input pin number for auto-connect (default 32 = SPI 0)
  *                   set to 0 to disable auto-connect
  *
- * Registers:
- * - 0x00 TXDATA (W): Write character to output (low 8 bits)
- * - 0x04 STATUS (R): bit0=TXREADY (always 1)
- * - 0x08 CTRL (R/W): bit0=ENABLE (default 1)
+ * Guest-visible registers are implemented by the external endpoint. This QEMU
+ * device forwards offsets and access sizes only; it does not decode registers.
  */
 
 #include "qemu/osdep.h"
@@ -125,24 +129,24 @@ typedef struct MMIOSockDevState {
     /* MMIO region */
     MemoryRegion mmio;
 
-    /* Main R/W chardev (QEMU -> Python for register access) */
+    /* Main R/W chardev (QEMU -> external endpoint for register access) */
     CharBackend chr;
     QemuMutex lock;
 
-    /* IRQ notification chardev (Python -> QEMU for interrupt push) */
+    /* IRQ notification chardev (external endpoint -> QEMU interrupt push) */
     CharBackend irq_chr;
     uint8_t     irq_rxbuf[IRQ_MSG_SIZE];
     int         irq_rxpos;
 
-    /* Tick chardev (QEMU -> Python, virtual-clock notifications, optional) */
+    /* Tick chardev (QEMU -> external endpoint, virtual-clock notifications) */
     CharBackend tick_chr;
     QEMUTimer  *tick_timer;  /* fires every tick_period_ms virtual ms */
 
-    /* MEM chardev (Python -> QEMU, device DMA into physical memory, optional) */
+    /* MEM chardev (external endpoint -> QEMU, device DMA into physical memory) */
     CharBackend mem_chr;
     MemRxState  mem_rx;
 
-    /* RST chardev (Python -> QEMU, triggers system reset, optional) */
+    /* RST chardev (external endpoint -> QEMU, triggers system reset) */
     CharBackend rst_chr;
 
     /* IRQ output lines (wired to interrupt controller) */

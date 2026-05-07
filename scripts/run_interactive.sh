@@ -48,6 +48,7 @@ LOG_DIR="$PROJECT_ROOT/build"
 SERVER_LOG="$LOG_DIR/interactive_server.log"
 QEMU_LOG="$LOG_DIR/interactive_qemu.log"
 SV_LOG="$LOG_DIR/interactive_sv_timer.log"
+SV_WAVE="$LOG_DIR/interactive_sv_timer.vcd"
 QEMU_PID_FILE="$LOG_DIR/interactive_qemu.pid"
 
 # Colours for this script's own messages
@@ -174,7 +175,7 @@ done
 sleep 0.3
 
 mkdir -p "$LOG_DIR"
-rm -f "$QEMU_PID_FILE"
+rm -f "$QEMU_PID_FILE" "$SV_WAVE"
 
 info "Installing secure boot OTP metadata..."
 python3 "$SECBOOT_SCRIPT" --firmware-hex "$FIRMWARE_HEX" --otp "$LOG_DIR/otp.hex" --fresh
@@ -259,9 +260,10 @@ ok "Device server ready."
 
 # ── 1b. Start SystemVerilog/Verilator timer bridge ──────────────────────────
 info "Starting SV peripheral bridge..."
-"$SV_BRIDGE" --rw-port 7906 --irq-port 7907 --mem-port 7912 > "$SV_LOG" 2>&1 &
+"$SV_BRIDGE" --rw-port 7906 --irq-port 7907 --mem-port 7912 --wave-file "$SV_WAVE" > "$SV_LOG" 2>&1 &
 SV_PID=$!
 info "SV timer PID $SV_PID  →  $SV_LOG"
+info "SV wave      →  $SV_WAVE"
 sleep 0.5
 
 # ── 2. Open UART terminal window ───────────────────────────────────────────────
@@ -301,6 +303,7 @@ else
 fi
 info "  Server log   : $SERVER_LOG"
 info "  SV timer log : $SV_LOG"
+info "  SV wave dump : $SV_WAVE"
 info "  QEMU log     : $QEMU_LOG"
 echo ""
 if [[ "$INLINE_MODE" -eq 1 ]]; then

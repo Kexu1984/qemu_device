@@ -12,6 +12,7 @@ all: $(TARGET)
 
 $(TARGET): sv_timer_apb.sv sv_dma_regs.sv sv_dma_core.sv sv_dma_apb.sv sv_apb_decoder.sv sv_master_router.sv sv_master_ahb_adapter.sv sv_device_top.sv sv_timer_bridge.cpp | $(BUILD_DIR)
 	$(VERILATOR) --cc --exe --build -Wall \
+		--trace \
 		--top-module sv_device_top \
 		-Mdir $(OBJ_DIR) \
 		-CFLAGS "-std=c++17 -O2" \

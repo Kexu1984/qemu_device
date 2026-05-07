@@ -76,7 +76,7 @@ import threading
 from typing import Callable, Optional
 
 from device_model.mmio_base import (
-    AddressSpace, DmaRequestInterface, IRQController, IrqLine, MMIODevice,
+    BusMasterAddressSpace, DmaRequestInterface, IRQController, IrqLine, MMIODevice,
     HCLK_HZ, NS_PER_HCLK, NS_PER_PCLK,
 )
 from device_model.tracer import NULL_DEVICE_TRACER, DeviceTracer, Tracer  # noqa: E402
@@ -177,7 +177,7 @@ class DmaController(MMIODevice):
     """
     Multi-channel DMA controller.
 
-    Implements ``MMIODevice`` so it can be registered on the ``MMIOBus``
+    Implements ``MMIODevice`` so it can be registered on the ``PeripheralBus``
     and receive reads/writes from firmware via QEMU's chardev protocol.
 
     Each channel occupies a 0x20-byte register slot:
@@ -197,7 +197,7 @@ class DmaController(MMIODevice):
     def __init__(
         self,
         num_channels: int,
-        address_space: Optional[AddressSpace] = None,
+        address_space: Optional[BusMasterAddressSpace] = None,
         irq_controller: Optional[IRQController] = None,
         irq_idx: int = 0,
         tracer: Optional[Tracer] = None,

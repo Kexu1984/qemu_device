@@ -25,10 +25,9 @@ Transport channel primitives (Python ↔ QEMU TCP):
                                   memory (mem-chardev)
 
 Address routing:
-  AddressSpace                  — unified accessor for bus-master devices; routes
-                                  accesses by physical address: MMIO ranges →
-                                  in-process MMIOBus, all other addresses →
-                                  MemChannel (QEMU physical memory via TCP)
+- BusMasterAddressSpace: unified accessor for bus-master devices; routes
+    accesses by physical address: MMIO ranges → in-process PeripheralBus,
+    all other addresses → MemChannel (QEMU physical memory via TCP)
 
 Device-specific transports live in their own modules:
   UartChannel   → device_model/uart_model.py
@@ -341,14 +340,18 @@ class MemChannel:
 # Address space — routes DMA reads/writes by physical address
 # ---------------------------------------------------------------------------
 
-class AddressSpace:
+class BusMasterAddressSpace:
     """
-    Unified address-space accessor for bus-master devices (e.g. DMA engine).
+    Python-domain memory transaction bus for bus-master devices.
+
+    Unified address-space accessor for bus-master devices (e.g. DMA engine,
+    HSM crypto engine, flash controller). This is the Python-side memory path
+    shown in the architecture diagram.
 
     Routes reads/writes by physical address:
 
     - Addresses within any registered MMIO region:
-        Dispatched directly to the Python MMIOBus in-process.
+        Dispatched directly to the Python PeripheralBus in-process.
         No TCP round-trip — the device model's ``read()``/``write()`` is called
         synchronously, making M2P and P2M transfers race-free.
 
@@ -358,11 +361,11 @@ class AddressSpace:
 
     The ``mmio_bus`` parameter is duck-typed: any object implementing
     ``read(addr, size) -> bytes`` and ``write(addr, size, data)`` is accepted.
-    This avoids a circular import with ``mmio_device_server.MMIOBus``.
+    This avoids a circular import with ``mmio_device_server.PeripheralBus``.
 
     Usage::
 
-        addr_space = AddressSpace(
+        addr_space = BusMasterAddressSpace(
             mem_channel  = mem_ch,
             mmio_bus     = bus,
             mmio_regions = [(0x40000000, 0x100000)],  # peripheral address space
@@ -391,7 +394,7 @@ class AddressSpace:
         (MMIO reads always succeed, returning zero bytes for unmapped ranges).
         """
         if self._is_mmio(addr):
-            return self._bus.read(addr, length)   # MMIOBus always returns bytes
+            return self._bus.read(addr, length)   # PeripheralBus always returns bytes
         return self._mem.dma_read(addr, length)
 
     def write(self, addr: int, data: bytes) -> bool:
@@ -405,6 +408,10 @@ class AddressSpace:
             self._bus.write(addr, len(data), data)
             return True
         return self._mem.dma_write(addr, data)
+
+
+# Backward-compatible public name used by existing device models.
+AddressSpace = BusMasterAddressSpace
 
 
 # ---------------------------------------------------------------------------

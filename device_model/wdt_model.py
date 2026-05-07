@@ -174,7 +174,7 @@ class WdtDevice(MMIODevice):
         """
         Advance the watchdog countdown using the virtual clock.
 
-        Called by MMIOBus.tick_all() on every tick from TickServer.
+        Called by PeripheralBus.tick_all() on every tick from TickServer.
         Fires the optional warning IRQ and schedules a system reset when
         the countdown reaches zero.
         """

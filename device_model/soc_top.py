@@ -1,34 +1,32 @@
 """
-soc_top — Top-level SoC descriptor: device topology + wiring.
+soc_top — Python Device Domain topology and wiring.
 
-Encapsulates the full peripheral topology of one SoC instance.
-Each peripheral is described by a typed config dataclass; ``SoCTop`` wires
-them together (shared bus, per-device IRQ controllers, transport servers)
-and exposes a single ``start()``/``stop()`` interface.
+Encapsulates the Python Device Domain from the architecture diagram: transport
+servers, a peripheral transaction bus, a bus-master address space, abstract
+device-model instances, and reset/tick wiring. Native QEMU blocks such as
+SYSCTRL and CRU are intentionally outside this domain.
+
+Each peripheral is described by a typed config dataclass; ``PythonDeviceDomain``
+wires them together and exposes a single ``start()``/``stop()`` interface.
+``SoCTop`` remains as a backward-compatible alias.
 
 Architecture
 ------------
 ::
 
-    SoCTop
-    ├── MMIOBus                         — address-range dispatcher
-    │   ├── ConsoleUartDevice @ uart0   ── UartChannel (term TCP server)
-    │   ├── ConsoleUartDevice @ uart1   ── UartChannel (term TCP server)
-    │   ├── TimerDevice       @ timer0  ─┐
-    │   ├── TimerDevice       @ timer1  ─┤ all share one periodic TickServer
-    │   ├── TimerDevice       @ timer2  ─┘
-    │   ├── DmaController     @ dma     ── MemChannel + DES TickServer
-    │   ├── DmaClientDemoDevice @ demo  ── DmaController.get_handle(ch)
-    │   ├── CrcDevice         @ crc
-    │   └── WdtDevice         @ wdt    ── RstController
-    └── Transport servers (one RWServer + IRQServer per device, shared TickServer)
+    PythonDeviceDomain
+    ├── PeripheralBus                  — peripheral transaction bus
+    │   └── MMIODevice instances       — UART / DMA / timer / WDT / ...
+    ├── BusMasterAddressSpace          — DMA/HSM/flash memory transaction path
+    ├── Transport servers              — RW / IRQ / tick / mem / reset TCP
+    └── Reset/tick managers            — SystemResetManager / tick broadcast
 
 Defining a custom SoC topology::
 
-    from device_model.soc_top import SoCTop, UartCfg, TimerCfg, DmaCfg
+    from device_model.soc_top import PythonDeviceDomain, UartCfg, TimerCfg, DmaCfg
     from device_model.soc_top import DmaClientDemoCfg, CrcCfg, WdtCfg
 
-    soc = SoCTop(
+    domain = PythonDeviceDomain(
         uarts=[
             UartCfg('uart0', base_addr=0x40004000, rw_port=7890, irq_port=7891,
                     nvic_irq=0, term_port=7904),
@@ -49,13 +47,13 @@ Defining a custom SoC topology::
                    nvic_irq=4, rst_port=7903)
         tick_port=7896,
     )
-    soc.start()
+    domain.start()
 
 NOTE — circular-import avoidance
 ---------------------------------
-This module imports the transport-layer classes (``MMIOBus``, ``RWServer``, …)
+This module imports the transport-layer classes (``PeripheralBus``, ``RWServer``, …)
 from ``mmio_device_server``.  To avoid a circular import, ``mmio_device_server``
-must import ``SoCTop`` inside ``main()`` (function-level), not at the top of the
+must import ``kx6625_default`` inside ``main()`` (function-level), not at the top of the
 file.  By the time ``main()`` runs the module is already in ``sys.modules``.
 """
 
@@ -75,14 +73,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from device_model.mmio_device_server import (   # noqa: E402
     IRQServer,
     MemServer,
-    MMIOBus,
+    PeripheralBus,
     RstServer,
     RWServer,
     TickServer,
 )
 
 from device_model.mmio_base import (            # noqa: E402
-    AddressSpace,
+    BusMasterAddressSpace,
     IRQController,
     MemChannel,
 )
@@ -144,8 +142,8 @@ class UartCfg:
 class TimerCfg:
     """Configuration for one ``TimerDevice`` instance.
 
-    All timer instances share the SoCTop-level periodic tick broadcast
-    (``tick_port`` on ``SoCTop.__init__``); no per-timer tick port is needed.
+    All timer instances share the PythonDeviceDomain-level periodic tick broadcast
+    (``tick_port`` on ``PythonDeviceDomain.__init__``); no per-timer tick port is needed.
 
     Attributes
     ----------
@@ -195,7 +193,7 @@ class DmaCfg:
 class DmaClientDemoCfg:
     """Configuration for the ``DmaClientDemoDevice`` (single instance per SoC).
 
-    Requires a ``DmaCfg`` to be present in the same ``SoCTop``.
+    Requires a ``DmaCfg`` to be present in the same ``PythonDeviceDomain``.
 
     Attributes
     ----------
@@ -298,11 +296,17 @@ class FlashCtrlCfg:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SoCTop
+# PythonDeviceDomain
 # ─────────────────────────────────────────────────────────────────────────────
 
-class SoCTop:
-    """Top-level SoC: instantiates all device models and wires up transport.
+class PythonDeviceDomain:
+    """Python Device Domain: device models plus transport wiring.
+
+    This class is the code-level counterpart of the "Python Device Domain" in
+    the architecture diagram. Individual devices are intentionally treated as
+    instances of the ``MMIODevice`` abstraction; the important architectural
+    boundaries here are the peripheral bus, bus-master address space, transport
+    servers, tick delivery, and reset path.
 
     Parameters
     ----------
@@ -316,19 +320,19 @@ class SoCTop:
                        broadcasts ``bus.tick_all()`` to every registered device.
                        All ``TimerDevice`` instances are driven by this broadcast.
     tracer           : Optional ``Tracer`` instance for event recording.
-                       ``SoCTop.stop()`` will call ``tracer.close()``.
+                       ``PythonDeviceDomain.stop()`` will call ``tracer.close()``.
 
     Typical usage::
 
-        soc = SoCTop(uarts=[...], timers=[...], dma=..., crc=..., wdt=...)
-        soc.start()          # blocks until KeyboardInterrupt
+        domain = PythonDeviceDomain(uarts=[...], timers=[...], dma=..., crc=..., wdt=...)
+        domain.start()          # blocks until KeyboardInterrupt
 
     Scripted / test usage::
 
-        soc = SoCTop(...)
-        soc.start_background()
+        domain = PythonDeviceDomain(...)
+        domain.start_background()
         # ... interact with devices via TCP / direct Python calls ...
-        soc.stop()
+        domain.stop()
     """
 
     def __init__(
@@ -356,11 +360,11 @@ class SoCTop:
         self._channels: list = []   # UartChannel objects (have .stop())
         self._stop_evt = threading.Event()
 
-        bus = MMIOBus()
+        bus = PeripheralBus()
         self._bus = bus
 
-        # ── 1. Collect MMIO regions for AddressSpace ──────────────────────
-        #    AddressSpace is only needed when DMA bus-mastering is active.
+        # ── 1. Collect MMIO regions for BusMasterAddressSpace ─────────────
+        #    BusMasterAddressSpace is only needed when bus-mastering is active.
         mmio_regions = (
             [(u.base_addr, u.size) for u in uarts]
             + ([(dma.base_addr, dma.size)] if dma else [])
@@ -378,7 +382,7 @@ class SoCTop:
         dma_ctrl: Optional[DmaController] = None
         if dma is not None:
             mem_channel   = MemChannel()
-            addr_space    = AddressSpace(
+            addr_space    = BusMasterAddressSpace(
                 mem_channel  = mem_channel,
                 mmio_bus     = bus,
                 mmio_regions = mmio_regions,
@@ -504,7 +508,7 @@ class SoCTop:
         if flash_ctrl is not None:
             flash_irq_ctrl = IRQController()
             flash_mem_channel = MemChannel()
-            flash_addr_space = AddressSpace(
+            flash_addr_space = BusMasterAddressSpace(
                 mem_channel  = flash_mem_channel,
                 mmio_bus     = bus,
                 mmio_regions = mmio_regions,
@@ -556,8 +560,8 @@ class SoCTop:
     # ── Public API ────────────────────────────────────────────────────────
 
     @property
-    def bus(self) -> MMIOBus:
-        """The shared ``MMIOBus`` (read-only; useful for testing)."""
+    def bus(self) -> PeripheralBus:
+        """The shared ``PeripheralBus`` (read-only; useful for testing)."""
         return self._bus
 
     def start_background(self) -> None:
@@ -615,8 +619,8 @@ def kx6625_default(
     uart_irq_delay: float = 2.0,
     uart_term_port: int   = 7904,
     tracer: Optional[Tracer] = None,
-) -> SoCTop:
-    """Return a ``SoCTop`` configured with the canonical KX6625 device map.
+) -> PythonDeviceDomain:
+    """Return a ``PythonDeviceDomain`` configured with the canonical KX6625 device map.
 
     Port and delay overrides are accepted for the console UART to keep
     backward compatibility with the ``--uart-*`` CLI flags.
@@ -634,7 +638,7 @@ def kx6625_default(
         flash   @ 0x4000E000  rw=7913 irq=7914 mem=7915 nvic_irq=8
         dflash  @ 0x10000000  rw=7916 size=512KB file=build/dflash.hex
     """
-    return SoCTop(
+    return PythonDeviceDomain(
         uarts=[
             UartCfg(
                 name      = 'uart0',
@@ -709,3 +713,7 @@ def kx6625_default(
         tick_port = 7896,
         tracer    = tracer,
     )
+
+
+# Backward-compatible public name used by older code and docs.
+SoCTop = PythonDeviceDomain

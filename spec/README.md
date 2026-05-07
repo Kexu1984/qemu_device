@@ -40,7 +40,7 @@ spec/
 | **DATA FLASH**   | `0x10000000`  | 512 KB | —        | 7916     | —        | —         | —        | —        | —         |
 | **SRAM**         | `0x20000000`  | 128 KB | —        | —        | —        | —         | —        | —        | —         |
 
-> **Tick ports**: Port 7896 is the shared 1 ms periodic tick (Timer → all devices via `MMIOBus.tick_all()`). Port 7905 is the DMA DES one-shot tick — QEMU fires it at exactly `arm_vtime + transfer_ns` in virtual time.
+> **Tick ports**: Port 7896 is the shared 1 ms periodic tick (Timer → all devices via `PeripheralBus.tick_all()`). Port 7905 is the DMA DES one-shot tick — QEMU fires it at exactly `arm_vtime + transfer_ns` in virtual time.
 
 ---
 

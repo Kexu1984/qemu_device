@@ -1,3 +1,12 @@
+// SystemVerilog-domain bus-master router.
+//
+// Current architecture: pass every SV bus-master request through to the
+// C++ bridge, which translates the bridge-facing AHB-like transaction
+// into mmio-sockdev mem-chardev traffic against QEMU physical memory.
+//
+// This module is intentionally still a pass-through point. It exists as the
+// architectural place to add local target decode later (for example local APB,
+// FIFO, SRAM, or fault-injection windows) without changing the DMA core.
 module sv_master_router (
     input  logic        req_valid_i,
     output logic        req_ready_o,

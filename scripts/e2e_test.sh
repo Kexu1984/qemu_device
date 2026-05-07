@@ -42,6 +42,7 @@ SERVER_LOG="$LOG_DIR/e2e_server.log"
 QEMU_LOG="$LOG_DIR/e2e_qemu.log"
 UART_LOG="$LOG_DIR/e2e_uart.log"
 SV_LOG="$LOG_DIR/e2e_sv_timer.log"
+SV_WAVE="$LOG_DIR/e2e_sv_timer.vcd"
 UART_TERM_PORT=7904
 
 # Colours
@@ -72,7 +73,7 @@ for f in "$QEMU_BIN" "$FIRMWARE_HEX" "$SERVER_SCRIPT" "$SV_BRIDGE" "$SECBOOT_SCR
 done
 
 mkdir -p "$LOG_DIR"
-rm -f "$LOG_DIR/otp.hex"
+rm -f "$LOG_DIR/otp.hex" "$SV_WAVE"
 info "Installing secure boot OTP metadata..."
 python3 "$SECBOOT_SCRIPT" --firmware-hex "$FIRMWARE_HEX" --otp "$LOG_DIR/otp.hex" --fresh || exit 1
 info "QEMU    : $QEMU_BIN"
@@ -155,9 +156,9 @@ info "UART terminal client PID: $UART_PID  (log: $UART_LOG)"
 # 2c. Start SystemVerilog/Verilator timer bridge
 # -----------------------------------------------------------------------
 info "Starting SV peripheral bridge (RW:7906, IRQ:7907, MEM:7912)..."
-"$SV_BRIDGE" --rw-port 7906 --irq-port 7907 --mem-port 7912 > "$SV_LOG" 2>&1 &
+"$SV_BRIDGE" --rw-port 7906 --irq-port 7907 --mem-port 7912 --wave-file "$SV_WAVE" > "$SV_LOG" 2>&1 &
 SV_PID=$!
-info "SV timer bridge PID: $SV_PID  (log: $SV_LOG)"
+info "SV timer bridge PID: $SV_PID  (log: $SV_LOG, wave: $SV_WAVE)"
 sleep 0.5
 
 # -----------------------------------------------------------------------
@@ -329,6 +330,12 @@ echo ""
 
 # Firmware text is emitted via TXDATA -> Python server stdout -> SERVER_LOG
 RESULT=0
+if [ -f "$SV_WAVE" ]; then
+    pass "SV wave dump: $SV_WAVE"
+else
+    fail "SV wave dump missing: $SV_WAVE"
+    RESULT=1
+fi
 for LINE in "${EXPECTED[@]}"; do
     if grep -q "$LINE" "$SERVER_LOG" 2>/dev/null; then
         pass "Found: \"$LINE\""
