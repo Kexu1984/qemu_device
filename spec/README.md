@@ -155,7 +155,7 @@ Test vector: `CRC-32("123456789") = 0xCBF43926`. Supports byte and word writes; 
 | 0x0C   | STATUS    | R      | 0     | bit0 = IRQ_PENDING                           |
 | 0x10   | IRQ_CLEAR | W      | —     | Write bit0 = 1 to clear IRQ_PENDING and IRQ5 |
 
-The Verilator bridge listens on R/W port 7906 and IRQ port 7907. QEMU still sees this as a normal `mmio-sockdev` region at `0x4000B000`; the bridge converts each MMIO access into APB setup/access cycles on the SV RTL.
+The SV host shell listens on R/W port 7906, IRQ port 7907, and fabric port 7912. QEMU still sees this as a normal `mmio-sockdev` region at `0x4000B000`; `sv_apb_ingress.sv` converts each host request into APB setup/access cycles on the SV RTL, while `sv_fabric_egress_dpi.sv` handles SV-master transactions out to QEMU fabric.
 
 ---
 

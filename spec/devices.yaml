@@ -160,7 +160,7 @@ devices:
 
 # ── Physical Memory Regions ──────────────────────────────────────────────────────────────────
 #
-# RAM regions visible to both firmware (CPU) and device models (via MemChannel).
+# RAM regions visible to both firmware (CPU) and device models through QEMU fabric.
 # The generator emits BASE and SIZE constants in both C and Python.
 #
 # Field descriptions

@@ -109,7 +109,7 @@ flash_regions:
 # ── SRAM (RAM) regions ───────────────────────────────────────────────────────
 #
 # Table of non-contiguous SRAM regions.  Each becomes a read/write RAM region
-# accessible by both the CPU and device-model bus-master DMA (via MemChannel).
+# accessible by both the CPU and device-model bus masters through QEMU fabric.
 #
 # Each entry produces a row in the C array kx6625_sram_regions[].
 #

@@ -3,7 +3,7 @@
 ## 本讲目标
 
 - 理解为什么要把 SV RTL device 接入 QEMU firmware 环境
-- 理解 Verilator bridge 的基本结构
+- 理解 SV host shell 的基本结构
 - 理解 APB transaction 与 MMIO transaction 的关系
 - 明确 SV 独立 clock domain 与 QEMU 行为级模型的边界
 

@@ -103,7 +103,7 @@ The tool currently:
 
 ### `device_model/mmio_device_server.py`
 
-Starts the socket-backed Python SoC model. It exposes MMIO, IRQ, tick, DMA memory, reset, and terminal channels consumed by QEMU `mmio-sockdev` instances.
+Starts the socket-backed Python SoC model. It exposes MMIO, IRQ, tick, fabric bus-master, reset, and terminal channels consumed by QEMU `mmio-sockdev` instances.
 
 Most users should start it through:
 
@@ -125,7 +125,7 @@ Use this path when validating:
 - SV-generated IRQs into QEMU/NVIC.
 - Comparison against Python functional behavior.
 
-The SV device bridge is intentionally a transaction boundary. It does not make the full platform cycle accurate.
+The SV host shell is intentionally a transaction boundary. It does not make the full platform cycle accurate.
 
 ## Run Scripts
 

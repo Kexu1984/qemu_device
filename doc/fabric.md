@@ -261,6 +261,266 @@ only when a transaction reaches the external fabric. Later, `sv_master_router.sv
 can grow local decode so an SV master can reach local SV APB windows before
 falling through to the external fabric endpoint.
 
+## Fabric Interface Reference
+
+This section is the implementation-facing contract for adding new fabric users.
+The same logical transaction shape exists in all domains, but each domain has a
+different integration surface.
+
+### QEMU-Native Interfaces
+
+QEMU-native masters should include `hw/misc/mmio_fabric.h` and use the helper
+API in `scripts/qemu-fork/hw/misc/mmio_fabric.c`. These helpers route through
+QEMU's system address space with `MemTxAttrs.requester_id` set from the fabric
+master ID, so native devices do not need to know whether the target is RAM,
+Python MMIO, SV APB, or another QEMU-native region.
+
+| Interface | Use |
+|-----------|-----|
+| `mmio_fabric_read(master_id, addr, size)` | Read 1, 2, 4, or 8 bytes and return `MmioFabricResponse { status, rdata }`. |
+| `mmio_fabric_write(master_id, addr, size, data)` | Write 1, 2, 4, or 8 bytes and return `MmioFabricStatus`. |
+| `mmio_fabric_read_buf(master_id, addr, buf, len)` | Read an arbitrary byte buffer; used by external fabric transports. |
+| `mmio_fabric_write_buf(master_id, addr, buf, len)` | Write an arbitrary byte buffer; used by external fabric transports. |
+| `mmio_fabric_ok(status)` | Test whether a status is `MMIO_FABRIC_OK`. |
+| `mmio_fabric_attrs(master_id)` | Build `MemTxAttrs` with the requester ID set; use only when a caller must perform lower-level QEMU memory access directly. |
+
+Typical native master flow:
+
+```c
+#include "hw/misc/mmio_fabric.h"
+#include "hw/arm/kx6625_gen.h"
+
+static uint32_t sysctrl_read_device(uint64_t addr)
+{
+    MmioFabricResponse rsp;
+
+    rsp = mmio_fabric_read(KX6625_MASTER_ID_SYSCTRL, addr, sizeof(uint32_t));
+    if (!mmio_fabric_ok(rsp.status)) {
+        /* Convert fabric status to the device's own error/status register. */
+        return 0;
+    }
+    return (uint32_t)rsp.rdata;
+}
+
+static bool sysctrl_write_device(uint64_t addr, uint32_t value)
+{
+    MmioFabricStatus status;
+
+    status = mmio_fabric_write(KX6625_MASTER_ID_SYSCTRL, addr,
+                               sizeof(uint32_t), value);
+    return mmio_fabric_ok(status);
+}
+```
+
+Guidelines for QEMU-native users:
+
+- Use generated master ID macros from `spec/soc.yaml`, for example
+  `KX6625_MASTER_ID_SYSCTRL`; do not hard-code numeric IDs.
+- Use `mmio_fabric_read()` / `mmio_fabric_write()` for register-sized access
+  and the `_buf()` variants for DMA-style buffers.
+- Convert `MmioFabricStatus` into the native device's visible status/error
+  registers instead of silently ignoring failed transactions.
+- Native master devices should not call Python or SV implementation functions
+  directly for modeled bus transactions.
+
+### Python Interfaces
+
+Python has two layers. New bus-master devices should prefer the high-level
+`PlatformFabric` / `FabricMasterClient` surface. Existing DMA-style devices may
+continue using `BusMasterAddressSpace`, which is the backward-compatible address
+space wrapper around the same fabric channel.
+
+| Interface | Use |
+|-----------|-----|
+| `FabricChannel` | Low-level TCP fabric transport to QEMU over `fabric-chardev`. It emits `F` frames and serializes socket I/O. |
+| `FabricServer` | Accepts QEMU's `fabric-chardev` connection and attaches it to a `FabricChannel`. |
+| `PlatformFabric` | Absolute-address fabric dispatcher for Python masters. It routes local Python MMIO in-process and external windows through `FabricChannel`. |
+| `PlatformFabric.client(master_id, name)` | Create a per-master `FabricMasterClient` facade with a fixed master ID. |
+| `FabricMasterClient.read(addr, size)` / `write(addr, data)` | Byte-oriented absolute-address read/write returning `FabricResponse`. |
+| `FabricMasterClient.read32(addr)` / `write32(addr, value)` | Convenience helpers for 32-bit register access. |
+| `BusMasterAddressSpace.read(addr, length)` / `write(addr, data)` | Legacy-compatible bus-master address-space API used by DMA/HSM/flash models. |
+| `MMIODevice.read(offset, size, master_id)` / `write(offset, size, data, master_id)` | Python slave endpoint API. The bus passes endpoint-local offsets plus the requesting master ID. |
+
+Typical high-level Python master:
+
+```python
+from device_model.fabric import FabricMasterClient
+
+
+class ExamplePythonMaster:
+    def __init__(self, fabric: FabricMasterClient) -> None:
+        self._fabric = fabric
+
+    def probe(self, addr: int) -> bool:
+        value, read_rsp = self._fabric.read32(addr)
+        if not read_rsp.ok:
+            return False
+
+        write_rsp = self._fabric.write32(addr + 4, value ^ 0xFFFF_FFFF)
+        return write_rsp.ok
+```
+
+Typical Python-domain wiring:
+
+```python
+fabric_channel = FabricChannel(master_id=MASTER_ID_DMA)
+fabric_server = FabricServer(port=7897, fabric_channel=fabric_channel)
+
+fabric = PlatformFabric(
+    fabric_channel=fabric_channel,
+    local_bus=bus,
+    local_regions=[FabricRegion('python_mmio', 0x40004000, 0x6000, 'python')],
+    memory_regions=[FabricRegion('sram', 0x20000000, 0x20000, 'qemu_memory')],
+    tracer=tracer,
+)
+
+master = ExamplePythonMaster(
+    fabric.client(MASTER_ID_PY_FABRIC_DEMO, 'py_fabric_demo')
+)
+```
+
+Typical legacy-compatible DMA-style wiring:
+
+```python
+addr_space = BusMasterAddressSpace(
+    fabric_channel=fabric_channel,
+    mmio_bus=bus,
+    mmio_regions=[(0x40000000, 0x00100000)],
+    master_id=MASTER_ID_DMA,
+)
+
+data = addr_space.read(src_addr, length)
+if data is not None:
+    ok = addr_space.write(dst_addr, data)
+```
+
+Guidelines for Python users:
+
+- Use `FabricMasterClient` for new fabric-aware masters; use
+  `BusMasterAddressSpace` when integrating with an existing DMA-like model that
+  already expects an address-space object.
+- Use generated constants from `device_model/generated/device_consts.py` for
+  master IDs and addresses.
+- Check `FabricResponse.ok` or the boolean/`None` result from lower-level
+  address-space helpers; do not assume cross-domain transport is always present.
+- Same-domain Python MMIO should stay in-process through `PlatformFabric` or
+  `BusMasterAddressSpace`, which avoids socket reentrancy and unnecessary QEMU
+  round trips.
+
+### SystemVerilog Interfaces
+
+The SV side has separate ingress and egress interfaces. Ingress is for
+CPU/QEMU-originated register access into SV APB slaves. Egress is for SV bus
+masters, such as DMA, that initiate transactions to the platform fabric.
+
+#### Host-to-SV APB Ingress
+
+`sv_host_shell.cpp` accepts QEMU's MMIO R/W socket requests and drives the
+`host_req` / `host_rsp` pins on `sv_device_top.sv`. SV APB timing is owned by
+`sv_apb_ingress.sv`.
+
+```text
+host_req_valid
+host_req_ready
+host_req_write
+host_req_addr[11:0]
+host_req_size[2:0]
+host_req_wdata[31:0]
+host_rsp_valid
+host_rsp_rdata[31:0]
+host_rsp_error
+```
+
+Usage rules:
+
+- `sv_host_shell.cpp` asserts `host_req_valid` when `host_req_ready` is high.
+- `sv_apb_ingress.sv` latches the request, performs APB setup/access phases,
+  and pulses `host_rsp_valid` when `pready` is observed.
+- Current SV APB register access is 32-bit; `sv_apb_ingress.sv` reports an
+  error when `host_req_size` is not `3'b010`.
+- New SV APB slaves should connect behind `sv_apb_decoder.sv`, not directly to
+  C++.
+
+#### SV Master Request/Response Port
+
+SV bus masters should use the generic request/response interface already used
+between `sv_dma_core.sv`, `sv_master_router.sv`, and
+`sv_fabric_egress_dpi.sv`:
+
+```text
+req_valid
+req_ready
+req_write
+req_addr[31:0]
+req_wdata[31:0]
+req_size[2:0]
+rsp_valid
+rsp_rdata[31:0]
+rsp_error
+```
+
+Typical SV master behavior:
+
+```systemverilog
+// Request phase
+if (start && req_ready_i) begin
+    req_valid_o <= 1'b1;
+    req_write_o <= 1'b0;
+    req_addr_o  <= source_addr;
+    req_size_o  <= 3'b010; // 32-bit
+end
+
+// Response phase
+if (rsp_valid_i) begin
+    if (rsp_error_i) begin
+        error_q <= 1'b1;
+    end else begin
+        read_data_q <= rsp_rdata_i;
+    end
+end
+```
+
+Usage rules:
+
+- `sv_master_router.sv` is the stable integration point for SV masters. New SV
+  masters should connect to the router or to an arbitration layer in front of
+  it, not to DPI functions directly.
+- `sv_fabric_egress_dpi.sv` is the current external endpoint. It accepts one
+  request, calls `sv_fabric_read32()` or `sv_fabric_write32()`, and returns a
+  response one SV cycle later so requester FSMs observe a clean response phase.
+- Current DPI egress supports 32-bit accesses only. Wider or byte-lane aware
+  transactions should extend the SV request port and the DPI helper contract
+  together.
+- SV RTL should treat `rsp_error` as a bus error and reflect it into its own
+  status/error registers.
+
+#### C++ DPI Boundary
+
+The only SV-to-host fabric calls are the timing-independent DPI helpers
+implemented in `sv_host_shell.cpp`:
+
+```systemverilog
+import "DPI-C" function longint unsigned sv_fabric_read32(input int unsigned addr);
+import "DPI-C" function int sv_fabric_write32(input int unsigned addr,
+                                              input int unsigned data);
+```
+
+`sv_fabric_read32()` returns `{status_or_error_bits, data[31:0]}` in a 64-bit
+value: upper bits zero means success, non-zero means error. `sv_fabric_write32()`
+returns `1` on success and `0` on error. These functions are an implementation
+boundary for `sv_fabric_egress_dpi.sv`; ordinary SV device logic should use the
+request/response port instead of importing DPI directly.
+
+Guidelines for SV users:
+
+- Add APB slave registers under `sv_apb_decoder.sv` for CPU-visible SV devices.
+- Add bus-master logic with the generic request/response port and route through
+  `sv_master_router.sv`.
+- Keep local SV-to-SV decode in SV when possible; use `sv_fabric_egress_dpi.sv`
+  only when the target is outside the Verilated device island.
+- Keep C++ host-shell code limited to sockets, Verilator clocking, IRQ/waveform
+  plumbing, and timing-independent DPI fabric helpers.
+
 ## Transport Direction
 
 The external bus-master channel is a fabric transaction channel. Python and SV
@@ -331,24 +591,40 @@ Fabric transactions are functional transaction boundaries.
 - Any modeled bus latency should be explicit metadata or a scheduled device
   event, not an accidental side effect of TCP latency.
 
-## Initial Implementation Plan
+## Current Integration State
 
-The fabric can be introduced without rewriting every device at once.
+The fabric is now the shared bus-master transport for QEMU-native, Python, and
+SystemVerilog master flows. The old memory-only `M` packet and `mem-chardev`
+property have been removed from the runtime ABI.
 
-1. Define generated fabric metadata from `spec/`: address ranges, owner domain,
-   slave type, allowed masters, and access width constraints.
-2. Rename or wrap `BusMasterAddressSpace` as the Python fabric client while
-   preserving existing DMA/HSM/flash users.
-3. Add a QEMU-side fabric helper for native masters such as SYSCTRL.
-4. Extend the SV host shell with a bus transaction channel or extend the current
-   memory channel into address-decoded fabric access.
-5. Teach `sv_master_router.sv` to decode local SV windows first and forward
-   external windows to the bridge.
-6. Add a focused Python-to-SV proving regression first: a Python APB master
-  should read the SV DMA ID register at `SV_TIMER_DMA_ID_REG` and observe
-  `0x414D4453` (`"SDMA"`). Follow-on regressions should cover one SV master
-  accessing a Python register and both domains accessing SRAM through the
-  APB-to-AHB path.
+Completed integration points:
+
+1. Generated master IDs are defined from `spec/soc.yaml` and emitted for
+  firmware/Python/QEMU use.
+2. QEMU-native masters use `mmio_fabric_read()` / `mmio_fabric_write()` with
+  generated master IDs, for example SYSCTRL using `KX6625_MASTER_ID_SYSCTRL`.
+3. External Python/SV master traffic reaches QEMU through `fabric-chardev` and
+  the `F` frame.
+4. Python masters use `PlatformFabric`, `FabricMasterClient`, or the existing
+  `BusMasterAddressSpace` wrapper, all carrying explicit master IDs.
+5. SV ingress and egress transaction sequencing live in SV: `sv_apb_ingress.sv`
+  owns host-to-APB timing, and `sv_fabric_egress_dpi.sv` owns SV-master
+  response timing before crossing the C++ DPI boundary.
+6. Regression coverage proves Python-to-Python fabric access, Python-to-SV
+  register access, QEMU-native SYSCTRL fabric access, and SV DMA access to
+  QEMU fabric memory windows.
+
+Known remaining polish:
+
+- `sv_master_router.sv` is still a pass-through point for external fabric
+  access. It is intentionally the place to add local SV target decode or
+  arbitration when multiple SV masters/targets appear.
+- The runnable wire frame still uses an 8-bit reserved `flags` byte. The
+  logical 32-bit sideband field should be introduced in a future protocol
+  revision when access policy or debug/protection attributes need it.
+- A dedicated SV-master-to-Python-register regression would further prove the
+  opposite cross-domain MMIO direction. Current e2e coverage proves SV master
+  fabric access through SRAM and Python master access into SV registers.
 
 ## Prototype Status
 
@@ -382,16 +658,14 @@ and adds both Python-side and QEMU-side fabric runtime pieces:
   device-register transactions through `mmio_fabric` with
   `KX6625_MASTER_ID_SYSCTRL`.
 - `sv_device/sv_fabric_router.sv` records the SV request/response port contract
-  but is not yet used by `sv_device_top.sv`.
+  as a reusable reference for future router/decode expansion.
 
 The demo master currently proves Python-master-to-Python-slave register access
 by driving the CRC peripheral through the fabric on the first Python tick. It
 also performs the first Python-to-SV proof by reading `SV_TIMER_DMA_ID_REG`
 through QEMU fabric decode and expecting `0x414D4453` (`"SDMA"`). QEMU e2e also
 proves that SYSCTRL native accesses and Python/SV external master accesses
-continue to work through the QEMU fabric helper. The next integration step is
-the opposite cross-domain direction: an SV master reaching a Python register
-through QEMU fabric decode.
+continue to work through the QEMU fabric helper.
 
 ## Review Questions
 

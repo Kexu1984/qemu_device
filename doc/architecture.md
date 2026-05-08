@@ -38,7 +38,7 @@ The platform is organized into several modeling layers.
 | Layer | Main files | Responsibility |
 |-------|------------|----------------|
 | QEMU machine | `scripts/qemu-fork/hw/arm/kx6625.c` | CPU containers, memory map, native SYSCTRL, flash preload, reset and boot gates |
-| QEMU socket proxy | `scripts/qemu-fork/hw/misc/mmio_sockdev.c` | Generic MMIO, IRQ, tick, DMA memory, and reset transport between QEMU and external models |
+| QEMU socket proxy | `scripts/qemu-fork/hw/misc/mmio_sockdev.c` | Generic MMIO, IRQ, tick, fabric bus-master, and reset transport between QEMU and external models |
 | Python models | `device_model/` | Fast functional peripheral models, register behavior, DMA clients, reference crypto/OTP behavior |
 | SystemVerilog models | `sv_device/` | RTL-style peripheral blocks with local clocks, accessed through transaction boundaries |
 | Firmware | `firmware/` | FreeRTOS CPU0 workload, CPU1 bare-metal loop, driver-level validation |
@@ -69,7 +69,11 @@ The current platform has these modeled bus masters:
 | CPU0 | `0x00` | Firmware MMIO through QEMU CPU access | Main FreeRTOS core |
 | CPU1 | `0x01` | Firmware MMIO through QEMU CPU access | Bare-metal secondary core |
 | SYSCTRL | `0xF0` | Native QEMU address-space accesses into device registers | Used for pre-CPU and privileged SoC control flows |
-| DMA/HSM internal DMA | transport-specific | `mem-chardev` physical memory channel | Reads/writes QEMU physical memory as a modeled bus master |
+| DMA | `0x10` | Python `BusMasterAddressSpace` through QEMU fabric | Reads/writes Python MMIO or QEMU memory as a modeled bus master |
+| HSM | `0x11` | Python `BusMasterAddressSpace` through QEMU fabric | Internal DMA path for crypto buffers |
+| FLASH_CTRL | `0x12` | Python `BusMasterAddressSpace` through QEMU fabric | Accesses modeled flash data windows and QEMU memory |
+| PY_FABRIC_DEMO | `0x13` | Python `FabricMasterClient` through `PlatformFabric` | Regression/proof master for Python-to-Python and Python-to-SV access |
+| SV_DMA | `0x20` | SV `req/rsp` port through `sv_fabric_egress_dpi.sv` | SV DMA master reaches QEMU fabric through host-shell DPI helpers |
 
 The SYSCTRL master ID exists because some flows happen before CPU0 is released. Device models can use this ID to distinguish CPU-visible accesses from privileged SoC-control accesses.
 
@@ -153,7 +157,9 @@ Python models should behave like hardware peripherals:
 - Keep register reset values and access policy aligned with `spec/*.yaml`.
 - Use `RegisterBank` and shared helpers where possible.
 - Use QEMU virtual time or DES events for deterministic timing.
-- Use `MemChannel` for modeled bus-master memory access.
+- Use `FabricMasterClient` or `BusMasterAddressSpace` for modeled bus-master
+	access. These paths carry generated master IDs and route through the platform
+	fabric instead of a target-specific memory-only channel.
 - Avoid hidden direct coupling unless it represents an internal hardware connection, such as HSM reading OTP key slots through a private key-provider path.
 
 ## SystemVerilog Device Model Rules
@@ -164,6 +170,9 @@ Rules:
 
 - SV blocks keep local clocks and local state machines.
 - QEMU accesses SV blocks through transaction boundaries, usually APB-style register operations.
+- SV bus masters use the generic `req/rsp` interface through
+	`sv_master_router.sv`; external targets go through `sv_fabric_egress_dpi.sv`
+	and the host shell's timing-independent DPI fabric helpers.
 - SV IRQs return to QEMU through the normal IRQ transport.
 - Python reference models can be used for comparison, but should not hide the SV block's own register behavior.
 - Do not claim cycle-accurate CPU-to-SV alignment unless the bridge explicitly models that timing.

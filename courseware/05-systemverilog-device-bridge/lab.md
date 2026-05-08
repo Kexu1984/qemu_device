@@ -2,7 +2,7 @@
 
 ## 目标
 
-理解 SystemVerilog timer 如何通过 Verilator bridge 接入 QEMU。
+理解 SystemVerilog timer 如何通过 SV host shell 接入 QEMU。
 
 ## 实验 1：构建 SV host shell
 

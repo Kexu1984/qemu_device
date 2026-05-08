@@ -20,7 +20,7 @@
 | 02 | QEMU 作为 CPU/SoC 行为级模型 | 软件为主 | Cortex-M、NVIC、SysTick、MMIO、icount 的边界 |
 | 03 | mmio-sockdev 与 Python 外设模型 | 软件 + 验证 | 如何快速搭建 UART/DMA/Timer/WDT 等功能模型 |
 | 04 | FreeRTOS、双核启动和 firmware demo 闭环 | 软件为主 | startup、vector table、linker、FreeRTOS port、CPU1 IPC |
-| 05 | SystemVerilog RTL device 接入路径 | 验证为主 | Verilator bridge、APB transaction、IRQ、独立 clock domain |
+| 05 | SystemVerilog RTL device 接入路径 | 验证为主 | SV host shell、APB transaction、IRQ、独立 clock domain |
 | 06 | 自动化 e2e、trace 和软件回归测试 | 软件 + 验证 | 如何把 demo 变成可重复的 regression |
 | 07 | 面向软件 CI/CD 与 coverage 的平台演进 | 软件 + 管理 | 如何建设 driver/API/application coverage 和质量门禁 |
 | 08 | AI 驱动复杂工程原型的方法论 | 技术负责人 | 如何让 AI 参与架构探索、编码、调试、文档和复盘 |
@@ -125,7 +125,7 @@ courseware/
 
 - `mmio-sockdev` R/W、IRQ、tick、mem、rst channel
 - `device_model/mmio_device_server.py` 的 transport + dispatch 分层
-- `MMIODevice`、`IRQController`、`MemChannel`、`RstController`
+- `MMIODevice`、`IRQController`、`FabricChannel`、`RstController`
 - UART、DMA、CRC、WDT 模型的设计方式
 - `spec/devices.yaml` 到 C/Python 常量的生成链路
 

@@ -1,8 +1,8 @@
 // SystemVerilog-domain bus-master router.
 //
 // Current architecture: pass every SV bus-master request through to the
-// C++ bridge, which translates the bridge-facing AHB-like transaction
-// into mmio-sockdev fabric-chardev traffic against the QEMU fabric.
+// external fabric egress endpoint, which calls timing-independent DPI helpers
+// in the C++ host shell to emit mmio-sockdev fabric-chardev traffic.
 //
 // This module is intentionally still a pass-through point. It exists as the
 // architectural place to add local target decode later (for example local APB,

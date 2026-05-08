@@ -34,7 +34,7 @@ QEMU 只做通用 MMIO proxy
 | chardev | QEMU <-> model | MMIO read/write |
 | irq-chardev | model -> QEMU | IRQ assert/deassert |
 | tick-chardev | QEMU -> model | virtual-time tick |
-| mem-chardev | model -> QEMU | DMA bus-master memory access |
+| fabric-chardev | model -> QEMU | fabric bus-master access |
 | rst-chardev | model -> QEMU | system reset request |
 
 一个外设可以只用 R/W，也可以组合使用 IRQ/tick/mem/rst。

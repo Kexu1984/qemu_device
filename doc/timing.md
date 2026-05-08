@@ -11,7 +11,7 @@ The most important rule is simple: this project has multiple time domains. They 
 | Host wall-clock | host time | Linux scheduler, TCP, process execution | Not deterministic | Process runtime and socket latency |
 | QEMU virtual time | nanoseconds | QEMU `QEMU_CLOCK_VIRTUAL`; deterministic with `-icount` | Deterministic when `ICOUNT_SHIFT=5` is used | CPU execution, QEMU timers, Python timed events |
 | Python device time | QEMU virtual-time timestamps | Tick/DES messages from `mmio-sockdev` | Deterministic when driven by QEMU virtual time | Timer, WDT, DMA latency, modeled device events |
-| SV local time | Verilator cycles | SV host shell `eval_cycle()` loop | Local to the bridge, not tied to QEMU virtual time | RTL pclk/APB/register state machines |
+| SV local time | Verilator cycles | SV host shell `eval_cycle()` loop | Local to the SV host shell, not tied to QEMU virtual time | RTL pclk/APB/register state machines |
 
 The platform intentionally does not force these into a single cycle-accurate full-chip clock. QEMU provides a CPU/software behavioral model; Python devices provide deterministic functional device timing; SV devices keep a local RTL-style clock and communicate through MMIO/IRQ transaction boundaries.
 
@@ -140,19 +140,19 @@ Use these rules for Python device models:
 | Timer | DES/virtual-time expiry | Register write can schedule the exact expiry deadline |
 | DMA | DES one-shot | Transfer latency is computed and completion happens on the scheduled tick |
 | WDT | Virtual-time countdown | Timeout is based on simulated chip time, not host time |
-| HSM | Functional operation with DMA memory access | Current crypto operation is functional; add scheduled latency if a future model needs cycle-level crypto duration |
+| HSM | Functional operation with fabric-backed buffer access | Current crypto operation is functional; add scheduled latency if a future model needs cycle-level crypto duration |
 | UART/CRC/OTP | Mostly untimed functional MMIO | Register effects are immediate unless explicitly modeled otherwise |
 
 ## SystemVerilog Device Timing
 
-SystemVerilog devices use a separate local clock inside the Verilator bridge. This clock is not `QEMU_CLOCK_VIRTUAL`.
+SystemVerilog devices use a separate local clock inside the Verilator host shell. This clock is not `QEMU_CLOCK_VIRTUAL`.
 
-The current bridge advances SV time in two ways:
+The current host shell advances SV time in two ways:
 
 - APB reads/writes explicitly call `eval_cycle()` to execute setup/access/cleanup cycles.
-- When no MMIO request is pending, the bridge poll loop times out and calls `run_cycles(kIdleCyclesPerPoll)`, currently 16 cycles per idle poll.
+- When no MMIO request is pending, the host shell poll loop times out and calls `run_cycles(kIdleCyclesPerPoll)`, currently 16 cycles per idle poll.
 
-This means SV devices continue to have a local notion of pclk cycles even when QEMU is not issuing MMIO requests. That local progression is driven by the bridge process and host scheduling, not by QEMU `icount`.
+This means SV devices continue to have a local notion of pclk cycles even when QEMU is not issuing MMIO requests. That local progression is driven by the host shell process and host scheduling, not by QEMU `icount`.
 
 ## SV Transaction Boundary
 
@@ -162,8 +162,9 @@ From QEMU's point of view, an SV device is still accessed through a synchronous 
 Firmware MMIO access
     -> QEMU mmio-sockdev
     -> TCP request to SV host shell
-    -> bridge performs APB cycles on Verilated RTL
-    -> bridge returns register data or write response
+    -> sv_host_shell.cpp submits host_req/host_rsp to sv_device_top.sv
+    -> sv_apb_ingress.sv performs APB setup/access cycles on Verilated RTL
+    -> host shell returns register data or write response
     -> QEMU resumes guest CPU
 ```
 
@@ -171,7 +172,7 @@ The APB operation can consume several SV local cycles. Those cycles do not autom
 
 ## SV IRQ Timing
 
-An SV block can raise an IRQ after local RTL cycles. The bridge observes the RTL IRQ output and sends an IRQ message to QEMU. QEMU then injects the corresponding NVIC interrupt into the guest-visible CPU model.
+An SV block can raise an IRQ after local RTL cycles. The SV host shell observes the RTL IRQ output and sends an IRQ message to QEMU. QEMU then injects the corresponding NVIC interrupt into the guest-visible CPU model.
 
 This is a functional interrupt connection, not a cycle-accurate cross-domain timing model. The exact relationship between an SV pclk edge and a QEMU CPU instruction boundary is not modeled.
 
@@ -181,7 +182,7 @@ Python and SV timing have different purposes.
 
 | Aspect | Python model | SV model |
 |--------|--------------|----------|
-| Clock source | QEMU virtual time | Bridge-local Verilator cycles |
+| Clock source | QEMU virtual time | Host-shell-local Verilator cycles |
 | Best for | Functional device behavior, deterministic event latency, fast reference models | RTL register behavior, local state machines, APB protocol validation |
 | Regression determinism | Strong with `ICOUNT_SHIFT=5` | Functional, but local-cycle progress can depend on bridge scheduling |
 | CPU cycle alignment | Not cycle accurate | Not cycle accurate across QEMU CPU and SV pclk |
@@ -197,7 +198,7 @@ The platform models:
 - NVIC interrupt delivery at the behavioral level.
 - Deterministic QEMU/Python virtual-time events under `icount`.
 - Local RTL cycles inside the SV host shell.
-- DMA-style memory access through the QEMU physical memory channel.
+- DMA-style bus-master access through the QEMU fabric channel.
 - WFI wakeup from virtual timer or interrupt events.
 
 ## What Is Not Modeled

@@ -1,6 +1,6 @@
 # QEMU Custom MMIO Socket Device
 
-A framework for implementing custom ARM hardware devices in QEMU, with register logic and interrupt firing modelled in external processes. A single generic QEMU SysBus device (`mmio-sockdev`) proxies MMIO reads/writes, IRQ lines, virtual-clock ticks, and bus-master DMA to/from Python or SystemVerilog/Verilator device models over TCP.
+A framework for implementing custom ARM hardware devices in QEMU, with register logic and interrupt firing modelled in external processes. A single generic QEMU SysBus device (`mmio-sockdev`) proxies MMIO reads/writes, IRQ lines, virtual-clock ticks, reset requests, and fabric bus-master transactions to/from Python or SystemVerilog/Verilator device models over TCP.
 
 This repository is a **chip-function validation environment**, not a full cross-domain cycle-accurate simulator. QEMU provides a CPU/software behavioural model for firmware execution. Python devices provide fast functional peripheral models. SystemVerilog devices keep their own local RTL clock and are connected to QEMU through transaction boundaries such as MMIO reads/writes and IRQs.
 
@@ -26,9 +26,9 @@ MMIO access to an SV device is a synchronous transaction boundary: QEMU blocks w
 ## Overview
 
 This project implements:
-- **Custom QEMU Device** (`mmio-sockdev`): Generic SysBus proxy — 4 KB MMIO, IRQ line, optional virtual-clock tick channel, optional bus-master DMA memory channel, optional system-reset channel (`rst-chardev`). One instance per device on the QEMU command line.
+- **Custom QEMU Device** (`mmio-sockdev`): Generic SysBus proxy — 4 KB MMIO, IRQ line, optional virtual-clock tick channel, optional fabric bus-master channel, optional system-reset channel (`rst-chardev`). One instance per device on the QEMU command line.
 - **Python Device Domain** (`device_model/soc_top.py`): `PythonDeviceDomain` wires transport servers, the `PeripheralBus`, `BusMasterAddressSpace`, reset/tick managers, and abstract `MMIODevice` instances. `SoCTop` remains as a compatibility alias. `kx6625_default()` returns the canonical KX6625 device-domain map.
-- **Transport Boundary** (`device_model/mmio_device_server.py`): TCP servers for `mmio-sockdev` channels — R/W, IRQ, periodic/DES tick, bus-master memory, and reset. Each peripheral model is a `MMIODevice` subclass with `read()`, `write()`, and optional `on_tick()`.
+- **Transport Boundary** (`device_model/mmio_device_server.py`): TCP servers for `mmio-sockdev` channels — R/W, IRQ, periodic/DES tick, fabric bus-master access, and reset. Each peripheral model is a `MMIODevice` subclass with `read()`, `write()`, and optional `on_tick()`.
 - **Native SYSCTRL block**: QEMU-native system controller at `0x4000A000` for CPU identity, CPU1 reset release, boot status, device clock/reset policy state, and SYSCTRL-mediated indirect device-register access.
 - **Nine socket-backed peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT), SystemVerilog APB timer/DMA subsystem, an HSM crypto accelerator with AES-128/CMAC support, and an OTP controller with 1-to-0 programming and ECC. See [`spec/README.md`](spec/README.md) for register maps.
 - **SystemVerilog Device Prototype** (`sv_device/`): A Verilator-built APB peripheral subsystem listening on TCP ports 7906/7907/7912. QEMU drives it through a normal `mmio-sockdev` instance at `0x4000B000`; the SV subsystem contains an APB timer at offset `0x000` and a first-version SV DMA at offset `0x100`, with completion IRQs returned through NVIC IRQ5.
@@ -68,10 +68,10 @@ flowchart TB
         direction TB
 
         PYDOM["PythonDeviceDomain\ntransport + topology wiring"]
-        PYSRV["Transport servers\nRW / IRQ / Tick / Mem / Reset"]
+        PYSRV["Transport servers\nRW / IRQ / Tick / Fabric / Reset"]
         PYBUS["PeripheralBus\nMMIODevice dispatcher"]
         PYDEV["MMIODevice instances\nabstract device models"]
-        PYADDR["BusMasterAddressSpace\nMMIO or QEMU physical memory"]
+        PYADDR["BusMasterAddressSpace\nPython MMIO or QEMU fabric"]
         PYDMA["Bus-master device models\nDMA / HSM / flash"]
         PYRST["SystemResetManager"]
 
@@ -296,7 +296,7 @@ write(CH0_CTRL.START)
   → QEMU timer_mod(vtime + 512 ns)
   → firmware executes WFI
   → icount: vtime jumps to deadline
-  → on_tick(vtime_now + 512 ns)        → MemChannel copy → pulse IRQ 1
+    → on_tick(vtime_now + 512 ns)        → fabric copy → pulse IRQ 1
 ```
 
 No background thread is needed. The virtual-time deadline is guaranteed by icount — the transfer completes at exactly `arm_vtime + transfer_ns` in chip time.
@@ -306,7 +306,7 @@ No background thread is needed. The virtual-time deadline is guaranteed by icoun
 ```
 DmaClientHandle.transfer()  →  _peripheral_request()  →  _arm_channel()
   → background thread waits for DREQ acknowledgment
-  → _tick_channel() after N ticks → MemChannel copy → on_complete() callback
+    → _tick_channel() after N ticks → fabric copy → on_complete() callback
   → DmaClientDemoDevice sets STATUS.DONE → pulses IRQ 3
 ```
 
@@ -327,7 +327,7 @@ UartChannel.send(data)          — called in device R/W thread
      └──► client socket 2  (e.g. python3 scripts/uart_console.py)
 ```
 
-`UartChannel` is transport-layer infrastructure (like `IRQController`, `MemChannel`, `RstController`), not a device model. It lives in `mmio_base.py` and is wired by `PythonDeviceDomain` (via `UartCfg.term_port`). You can also wire it manually:
+`UartChannel` is transport-layer infrastructure (like `IRQController`, `FabricChannel`, `RstController`), not a device model. It lives in `mmio_base.py` and is wired by `PythonDeviceDomain` (via `UartCfg.term_port`). You can also wire it manually:
 
 ```python
 uart_channel = UartChannel(port=7904)
@@ -579,18 +579,26 @@ Write:  'W'(1B) | offset(4B LE) | size(1B) | data(sizeB LE)         QEMU → Pyt
 
 Sent every `tick-period-ms` of QEMU virtual time. Python dispatches to all devices via `PeripheralBus.tick_all()`.
 
-### MEM Channel — Bus-Master DMA (Python → QEMU, optional)
+### Fabric Channel — Bus-Master Access (Python/SV → QEMU, optional)
 
-Allows a Python device model to directly read/write QEMU physical memory, modelling a bus-master DMA engine. Maximum single transfer: 64 KB.
+Allows Python and SystemVerilog master devices to read/write absolute SoC
+addresses through the QEMU fabric. The target can be QEMU physical memory,
+QEMU-native MMIO, Python MMIO, or SV APB, depending on address decode.
+Maximum single Python transfer chunk: 64 KB.
 
 ```
-DMA write:  'M'(1B) | 'W'(1B) | phys_addr(8B LE) | length(4B LE) | data(lengthB)
-            QEMU executes cpu_physical_memory_write(phys_addr, data, length)
+Write: 'F'(1B) | 'W'(1B) | master_id(1B) | flags(1B)
+    | addr(8B LE) | length(4B LE) | data(lengthB)
+    QEMU responds: status(1B)
 
-DMA read:   'M'(1B) | 'R'(1B) | phys_addr(8B LE) | length(4B LE)
-            QEMU executes cpu_physical_memory_read(phys_addr, buf, length)
-            QEMU responds: data(lengthB)
+Read:  'F'(1B) | 'R'(1B) | master_id(1B) | flags(1B)
+    | addr(8B LE) | length(4B LE)
+    QEMU responds: status(1B) | data(lengthB)
 ```
+
+`flags` is reserved and currently zero. Non-zero status means the fabric saw a
+decode, access, slave, or transport error; device models should reflect that in
+their own status/error registers.
 
 ### RST Channel — System Reset (Python → QEMU, optional)
 
@@ -780,7 +788,7 @@ The FreeRTOS application task (`firmware/main.c`) executes nine demos from the U
 
 1. Fills SRAM source buffer `0x20001000` with bytes `0x01..0x20` (32 bytes).
 2. Programs DMA CH0 registers: `CH0_SRC_ADDR=0x20001000`, `CH0_DST_ADDR=0x20002000`, `CH0_LENGTH=32`, `CH0_CTRL=START`.
-3. DMA controller (Python) reads the source via `dma_read()`, writes the destination via `dma_write()`, then pulses IRQ 1 at the modelled virtual-time deadline.
+3. DMA controller (Python) reads the source and writes the destination through `BusMasterAddressSpace`, which routes SRAM accesses over `fabric-chardev`, then pulses IRQ 1 at the modelled virtual-time deadline.
 4. Firmware handles IRQ 1, then verifies the destination buffer matches the source.
 5. Prints `[DMA] Verification PASSED!` and `[FW] Demo complete.`
 
@@ -808,9 +816,9 @@ The FreeRTOS application task (`firmware/main.c`) executes nine demos from the U
 ### Phase 6 — SystemVerilog APB Timer
 
 1. Firmware writes `SV_TIMER_LOAD=8`, then starts the SV timer with IRQ enabled.
-2. QEMU forwards the MMIO writes to the Verilator bridge at TCP port 7906.
-3. The bridge turns the MMIO operations into APB cycles on `sv_timer_apb.sv`, advances the timer in the SV device's local pclk domain, and observes `irq_o`.
-4. The bridge sends an IRQ message on port 7907; QEMU raises NVIC IRQ5.
+2. QEMU forwards the MMIO writes to the SV host shell at TCP port 7906.
+3. `sv_apb_ingress.sv` turns the host request into APB setup/access cycles on `sv_timer_apb.sv`, advances the timer in the SV device's local pclk domain, and the host shell observes `irq_o`.
+4. The host shell sends an IRQ message on port 7907; QEMU raises NVIC IRQ5.
 5. Firmware handles IRQ5, writes `SV_TIMER_IRQ_CLEAR`, and prints `[SVTIMER] IRQ observed and cleared PASSED!`.
 
 This phase validates the QEMU-to-SV transaction path and RTL interrupt behaviour. It does not model CPU bus wait states or force the SV pclk to remain cycle-aligned with QEMU's 48 MHz CPU clock.
@@ -869,17 +877,22 @@ qemu_device/
 ├── freertos/
 │   └── FreeRTOS-Kernel/              # Vendored FreeRTOS kernel source + GCC ARM_CM4F port
 ├── sv_device/                        # SystemVerilog device prototypes
+│   ├── sv_device_top.sv              # Verilated SV device-island top
+│   ├── sv_apb_ingress.sv             # Host request to APB setup/access bridge
 │   ├── sv_timer_apb.sv               # APB register timer RTL
-│   ├── sv_host_shell.cpp           # Verilator + TCP bridge for mmio-sockdev
+│   ├── sv_dma_apb.sv                 # APB-visible DMA registers + core wrapper
+│   ├── sv_master_router.sv           # SV master request/response routing point
+│   ├── sv_fabric_egress_dpi.sv       # SV master egress to C++ DPI fabric helpers
+│   ├── sv_host_shell.cpp             # Verilator host shell: sockets, clock, IRQ, DPI
 │   └── Makefile                      # Builds sv_device/build/sv_host_shell
 ├── device_model/                     # Python device emulation layer
-│   ├── mmio_base.py                  # MMIODevice ABC; IRQController; MemChannel;
+│   ├── mmio_base.py                  # MMIODevice ABC; IRQController; FabricChannel;
 │   │                                 #   RstController; UartChannel;
 │   │                                 #   RegisterBank (+ RegAccess policies); IrqLine;
 │   │                                 #   VirtualClock; DmaRequestInterface
 │   ├── mmio_device_server.py         # Transport servers + PeripheralBus + main()
 │   ├── soc_top.py                    # PythonDeviceDomain topology + typed configs
-│   │                                 #   + BusMasterAddressSpace/reset/tick wiring
+│   │                                 #   + PlatformFabric/BusMasterAddressSpace/reset/tick wiring
 │   │                                 #   + kx6625_default(); SoCTop compatibility alias
 │   ├── tracer.py                     # Non-blocking JSONL event tracer (Tracer, DeviceTracer,
 │   │                                 #   NULL_DEVICE_TRACER; background writer thread)
@@ -902,7 +915,7 @@ qemu_device/
 │   ├── e2e_test.sh                   # Automated end-to-end smoke test → trace_report.html
 │   └── qemu-fork/                    # Modified QEMU 8.1.0 source tree (build target)
 │       └── hw/
-│           ├── misc/mmio_sockdev.c   # Generic SysBus mmio-sockdev (chardev/irq/tick/mem/rst)
+│           ├── misc/mmio_sockdev.c   # Generic SysBus mmio-sockdev (chardev/irq/tick/fabric/rst)
 │           └── arm/kx6625.c          # KX6625 custom SoC definition
 └── build/                            # Build artifacts (gitignored)
     ├── firmware.elf / firmware.bin / firmware.hex
@@ -943,8 +956,8 @@ IRQ pulse pattern: assert then immediately deassert to edge-trigger the NVIC wit
 2. **Write the model**: create `device_model/<name>_model.py` subclassing `MMIODevice`. Override `read()`, `write()`, and optionally `on_tick()` for timing behaviour. Use `RegisterBank` (with `RegAccess` policies) for register storage, `IrqLine` for interrupt injection, `VirtualClock` for countdown timing, and `DmaRequestInterface` for bus-master DMA requests. For watchdog-style resets, instantiate a `RstController` and pass a `SystemResetManager.wdt_reset` callback.
 3. **Register via PythonDeviceDomain**: add a new config dataclass (subclass one of the existing ones, or extend `PythonDeviceDomain.__init__`) and add a `bus.register(...)` call. For simple polled devices (no IRQ, no tick), you can also just add a `RWServer` + `bus.register` pair directly in `mmio_device_server.py`'s `main()`.
 4. **Wire the tracer**: accept `tracer: Optional[Tracer] = None` in `__init__`, assign `self._tr = tracer.context(self.name) if tracer else NULL_DEVICE_TRACER`, call `self._tr.tick(vtime_ns)` at the top of `on_tick()`, and emit events with `self._tr.emit('EVENT_NAME', **fields)`. Pass `tracer=tracer` when constructing the device.
-5. **Add transport servers**: `PythonDeviceDomain` handles this automatically for devices added to its config list. For manual wiring, create `RWServer` and `IRQServer` instances as needed. Devices that need timing use the existing `TickServer` automatically. Devices that need bus-master DMA get a dedicated `MemServer` instance. Devices that trigger system resets get an `RstServer` instance wired to a `RstController`.
-6. **Extend the QEMU command line**: add a `mmio-sockdev` instance with `chardev`, `irq-chardev`, `addr`, `irq-num`. Add `mem-chardev` for DMA; `tick-chardev` for timer-style ticks; `rst-chardev` for system-reset capability.
+5. **Add transport servers**: `PythonDeviceDomain` handles this automatically for devices added to its config list. For manual wiring, create `RWServer` and `IRQServer` instances as needed. Devices that need timing use the existing `TickServer` automatically. Bus-master devices use `FabricServer` plus `FabricChannel`; devices that trigger system resets get an `RstServer` instance wired to a `RstController`.
+6. **Extend the QEMU command line**: add a `mmio-sockdev` instance with `chardev`, `irq-chardev`, `addr`, `irq-num`. Add `fabric-chardev` for bus-master access; `tick-chardev` for timer-style ticks; `rst-chardev` for system-reset capability.
 7. Regenerate constants with `make gen`.
 
 ## Troubleshooting
@@ -955,7 +968,7 @@ IRQ pulse pattern: assert then immediately deassert to edge-trigger the NVIC wit
 | `"Connection refused"` on port | Check server is running: `lsof -i :7890` |
 | Firmware never prints | Verify `build/firmware.hex` exists and QEMU was rebuilt (`make fw && make qemu`) |
 | IRQ never fires | Check `build/e2e_server.log`; confirm IRQ port not blocked |
-| DMA never completes | Check `build/e2e_server.log` for `[MEM]` and `[TICK]` connection lines |
+| DMA never completes | Check `build/e2e_server.log` for `[FABRIC]` and `[TICK]` connection lines |
 | WDT timeout never fires | Confirm WDT CTRL.ENABLE is set; check `[TICK]` connection in server log |
 | QEMU never resets after WDT | Verify QEMU was rebuilt (`make qemu`) with `rst-chardev` support |
 | Warm boot not detected | Python server was restarted (clears retention registers); re-run the full test |

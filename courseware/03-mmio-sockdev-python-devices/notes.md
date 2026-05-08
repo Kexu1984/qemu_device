@@ -35,9 +35,9 @@ QEMU generic proxy
 - timer expiry
 - delayed IRQ
 
-### MemChannel
+### FabricChannel
 
-DMA 不是 Python 直接访问 host memory，而是通过 QEMU mem-chardev 请求 guest physical memory read/write。
+DMA 不是 Python 直接访问 host memory，而是通过 QEMU fabric-chardev 请求 platform address read/write。
 
 这能更接近真实 bus-master device 的软件可见行为。
 
