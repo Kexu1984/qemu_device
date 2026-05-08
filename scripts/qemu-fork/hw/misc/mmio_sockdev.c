@@ -29,21 +29,20 @@
  *   The external endpoint uses these to drive device-domain events based on
  *   virtual time, not wall-clock, so timing is correct during pause/step/debug.
  *
- * MEM Protocol (mem-chardev, external device domain -> QEMU, optional):
- * - DMA write: 'M'(1B) | 'W'(1B) | phys_addr(8B LE) | length(4B LE) | data(lengthB)
- *   QEMU executes cpu_physical_memory_write(phys_addr, data, length), then
- *   returns ack(1B), where 0=OK and non-zero values are reserved for future
- *   bus-error injection.
- * - DMA read:  'M'(1B) | 'R'(1B) | phys_addr(8B LE) | length(4B LE)
- *   QEMU responds with data(lengthB) via cpu_physical_memory_read().
- *   Models bus-master DMA: Python BusMasterAddressSpace or the SV bridge can
- *   directly access QEMU physical memory.
+ * Fabric Protocol (fabric-chardev, external master -> QEMU):
+ * - Write: 'F' | 'W' | master_id(1B) | flags(1B) | addr(8B LE) | len(4B LE)
+ *          | data(lenB)
+ *   QEMU routes the access through mmio_fabric, then returns status(1B),
+ *   where 0=OK and non-zero values are fabric error status values.
+ * - Read:  'F' | 'R' | master_id(1B) | flags(1B) | addr(8B LE) | len(4B LE)
+ *   QEMU responds with status(1B) | data(lenB). Data is zero-filled on error
+ *   so the frame remains self-synchronising.
  *
  * Device properties:
  * - chardev:        main R/W channel
  * - irq-chardev:    interrupt notification channel (optional)
  * - tick-chardev:   virtual-clock tick notification channel (optional)
- * - mem-chardev:    device DMA into physical memory channel (optional)
+ * - fabric-chardev: device fabric-master channel (optional)
  * - tick-period-ms: tick interval in virtual milliseconds (default 1)
  * - addr:           MMIO base address
  * - irq-num:        GIC input pin number for auto-connect (default 32 = SPI 0)
@@ -68,9 +67,9 @@
 #include "qemu/thread.h"
 #include "qemu/timer.h"
 #include "qemu/log.h"
-#include "exec/cpu-common.h"    /* cpu_physical_memory_write/read */
 #include "sysemu/runstate.h"    /* qemu_system_reset_request / ShutdownCause */
 #include "hw/core/cpu.h"        /* current_cpu, CPUState */
+#include "hw/misc/mmio_fabric.h"
 #include "hw/misc/mmio_sockdev.h"
 
 /* ── CRU access guard (optional, installed by the platform machine) ───── */
@@ -98,30 +97,25 @@ OBJECT_DECLARE_SIMPLE_TYPE(MMIOSockDevState, MMIO_SOCKDEV)
 #define IRQ_MSG_SIZE         3
 
 /*
- * MEM channel (Python -> QEMU): device DMA into physical memory.
+ * Fabric channel (external master -> QEMU): modeled bus-master transactions.
  *
- * Protocol (Python sends to QEMU):
- *   DMA write: 'M'(1B) | 'W'(1B) | phys_addr(8B LE) | length(4B LE) | data(lengthB)
- *              QEMU responds: ack(1B), 0=OK.
- *   DMA read:  'M'(1B) | 'R'(1B) | phys_addr(8B LE) | length(4B LE)
- *              QEMU responds: data(lengthB)
- *
- * Both operations execute cpu_physical_memory_write/read() in QEMU,
- * modelling a bus-master DMA controller accessing system RAM.
+ * Fabric frames carry an explicit master ID.
  */
-#define MEM_HDR_SIZE         14     /* 'M'(1) + op(1) + addr(8 LE) + len(4 LE) */
-#define MEM_MAX_LEN          65536  /* max single DMA transfer, 64 KB */
+#define FABRIC_HDR_SIZE      16     /* 'F' + op + master + flags + addr + len */
+#define FABRIC_MAX_LEN       65536  /* max single fabric transfer, 64 KB */
 #define MASTER_ID_SYSCTRL    0xF0
 
-typedef struct MemRxState {
-    uint8_t  hdr[MEM_HDR_SIZE];
+typedef struct FabricRxState {
+    uint8_t  hdr[FABRIC_HDR_SIZE];
+    int      hdr_len;
     int      hdr_pos;
     uint8_t  op;            /* 'W' or 'R' */
-    hwaddr   phys_addr;
+    uint8_t  master_id;
+    hwaddr   addr;
     uint32_t data_len;
     uint8_t *data_buf;      /* non-NULL while accumulating write data */
     uint32_t data_pos;
-} MemRxState;
+} FabricRxState;
 
 typedef struct MMIOSockDevState {
     SysBusDevice parent_obj;
@@ -142,9 +136,9 @@ typedef struct MMIOSockDevState {
     CharBackend tick_chr;
     QEMUTimer  *tick_timer;  /* fires every tick_period_ms virtual ms */
 
-    /* MEM chardev (external endpoint -> QEMU, device DMA into physical memory) */
-    CharBackend mem_chr;
-    MemRxState  mem_rx;
+    /* Fabric chardev (external endpoint -> QEMU, bus-master transactions) */
+    CharBackend fabric_chr;
+    FabricRxState fabric_rx;
 
     /* RST chardev (external endpoint -> QEMU, triggers system reset) */
     CharBackend rst_chr;
@@ -368,79 +362,139 @@ static void mmio_sockdev_tick_chr_event(void *opaque, QEMUChrEvent event)
 }
 
 /* -----------------------------------------------------------------------
- * MEM chardev handlers
- * Python device model sends DMA commands; QEMU executes them as
- * cpu_physical_memory_write/read(), modelling a bus-master DMA controller.
+ * External fabric chardev handlers
+ * Python/SV device models send fabric-master transactions; QEMU routes each
+ * transaction through mmio_fabric.
  * ----------------------------------------------------------------------- */
 
-static int mmio_sockdev_mem_can_receive(void *opaque)
+static int mmio_sockdev_fabric_can_receive(void *opaque)
 {
-    return MEM_MAX_LEN;
+    return FABRIC_MAX_LEN;
 }
 
-static void mmio_sockdev_mem_receive(void *opaque, const uint8_t *buf, int size)
+static void mmio_sockdev_fabric_rx_reset(FabricRxState *rx)
+{
+    g_free(rx->data_buf);
+    memset(rx, 0, sizeof(*rx));
+}
+
+static void mmio_sockdev_fabric_read(MMIOSockDevState *s, FabricRxState *rx)
+{
+    uint8_t *resp = NULL;
+    MmioFabricStatus status = MMIO_FABRIC_OK;
+
+    if (rx->data_len > 0) {
+        resp = g_malloc0(rx->data_len);
+        status = mmio_fabric_read_buf(rx->master_id, rx->addr, resp,
+                                      rx->data_len);
+        if (!mmio_fabric_ok(status)) {
+            memset(resp, 0, rx->data_len);
+            error_report("mmio-sockdev fabric: read failed master=0x%02x "
+                         "addr=0x%"HWADDR_PRIx" len=%u status=%u",
+                         rx->master_id, rx->addr, rx->data_len, status);
+        }
+    }
+
+    uint8_t ack = (uint8_t)status;
+    qemu_chr_fe_write_all(&s->fabric_chr, &ack, sizeof(ack));
+    if (rx->data_len > 0) {
+        qemu_chr_fe_write_all(&s->fabric_chr, resp, rx->data_len);
+    }
+    g_free(resp);
+}
+
+static void mmio_sockdev_fabric_write(MMIOSockDevState *s, FabricRxState *rx)
+{
+    MmioFabricStatus status = MMIO_FABRIC_OK;
+
+    if (rx->data_len > 0) {
+        status = mmio_fabric_write_buf(rx->master_id, rx->addr, rx->data_buf,
+                                       rx->data_len);
+        if (!mmio_fabric_ok(status)) {
+            error_report("mmio-sockdev fabric: write failed master=0x%02x "
+                         "addr=0x%"HWADDR_PRIx" len=%u status=%u",
+                         rx->master_id, rx->addr, rx->data_len, status);
+        }
+    }
+
+    uint8_t ack = mmio_fabric_ok(status) ? 0 : (uint8_t)status;
+    qemu_chr_fe_write_all(&s->fabric_chr, &ack, sizeof(ack));
+}
+
+static bool mmio_sockdev_parse_fabric_header(FabricRxState *rx)
+{
+    rx->op = rx->hdr[1];
+
+    if (rx->hdr[0] != 'F') {
+        error_report("mmio-sockdev fabric: bad magic 0x%02x, resync",
+                     rx->hdr[0]);
+        return false;
+    }
+
+    rx->master_id = rx->hdr[2];
+    rx->addr = ldq_le_p(rx->hdr + 4);
+    rx->data_len = ldl_le_p(rx->hdr + 12);
+
+    if (rx->op != 'R' && rx->op != 'W') {
+        error_report("mmio-sockdev fabric: unknown op 0x%02x", rx->op);
+        return false;
+    }
+    if (rx->data_len > FABRIC_MAX_LEN) {
+        error_report("mmio-sockdev fabric: length %u exceeds max %u",
+                     rx->data_len, FABRIC_MAX_LEN);
+        return false;
+    }
+    return true;
+}
+
+static void mmio_sockdev_fabric_receive(void *opaque, const uint8_t *buf, int size)
 {
     MMIOSockDevState *s = MMIO_SOCKDEV(opaque);
-    MemRxState *rx = &s->mem_rx;
+    FabricRxState *rx = &s->fabric_rx;
     int i = 0;
 
     while (i < size) {
-        /* Phase 1: accumulate 14-byte header */
-        if (rx->hdr_pos < MEM_HDR_SIZE) {
-            int need  = MEM_HDR_SIZE - rx->hdr_pos;
+        /* Phase 1: accumulate fabric header. */
+        if (rx->hdr_pos == 0 && rx->hdr_len == 0) {
+            rx->hdr[rx->hdr_pos++] = buf[i++];
+            if (rx->hdr[0] != 'F') {
+                error_report("mmio-sockdev fabric: bad magic 0x%02x, resync",
+                             rx->hdr[0]);
+                rx->hdr_pos = 0;
+                rx->hdr_len = 0;
+                continue;
+            }
+            rx->hdr_len = FABRIC_HDR_SIZE;
+        }
+
+        if (rx->hdr_pos < rx->hdr_len) {
+            int need  = rx->hdr_len - rx->hdr_pos;
             int avail = size - i;
             int copy  = (need < avail) ? need : avail;
             memcpy(rx->hdr + rx->hdr_pos, buf + i, copy);
             rx->hdr_pos += copy;
             i           += copy;
-            if (rx->hdr_pos < MEM_HDR_SIZE) {
+            if (rx->hdr_pos < rx->hdr_len) {
                 break;  /* need more bytes for header */
             }
-            /* Header complete — parse */
-            if (rx->hdr[0] != 'M') {
-                error_report("mmio-sockdev mem: bad magic 0x%02x, resync",
-                             rx->hdr[0]);
-                rx->hdr_pos = 0;
-                continue;
-            }
-            rx->op        = rx->hdr[1];
-            rx->phys_addr = ldq_le_p(rx->hdr + 2);
-            rx->data_len  = ldl_le_p(rx->hdr + 10);
 
-            if (rx->data_len > MEM_MAX_LEN) {
-                error_report("mmio-sockdev mem: length %u exceeds max %u",
-                             rx->data_len, MEM_MAX_LEN);
-                rx->hdr_pos = 0;
+            if (!mmio_sockdev_parse_fabric_header(rx)) {
+                mmio_sockdev_fabric_rx_reset(rx);
                 continue;
             }
 
             if (rx->op == 'R') {
-                /* DMA read: read physical memory and send data back */
-                if (rx->data_len > 0) {
-                    uint8_t *resp = g_malloc(rx->data_len);
-                    cpu_physical_memory_read(rx->phys_addr, resp,
-                                            rx->data_len);
-                    qemu_chr_fe_write_all(&s->mem_chr, resp, rx->data_len);
-                    g_free(resp);
-                }
-                rx->hdr_pos = 0;
+                mmio_sockdev_fabric_read(s, rx);
+                mmio_sockdev_fabric_rx_reset(rx);
                 continue;
             } else if (rx->op == 'W') {
-                /* DMA write: allocate buffer and collect payload */
                 if (rx->data_len == 0) {
-                    /* zero-length write: nothing to do, but still ACK */
-                    uint8_t ack = 0;
-                    qemu_chr_fe_write_all(&s->mem_chr, &ack, sizeof(ack));
-                    rx->hdr_pos = 0;
+                    mmio_sockdev_fabric_write(s, rx);
+                    mmio_sockdev_fabric_rx_reset(rx);
                     continue;
                 }
                 rx->data_buf = g_malloc(rx->data_len);
                 rx->data_pos = 0;
-                /* fall through to Phase 2 */
-            } else {
-                error_report("mmio-sockdev mem: unknown op 0x%02x", rx->op);
-                rx->hdr_pos = 0;
-                continue;
             }
         }
 
@@ -453,14 +507,8 @@ static void mmio_sockdev_mem_receive(void *opaque, const uint8_t *buf, int size)
             rx->data_pos += chunk;
             i            += chunk;
             if (rx->data_pos == rx->data_len) {
-                /* All payload bytes received: execute DMA write */
-                uint8_t ack = 0;
-                cpu_physical_memory_write(rx->phys_addr, rx->data_buf,
-                                         rx->data_len);
-                qemu_chr_fe_write_all(&s->mem_chr, &ack, sizeof(ack));
-                g_free(rx->data_buf);
-                rx->data_buf = NULL;
-                rx->hdr_pos  = 0;
+                mmio_sockdev_fabric_write(s, rx);
+                mmio_sockdev_fabric_rx_reset(rx);
             }
             continue;
         }
@@ -555,7 +603,7 @@ static Property mmio_sockdev_properties[] = {
     DEFINE_PROP_CHR("chardev",           MMIOSockDevState, chr),
     DEFINE_PROP_CHR("irq-chardev",       MMIOSockDevState, irq_chr),
     DEFINE_PROP_CHR("tick-chardev",      MMIOSockDevState, tick_chr),
-    DEFINE_PROP_CHR("mem-chardev",       MMIOSockDevState, mem_chr),
+    DEFINE_PROP_CHR("fabric-chardev",    MMIOSockDevState, fabric_chr),
     DEFINE_PROP_CHR("rst-chardev",       MMIOSockDevState, rst_chr),
     /*
      * irq-num: interrupt controller input number for auto-connecting IRQ[0].
@@ -654,14 +702,13 @@ static void mmio_sockdev_realize(DeviceState *dev, Error **errp)
     }
 
     /*
-     * Set up the DMA memory channel if mem-chardev was provided.
-     * Python device models send 'M'|op|addr|len[|data] commands here.
-     * QEMU executes cpu_physical_memory_write/read() on receipt.
+        * Set up the external fabric channel if fabric-chardev was provided.
+        * Endpoints send 'F' frames with per-request master IDs.
      */
-    if (qemu_chr_fe_backend_connected(&s->mem_chr)) {
-        qemu_chr_fe_set_handlers(&s->mem_chr,
-                                 mmio_sockdev_mem_can_receive,
-                                 mmio_sockdev_mem_receive,
+    if (qemu_chr_fe_backend_connected(&s->fabric_chr)) {
+        qemu_chr_fe_set_handlers(&s->fabric_chr,
+                                 mmio_sockdev_fabric_can_receive,
+                                 mmio_sockdev_fabric_receive,
                                  NULL, NULL, s, NULL, true);
     }
 

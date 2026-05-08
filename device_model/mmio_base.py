@@ -21,13 +21,13 @@ Device base class:
 
 Transport channel primitives (Python ↔ QEMU TCP):
   IRQController                 — thread-safe IRQ injection into QEMU (irq-chardev)
-  MemChannel                    — bus-master DMA read/write into QEMU physical
-                                  memory (mem-chardev)
+    FabricChannel                 — fabric read/write into QEMU system address
+                                                                    space (fabric-chardev)
 
 Address routing:
 - BusMasterAddressSpace: unified accessor for bus-master devices; routes
     accesses by physical address: MMIO ranges → in-process PeripheralBus,
-    all other addresses → MemChannel (QEMU physical memory via TCP)
+    all other addresses -> FabricChannel (QEMU fabric via TCP)
 
 Device-specific transports live in their own modules:
   UartChannel   → device_model/uart_model.py
@@ -46,6 +46,11 @@ import sys
 import threading
 from abc import ABC, abstractmethod
 from typing import Dict, Optional
+
+try:
+    from device_model.generated.device_consts import MASTER_ID_UNKNOWN
+except ModuleNotFoundError:
+    MASTER_ID_UNKNOWN = 0xFF
 
 
 # ---------------------------------------------------------------------------
@@ -197,48 +202,54 @@ class IRQController:
 
 
 # ---------------------------------------------------------------------------
-# DMA / bus-master memory channel
+# Fabric / bus-master channel
 # ---------------------------------------------------------------------------
 
-class MemChannel:
+class FabricChannel:
     """
-    Bus-master DMA channel: Python device model → QEMU physical memory.
+    Bus-master fabric channel: Python device model -> QEMU system fabric.
 
-    A Python device that acts as a DMA master (e.g., a DMA controller,
-    network card, or NPU) uses this class to read from and write to QEMU's
-    physical address space, modelling how real devices perform bus-master DMA.
+    A Python device that acts as a bus master uses this class to read from and
+    write to QEMU's system address space. Requests use the fabric wire protocol
+    and carry an explicit master ID per transaction.
 
-    Protocol (Python → QEMU, over mem-chardev TCP channel):
-      DMA write: 'M'(1B) | 'W'(1B) | phys_addr(8B LE) | length(4B LE) | data(lengthB)
-      DMA read:  'M'(1B) | 'R'(1B) | phys_addr(8B LE) | length(4B LE)
-                 QEMU responds: data(lengthB)
+    Protocol (Python -> QEMU, over fabric-chardev TCP channel):
+      Write: 'F' | 'W' | master_id(1B) | flags(1B) | addr(8B LE) | len(4B LE)
+          | data(lengthB), QEMU responds: status(1B)
+      Read:  'F' | 'R' | master_id(1B) | flags(1B) | addr(8B LE) | len(4B LE),
+          QEMU responds: status(1B) | data(lengthB)
 
-    Thread safety:
-      ``dma_write()`` and ``dma_read()`` are serialised by an internal lock.
+        Thread safety:
+            ``fabric_write()`` and ``fabric_read()`` are serialised by an internal lock.
       Only one DMA operation may be in flight at a time (which matches how
       the TickServer drives DMA completion — single-threaded).
 
     Typical lifecycle::
 
         # In mmio_device_server.py:
-        mem_channel = MemChannel()
-        mem_server  = MemServer(port=7897, mem_channel=mem_channel)
-        threading.Thread(target=mem_server.start, daemon=True).start()
+        fabric_channel = FabricChannel()
+        fabric_server  = FabricServer(port=7897, fabric_channel=fabric_channel)
+        threading.Thread(target=fabric_server.start, daemon=True).start()
 
         # In DmaDevice.on_tick() — called from TickServer thread:
-        data = mem_channel.dma_read(src_addr, length)
+        data = fabric_channel.fabric_read(master_id, src_addr, length)
         if data:
-            mem_channel.dma_write(dst_addr, data)
+            fabric_channel.fabric_write(master_id, dst_addr, data)
     """
 
-    def __init__(self) -> None:
+    def __init__(self, master_id: int = MASTER_ID_UNKNOWN) -> None:
+        self._master_id = master_id & 0xFF
         self._sock: Optional[socket.socket] = None
         self._lock      = threading.Lock()    # serialises all socket I/O
         self._connected = threading.Event()
         self._close_evt = threading.Event()   # set on I/O error or stop()
         self._max_transfer = 65536
 
-    # -- called by MemServer ----------------------------------------------
+    @property
+    def master_id(self) -> int:
+        return self._master_id
+
+    # -- called by FabricServer -------------------------------------------
 
     def _on_connect(self, sock: socket.socket) -> None:
         self._close_evt.clear()
@@ -252,7 +263,7 @@ class MemChannel:
         self._connected.clear()
 
     def _signal_close(self) -> None:
-        """Mark the channel as closed; unblocks MemServer._handle_client."""
+        """Mark the channel as closed; unblocks FabricServer._handle_client."""
         self._connected.clear()
         self._close_evt.set()
 
@@ -261,7 +272,7 @@ class MemChannel:
         self._close_evt.wait()
 
     def stop(self) -> None:
-        """Force-close the channel (called by MemServer.stop())."""
+        """Force-close the channel (called by FabricServer.stop())."""
         self._signal_close()
         with self._lock:
             if self._sock:
@@ -274,17 +285,15 @@ class MemChannel:
     # -- public API for device models -------------------------------------
 
     def wait_connected(self, timeout: Optional[float] = None) -> bool:
-        """Return True when QEMU connects the mem-chardev."""
+        """Return True when QEMU connects the fabric channel."""
         return self._connected.wait(timeout)
 
-    def dma_write(self, phys_addr: int, data: bytes) -> bool:
+    def fabric_write(self, master_id: int, addr: int, data: bytes) -> bool:
         """
-        Write *data* to QEMU physical address *phys_addr*.
+        Write *data* to QEMU fabric address *addr* as *master_id*.
 
-        Models a DMA engine writing a result buffer (e.g., completed DMA
-        transfer, device output) into system RAM.  Returns ``True`` on
-        success, ``False`` if the channel is disconnected or an I/O error
-        occurs.
+        Returns ``True`` on success, ``False`` if the fabric reports an error
+        or the channel is disconnected.
         """
         with self._lock:
             if self._sock is None:
@@ -293,7 +302,8 @@ class MemChannel:
                 offset = 0
                 while offset < len(data):
                     chunk = data[offset:offset + self._max_transfer]
-                    hdr = b'M' + b'W' + struct.pack('<QI', phys_addr + offset, len(chunk))
+                    hdr = b'F' + b'W' + bytes([master_id & 0xFF, 0])
+                    hdr += struct.pack('<QI', addr + offset, len(chunk))
                     self._sock.sendall(hdr + chunk)
                     ack = recv_exact(self._sock, 1)
                     if ack != b'\x00':
@@ -301,21 +311,15 @@ class MemChannel:
                     offset += len(chunk)
                 return True
             except (OSError, ConnectionError) as exc:
-                print(f'[MEM]  dma_write error: {exc}', file=sys.stderr)
+                print(f'[FABRIC]  write error: {exc}', file=sys.stderr)
                 self._signal_close()
                 return False
 
-    def dma_read(self, phys_addr: int, length: int) -> Optional[bytes]:
+    def fabric_read(self, master_id: int, addr: int, length: int) -> Optional[bytes]:
         """
-        Read *length* bytes from QEMU physical address *phys_addr*.
+        Read *length* bytes from QEMU fabric address *addr* as *master_id*.
 
-        Models a DMA engine reading a source buffer from system RAM (e.g.,
-        memory-to-memory copy, device descriptor fetch).  Returns the data
-        on success, ``None`` on error.
-
-        This call blocks until QEMU sends the response.  Since DMA
-        completions are driven single-threaded via ``on_tick()``, there is
-        at most one outstanding read at any time.
+        Returns the data on success, ``None`` on fabric or transport error.
         """
         with self._lock:
             if self._sock is None:
@@ -325,16 +329,20 @@ class MemChannel:
                 offset = 0
                 while offset < length:
                     chunk_len = min(self._max_transfer, length - offset)
-                    hdr = b'M' + b'R' + struct.pack('<QI', phys_addr + offset, chunk_len)
+                    hdr = b'F' + b'R' + bytes([master_id & 0xFF, 0])
+                    hdr += struct.pack('<QI', addr + offset, chunk_len)
                     self._sock.sendall(hdr)
-                    out.extend(recv_exact(self._sock, chunk_len))
+                    status = recv_exact(self._sock, 1)
+                    data = recv_exact(self._sock, chunk_len)
+                    if status != b'\x00':
+                        return None
+                    out.extend(data)
                     offset += chunk_len
                 return bytes(out)
             except (OSError, ConnectionError) as exc:
-                print(f'[MEM]  dma_read error: {exc}', file=sys.stderr)
+                print(f'[FABRIC]  read error: {exc}', file=sys.stderr)
                 self._signal_close()
                 return None
-
 
 # ---------------------------------------------------------------------------
 # Address space — routes DMA reads/writes by physical address
@@ -355,9 +363,8 @@ class BusMasterAddressSpace:
         No TCP round-trip — the device model's ``read()``/``write()`` is called
         synchronously, making M2P and P2M transfers race-free.
 
-    - All other addresses (SRAM, flash, …):
-        Dispatched to QEMU physical memory via ``MemChannel`` (TCP round-trip
-        to ``cpu_physical_memory_read/write``).
+    - All other addresses (SRAM, flash, ...):
+        Dispatched to QEMU through ``FabricChannel`` fabric frames.
 
     The ``mmio_bus`` parameter is duck-typed: any object implementing
     ``read(addr, size) -> bytes`` and ``write(addr, size, data)`` is accepted.
@@ -366,7 +373,7 @@ class BusMasterAddressSpace:
     Usage::
 
         addr_space = BusMasterAddressSpace(
-            mem_channel  = mem_ch,
+            fabric_channel = fabric_ch,
             mmio_bus     = bus,
             mmio_regions = [(0x40000000, 0x100000)],  # peripheral address space
         )
@@ -375,13 +382,15 @@ class BusMasterAddressSpace:
 
     def __init__(
         self,
-        mem_channel:  'MemChannel',
+        fabric_channel: 'FabricChannel',
         mmio_bus:     object,           # duck-typed: read()/write() methods
         mmio_regions: list,             # list[tuple[int, int]]  [(base, size), …]
+        master_id:    Optional[int] = None,
     ) -> None:
-        self._mem     = mem_channel
+        self._fabric  = fabric_channel
         self._bus     = mmio_bus
         self._regions = mmio_regions    # [(base: int, size: int), …]
+        self._master_id = master_id
 
     def _is_mmio(self, addr: int) -> bool:
         return any(base <= addr < base + size for base, size in self._regions)
@@ -395,7 +404,8 @@ class BusMasterAddressSpace:
         """
         if self._is_mmio(addr):
             return self._bus.read(addr, length)   # PeripheralBus always returns bytes
-        return self._mem.dma_read(addr, length)
+        master_id = self._master_id if self._master_id is not None else self._fabric.master_id
+        return self._fabric.fabric_read(master_id, addr, length)
 
     def write(self, addr: int, data: bytes) -> bool:
         """
@@ -407,8 +417,8 @@ class BusMasterAddressSpace:
         if self._is_mmio(addr):
             self._bus.write(addr, len(data), data)
             return True
-        return self._mem.dma_write(addr, data)
-
+        master_id = self._master_id if self._master_id is not None else self._fabric.master_id
+        return self._fabric.fabric_write(master_id, addr, data)
 
 # Backward-compatible public name used by existing device models.
 AddressSpace = BusMasterAddressSpace

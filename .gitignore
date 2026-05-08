@@ -3,7 +3,24 @@ qemu-fork/build/
 scripts/qemu-fork/build/
 # Exclude the full QEMU source tree (clone/build separately via scripts/build_qemu.sh)
 # Custom changes to QEMU are tracked individually below.
-scripts/qemu-fork/
+scripts/qemu-fork/*
+!scripts/qemu-fork/hw/
+scripts/qemu-fork/hw/*
+!scripts/qemu-fork/hw/arm/
+scripts/qemu-fork/hw/arm/*
+!scripts/qemu-fork/hw/arm/kx6625.c
+!scripts/qemu-fork/hw/misc/
+scripts/qemu-fork/hw/misc/*
+!scripts/qemu-fork/hw/misc/mmio_fabric.c
+!scripts/qemu-fork/hw/misc/mmio_sockdev.c
+!scripts/qemu-fork/hw/misc/meson.build
+!scripts/qemu-fork/include/
+scripts/qemu-fork/include/*
+!scripts/qemu-fork/include/hw/
+scripts/qemu-fork/include/hw/*
+!scripts/qemu-fork/include/hw/misc/
+scripts/qemu-fork/include/hw/misc/*
+!scripts/qemu-fork/include/hw/misc/mmio_fabric.h
 *.o
 *.bin
 *.elf

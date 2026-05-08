@@ -13,7 +13,7 @@ Architecture
         - RWServer: MMIO R/W channel (QEMU → Python)
         - IRQServer: IRQ injection channel (Python → QEMU)
         - TickServer: virtual-clock tick channel (QEMU → Python)
-        - MemServer: bus-master DMA memory channel (Python ↔ QEMU RAM)
+        - FabricServer: bus-master fabric channel (Python <-> QEMU fabric)
         - RstServer: system-reset channel (Python → QEMU)
         - CruNotifyServer: CRU device-reset notifications (QEMU → Python, optional)
 
@@ -59,9 +59,11 @@ IRQ  (Python → QEMU, irq-chardev)
   'I'(1B) | irq_idx(1B) | level(1B)   — level: 1=assert, 0=deassert
 Tick  (QEMU → Python, tick-chardev)
   'T'(1B) | vtime_ns(8B LE)
-MEM  (Python ↔ QEMU, mem-chardev — bus-master DMA)
-  Write: 'M'(1B) | 'W'(1B) | phys_addr(8B LE) | length(4B LE) | data(lengthB)
-  Read:  'M'(1B) | 'R'(1B) | phys_addr(8B LE) | length(4B LE)  ← data(lengthB)
+FABRIC  (Python <-> QEMU, fabric-chardev)
+  Write: 'F' | 'W' | master_id(1B) | flags(1B) | addr(8B LE) | len(4B LE) | data
+      <- status(1B)
+  Read:  'F' | 'R' | master_id(1B) | flags(1B) | addr(8B LE) | len(4B LE)
+      <- status(1B) | data(lengthB)
 RST  (Python → QEMU, rst-chardev)
   any byte → QEMU calls qemu_system_reset_request()
 """
@@ -79,7 +81,7 @@ from typing import Optional
 # Ensure project root is on sys.path for sibling package imports.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from device_model.mmio_base         import IRQController, MemChannel, MMIODevice, recv_exact  # noqa: E402
+from device_model.mmio_base         import FabricChannel, IRQController, MMIODevice, recv_exact  # noqa: E402
 from device_model.uart_model        import ConsoleUartDevice                      # noqa: E402
 from device_model.timer_model       import TimerDevice                            # noqa: E402
 from device_model.dma_controller    import DmaController                          # noqa: E402
@@ -355,7 +357,7 @@ _DMA_BASE       = 0x40005000
 _DMA_SIZE       = 0x1000
 _DMA_RW_PORT    = 7892
 _DMA_IRQ_PORT   = 7893
-_DMA_MEM_PORT   = 7897   # Python → QEMU physical memory (DMA bus-master channel)
+_DMA_MEM_PORT   = 7897   # Python -> QEMU fabric bus-master channel
 
 _TIMER_BASE     = 0x40006000
 _TIMER_SIZE     = 0x1000
@@ -463,44 +465,44 @@ class TickServer:
 
 
 # ---------------------------------------------------------------------------
-# Transport: DMA memory channel  (Python → QEMU physical memory)
+# Transport: fabric bus-master channel  (Python -> QEMU system fabric)
 # ---------------------------------------------------------------------------
 
-class MemServer:
+class FabricServer:
     """
-    Accepts QEMU's mem-chardev TCP connection and registers it with
-    the shared ``MemChannel``.
+    Accepts QEMU's fabric-chardev TCP connection and registers it with
+    the shared ``FabricChannel``.
 
-    Once connected, all I/O is owned by ``MemChannel.dma_write()`` /
-    ``dma_read()`` (called from the DMA device's ``on_tick()`` handler).
+    Once connected, all I/O is owned by ``FabricChannel.fabric_write()`` /
+    ``fabric_read()`` (called from bus-master device tick handlers).
     This thread simply waits for the channel to close, then accepts the
     next connection.
 
     Usage::
 
-        mem_ch  = MemChannel()
-        mem_srv = MemServer(port=7897, mem_channel=mem_ch)
-        threading.Thread(target=mem_srv.start, daemon=True).start()
+        fabric_ch  = FabricChannel()
+        fabric_srv = FabricServer(port=7897, fabric_channel=fabric_ch)
+        threading.Thread(target=fabric_srv.start, daemon=True).start()
     """
 
-    def __init__(self, port: int, mem_channel: MemChannel) -> None:
+    def __init__(self, port: int, fabric_channel: FabricChannel) -> None:
         self.port  = port
-        self._chan  = mem_channel
+        self._chan  = fabric_channel
         self._sock: Optional[socket.socket] = None
         self._running = False
 
     def _handle_client(self, conn: socket.socket, addr) -> None:
-        print(f'[MEM]  QEMU mem-chardev connected from {addr}')
+        print(f'[FABRIC]  QEMU fabric channel connected from {addr}')
         self._chan._on_connect(conn)
-        # All socket I/O is performed exclusively by MemChannel.dma_write/read.
-        # Block here until MemChannel signals close (I/O error or stop()).
+        # All socket I/O is performed exclusively by FabricChannel.
+        # Block here until FabricChannel signals close (I/O error or stop()).
         self._chan.wait_for_close()
         self._chan._on_disconnect()
         try:
             conn.close()
         except OSError:
             pass
-        print(f'[MEM]  QEMU mem-chardev disconnected from {addr}')
+        print(f'[FABRIC]  QEMU fabric channel disconnected from {addr}')
 
     def start(self) -> None:
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -508,7 +510,7 @@ class MemServer:
         self._sock.bind(('127.0.0.1', self.port))
         self._sock.listen(1)
         self._running = True
-        print(f'[MEM]  Listening on port {self.port}')
+        print(f'[FABRIC]  Listening on port {self.port}')
         try:
             while self._running:
                 try:
@@ -520,7 +522,7 @@ class MemServer:
                     ).start()
                 except OSError:
                     if self._running:
-                        print('[MEM]  accept error', file=sys.stderr)
+                        print('[FABRIC]  accept error', file=sys.stderr)
                     break
         finally:
             self.stop()
@@ -531,8 +533,6 @@ class MemServer:
         if self._sock:
             self._sock.close()
             self._sock = None
-
-
 # ---------------------------------------------------------------------------
 # Transport: system-reset channel  (Python → QEMU via rst-chardev)
 # ---------------------------------------------------------------------------

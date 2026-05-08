@@ -19,6 +19,7 @@ namespace {
 constexpr uint16_t kDefaultRwPort = 7906;
 constexpr uint16_t kDefaultIrqPort = 7907;
 constexpr uint16_t kDefaultMemPort = 7912;
+constexpr uint8_t kSvDmaMasterId = 0x20;
 constexpr uint32_t kIdleCyclesPerPoll = 16;
 constexpr uint64_t kTraceFlushPeriod = 4096;
 constexpr const char *kDefaultWaveFile = "build/sv_timer_bridge.vcd";
@@ -283,12 +284,18 @@ private:
 
     bool mem_read32(uint32_t addr, uint32_t *value)
     {
-        uint8_t hdr[14] = {};
-        hdr[0] = 'M';
+        uint8_t hdr[16] = {};
+        hdr[0] = 'F';
         hdr[1] = 'R';
-        store_le64(hdr + 2, addr);
-        store_le32(hdr + 10, 4);
+        hdr[2] = kSvDmaMasterId;
+        hdr[3] = 0;
+        store_le64(hdr + 4, addr);
+        store_le32(hdr + 12, 4);
         if (!write_all(mem_fd_, hdr, sizeof(hdr))) {
+            return false;
+        }
+        uint8_t status = 0xff;
+        if (!read_exact(mem_fd_, &status, sizeof(status)) || status != 0) {
             return false;
         }
         uint8_t data[4] = {};
@@ -301,12 +308,14 @@ private:
 
     bool mem_write32(uint32_t addr, uint32_t value)
     {
-        uint8_t pkt[18] = {};
-        pkt[0] = 'M';
+        uint8_t pkt[20] = {};
+        pkt[0] = 'F';
         pkt[1] = 'W';
-        store_le64(pkt + 2, addr);
-        store_le32(pkt + 10, 4);
-        store_le32(pkt + 14, value);
+        pkt[2] = kSvDmaMasterId;
+        pkt[3] = 0;
+        store_le64(pkt + 4, addr);
+        store_le32(pkt + 12, 4);
+        store_le32(pkt + 16, value);
         if (!write_all(mem_fd_, pkt, sizeof(pkt))) {
             return false;
         }
@@ -377,7 +386,7 @@ int main(int argc, char **argv)
     int mem_listen = listen_on(mem_port);
     int rw_fd = accept_one(rw_listen, "RW channel");
     int irq_fd = accept_one(irq_listen, "IRQ channel");
-    int mem_fd = accept_one(mem_listen, "MEM channel");
+    int mem_fd = accept_one(mem_listen, "fabric channel");
 
     SvPeriphBridge bridge(mem_fd, wave_file);
     bool last_irq = bridge.irq();

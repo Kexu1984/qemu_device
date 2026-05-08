@@ -28,6 +28,7 @@
 #include "exec/cpu-all.h"        /* EXCP_HLT */
 #include "qemu/thread.h"
 #include "qemu/log.h"
+#include "hw/misc/mmio_fabric.h"
 #include "hw/misc/mmio_sockdev.h"  /* CRU guard registration */
 
 /* Generated SoC configuration — do not edit, regenerate with: make gen */
@@ -348,7 +349,8 @@ static void kx6625_sysctrl_do_devctl(KX6625MachineState *s)
     uint32_t op = s->sysctrl_devctl_ctrl;
     uint32_t access = op & (SYSCTRL_DEVCTL_READ | SYSCTRL_DEVCTL_WRITE);
     hwaddr addr = s->sysctrl_devctl_addr;
-    MemTxResult result;
+    MmioFabricStatus status;
+    MmioFabricResponse response;
     uint32_t value;
 
     s->sysctrl_devctl_ctrl &= ~SYSCTRL_DEVCTL_START;
@@ -371,20 +373,19 @@ static void kx6625_sysctrl_do_devctl(KX6625MachineState *s)
     }
 
     if (access == SYSCTRL_DEVCTL_READ) {
-        value = 0;
-        result = address_space_read(&address_space_memory, addr,
-                                    MEMTXATTRS_UNSPECIFIED, &value, sizeof(value));
-        if (result != MEMTX_OK) {
+        response = mmio_fabric_read(KX6625_MASTER_ID_SYSCTRL, addr,
+                                    sizeof(uint32_t));
+        if (!mmio_fabric_ok(response.status)) {
             kx6625_sysctrl_devctl_error(s, SYSCTRL_DEVCTL_STATUS_BUS,
                                         SYSCTRL_DEVCTL_ERR_BUS);
             return;
         }
-        s->sysctrl_devctl_rdata = value;
+        s->sysctrl_devctl_rdata = (uint32_t)response.rdata;
     } else {
         value = s->sysctrl_devctl_wdata;
-        result = address_space_write(&address_space_memory, addr,
-                                     MEMTXATTRS_UNSPECIFIED, &value, sizeof(value));
-        if (result != MEMTX_OK) {
+        status = mmio_fabric_write(KX6625_MASTER_ID_SYSCTRL, addr,
+                                   sizeof(uint32_t), value);
+        if (!mmio_fabric_ok(status)) {
             kx6625_sysctrl_devctl_error(s, SYSCTRL_DEVCTL_STATUS_BUS,
                                         SYSCTRL_DEVCTL_ERR_BUS);
             return;
@@ -523,25 +524,24 @@ static const MemoryRegionOps kx6625_sysctrl_ops = {
 
 static bool kx6625_bus_read32(hwaddr addr, uint32_t *value)
 {
-    MemTxResult result;
-    uint32_t tmp = 0;
+    MmioFabricResponse response;
 
-    result = address_space_read(&address_space_memory, addr,
-                                MEMTXATTRS_UNSPECIFIED, &tmp, sizeof(tmp));
-    if (result != MEMTX_OK) {
+    response = mmio_fabric_read(KX6625_MASTER_ID_SYSCTRL, addr,
+                                sizeof(uint32_t));
+    if (!mmio_fabric_ok(response.status)) {
         return false;
     }
-    *value = tmp;
+    *value = (uint32_t)response.rdata;
     return true;
 }
 
 static bool kx6625_bus_write32(hwaddr addr, uint32_t value)
 {
-    MemTxResult result;
+    MmioFabricStatus status;
 
-    result = address_space_write(&address_space_memory, addr,
-                                 MEMTXATTRS_UNSPECIFIED, &value, sizeof(value));
-    return result == MEMTX_OK;
+    status = mmio_fabric_write(KX6625_MASTER_ID_SYSCTRL, addr,
+                               sizeof(uint32_t), value);
+    return mmio_fabric_ok(status);
 }
 
 static void kx6625_secure_boot_release_cpu0(KX6625MachineState *s)

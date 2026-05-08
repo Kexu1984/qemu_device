@@ -14,10 +14,11 @@ MASTER_ID_CPU1                     = 0x01  # Cortex-M4F CPU1
 MASTER_ID_DMA                      = 0x10  # Python DMA controller bus master
 MASTER_ID_HSM                      = 0x11  # Python HSM internal DMA bus master
 MASTER_ID_FLASH_CTRL               = 0x12  # Python FLASH controller bus master
+MASTER_ID_PY_FABRIC_DEMO           = 0x13  # Python fabric demo master
 MASTER_ID_SV_DMA                   = 0x20  # SystemVerilog DMA prototype bus master
 MASTER_ID_SYSCTRL                  = 0xF0  # Native QEMU SYSCTRL privileged SoC master
 MASTER_ID_QEMU_INTERNAL            = 0xFE  # Generic QEMU internal access with no explicit SoC master
-MASTER_ID_UNKNOWN                  = 0xFF  # Unknown or legacy bus master
+MASTER_ID_UNKNOWN                  = 0xFF  # Unknown bus master
 
 # ── CONSOLE_UART ────────────────────────────────────────────────
 # Console UART — byte-at-a-time character output + one-shot IRQ

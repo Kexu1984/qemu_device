@@ -4,7 +4,7 @@
 // sv_timer_bridge.cpp TCP bridge. Guest MMIO accesses are translated
 // into APB transactions here; RTL bus-master requests leave through the
 // bridge-facing AHB-like signals and are serviced by the bridge over
-// mmio-sockdev mem-chardev.
+// mmio-sockdev fabric-chardev.
 module sv_device_top (
     input  logic        clk,
     input  logic        rst_n,

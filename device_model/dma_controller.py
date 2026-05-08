@@ -17,7 +17,7 @@ Architecture
   │   CH1: offset 0x020  SRC_ADDR / DST_ADDR / LENGTH / CTRL / STATUS
   │   …
   │
-  ├─ MemChannel            physical memory bus-master (shared by all channels)
+    ├─ FabricChannel         fabric bus-master channel (shared by all channels)
   ├─ on_tick(vtime_ns)     advances every BUSY channel (tick observer)
   │
   └─ get_handle(ch) → DmaClientHandle
@@ -266,8 +266,8 @@ class DmaController(MMIODevice):
         at exactly arm_vtime + transfer_ns.  It may also be called by the shared
         1 ms tick server as a safety-net if the DES tick was somehow missed.
 
-        The transfer is executed synchronously in the calling thread.  MEM-chardev
-        I/O (cpu_physical_memory_read/write over TCP port 7897) happens here;
+        The transfer is executed synchronously in the calling thread. Fabric
+        channel I/O over TCP port 7897 happens here;
         QEMU's tick is fire-and-forget so the main loop is free to service the
         MEM responses without deadlock.
         """

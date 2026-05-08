@@ -197,7 +197,7 @@ start_qemu() {
         -chardev socket,id=dma_irq,host=127.0.0.1,port=7893 \
         -chardev socket,id=dma_mem,host=127.0.0.1,port=7897 \
         -chardev socket,id=dma_tick,host=127.0.0.1,port=7905 \
-        -device mmio-sockdev,chardev=dma_rw,irq-chardev=dma_irq,mem-chardev=dma_mem,tick-chardev=dma_tick,tick-period-ms=0,addr=0x40005000,irq-num=1 \
+        -device mmio-sockdev,chardev=dma_rw,irq-chardev=dma_irq,fabric-chardev=dma_mem,tick-chardev=dma_tick,tick-period-ms=0,addr=0x40005000,irq-num=1 \
         -chardev socket,id=timer_rw,host=127.0.0.1,port=7894 \
         -chardev socket,id=timer_irq,host=127.0.0.1,port=7895 \
         -chardev socket,id=timer_tick,host=127.0.0.1,port=7896 \
@@ -214,7 +214,7 @@ start_qemu() {
         -chardev socket,id=sv_timer_rw,host=127.0.0.1,port=7906 \
         -chardev socket,id=sv_timer_irq,host=127.0.0.1,port=7907 \
         -chardev socket,id=sv_timer_mem,host=127.0.0.1,port=7912 \
-        -device mmio-sockdev,chardev=sv_timer_rw,irq-chardev=sv_timer_irq,mem-chardev=sv_timer_mem,addr=0x4000B000,irq-num=5 \
+        -device mmio-sockdev,chardev=sv_timer_rw,irq-chardev=sv_timer_irq,fabric-chardev=sv_timer_mem,addr=0x4000B000,irq-num=5 \
         -chardev socket,id=hsm_rw,host=127.0.0.1,port=7908 \
         -chardev socket,id=hsm_irq,host=127.0.0.1,port=7909 \
         -device mmio-sockdev,chardev=hsm_rw,irq-chardev=hsm_irq,addr=0x4000C000,irq-num=6 \
@@ -224,7 +224,7 @@ start_qemu() {
         -chardev socket,id=flash_ctrl_rw,host=127.0.0.1,port=7913 \
         -chardev socket,id=flash_ctrl_irq,host=127.0.0.1,port=7914 \
         -chardev socket,id=flash_ctrl_mem,host=127.0.0.1,port=7915 \
-        -device mmio-sockdev,chardev=flash_ctrl_rw,irq-chardev=flash_ctrl_irq,mem-chardev=flash_ctrl_mem,addr=0x4000E000,irq-num=8 \
+        -device mmio-sockdev,chardev=flash_ctrl_rw,irq-chardev=flash_ctrl_irq,fabric-chardev=flash_ctrl_mem,addr=0x4000E000,irq-num=8 \
         -chardev socket,id=dflash_rw,host=127.0.0.1,port=7916 \
         -device mmio-sockdev,chardev=dflash_rw,addr=0x10000000,size=0x80000 \
         -kernel "$FIRMWARE_HEX" \

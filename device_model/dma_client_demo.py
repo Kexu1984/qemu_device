@@ -24,7 +24,7 @@ asserting a transfer-complete (TC) signal back to the peripheral.  The
 peripheral then fires its own IRQ to notify the CPU.
 
 This decouples the peripheral logic from DMA channel management: the device
-only needs a DmaClientHandle, not direct access to MemChannel or tick logic.
+only needs a DmaClientHandle, not direct access to FabricChannel or tick logic.
 """
 
 from __future__ import annotations

@@ -34,7 +34,7 @@ cpu:
 # Every block that can actively initiate a bus transaction owns a stable master
 # ID. CPU-originated MMIO uses the CPU index. Native QEMU/SoC controllers pass
 # their ID through MemTxAttrs.requester_id. Python device models use these IDs
-# when routing in-process MMIO through AddressSpace, and MEM-channel traffic
+# when routing in-process MMIO through AddressSpace, and fabric-channel traffic
 # carries the same ID for future bus firewall/fault attribution.
 #
 bus_masters:
@@ -58,6 +58,10 @@ bus_masters:
     id:          0x12
     description: "Python FLASH controller bus master"
 
+  - name:        py_fabric_demo
+    id:          0x13
+    description: "Python fabric demo master"
+
   - name:        sv_dma
     id:          0x20
     description: "SystemVerilog DMA prototype bus master"
@@ -72,7 +76,7 @@ bus_masters:
 
   - name:        unknown
     id:          0xFF
-    description: "Unknown or legacy bus master"
+    description: "Unknown bus master"
 
 # ── Clocks ───────────────────────────────────────────────────────────────────
 #

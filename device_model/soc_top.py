@@ -71,8 +71,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 # Transport layer + bus — imported from mmio_device_server.
 # See NOTE in module docstring about circular-import safety.
 from device_model.mmio_device_server import (   # noqa: E402
+    FabricServer,
     IRQServer,
-    MemServer,
     PeripheralBus,
     RstServer,
     RWServer,
@@ -81,9 +81,15 @@ from device_model.mmio_device_server import (   # noqa: E402
 
 from device_model.mmio_base import (            # noqa: E402
     BusMasterAddressSpace,
+    FabricChannel,
     IRQController,
-    MemChannel,
 )
+
+from device_model.fabric import (               # noqa: E402
+    FabricRegion,
+    PlatformFabric,
+)
+from device_model.fabric_master_demo import PythonFabricMasterDemo  # noqa: E402
 
 from device_model.cru_device import (           # noqa: E402
     CruNotifyServer,
@@ -104,6 +110,26 @@ from device_model.hsm_model         import HsmDevice            # noqa: E402
 from device_model.otp_model         import OtpControllerDevice   # noqa: E402
 from device_model.flash_controller  import FlashControllerDevice # noqa: E402
 from device_model.tracer            import Tracer               # noqa: E402
+try:                                                        # noqa: E402
+    from device_model.generated.device_consts import (
+        MASTER_ID_DMA,
+        MASTER_ID_FLASH_CTRL,
+        MASTER_ID_HSM,
+        MASTER_ID_PY_FABRIC_DEMO,
+        SRAM_BASE,
+        SRAM_SIZE,
+        SV_TIMER_BASE,
+        SV_TIMER_SIZE,
+    )
+except ModuleNotFoundError:                                # noqa: E402
+    MASTER_ID_DMA = 0x10
+    MASTER_ID_HSM = 0x11
+    MASTER_ID_FLASH_CTRL = 0x12
+    MASTER_ID_PY_FABRIC_DEMO = 0x13
+    SRAM_BASE = 0x20000000
+    SRAM_SIZE = 0x00020000
+    SV_TIMER_BASE = 0x4000B000
+    SV_TIMER_SIZE = 0x1000
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -255,7 +281,7 @@ class HsmCfg:
     """Configuration for the ``HsmDevice`` (IRQ, DMA-style memory access).
 
     Requires a ``DmaCfg`` to be present so it can reuse the SoC physical
-    address-space/MemChannel path for bus-master reads and writes.
+    address-space/FabricChannel path for bus-master reads and writes.
     """
     base_addr: int
     rw_port:   int
@@ -346,6 +372,7 @@ class PythonDeviceDomain:
         otp:             Optional[OtpCfg]           = None,
         hsm:             Optional[HsmCfg]           = None,
         flash_ctrl:      Optional[FlashCtrlCfg]     = None,
+        enable_fabric_demo_master: bool             = True,
         tick_port:       int                        = 7896,
         cru_notify_port: Optional[int]              = None,
         tracer:          Optional[Tracer]           = None,
@@ -378,14 +405,32 @@ class PythonDeviceDomain:
                 (flash_ctrl.ahb_base_addr, flash_ctrl.ahb_size)] if flash_ctrl else [])
         )
 
+        fabric_local_regions = [
+            FabricRegion(
+                name=f'python_mmio_0x{base:08x}',
+                base=base,
+                size=size,
+                target='python',
+            )
+            for base, size in mmio_regions
+        ]
+        fabric_memory_regions = [
+            FabricRegion('sram', SRAM_BASE, SRAM_SIZE, 'qemu_memory'),
+            FabricRegion('sv_timer', SV_TIMER_BASE, SV_TIMER_SIZE, 'sv_apb'),
+        ]
+
+        system_fabric_channel: Optional[FabricChannel] = None
+
         # ── 2. DMA subsystem ──────────────────────────────────────────────
         dma_ctrl: Optional[DmaController] = None
         if dma is not None:
-            mem_channel   = MemChannel()
+            fabric_channel = FabricChannel(master_id=MASTER_ID_DMA)
+            system_fabric_channel = fabric_channel
             addr_space    = BusMasterAddressSpace(
-                mem_channel  = mem_channel,
+                fabric_channel = fabric_channel,
                 mmio_bus     = bus,
                 mmio_regions = mmio_regions,
+                master_id    = MASTER_ID_DMA,
             )
             dma_irq_ctrl  = IRQController()
             dma_ctrl      = DmaController(
@@ -397,7 +442,7 @@ class PythonDeviceDomain:
             )
             bus.register(dma.base_addr, dma.size, dma_ctrl)
             self._add_server(IRQServer(port=dma.irq_port, irq_controller=dma_irq_ctrl))
-            self._add_server(MemServer(port=dma.mem_port, mem_channel=mem_channel))
+            self._add_server(FabricServer(port=dma.mem_port, fabric_channel=fabric_channel))
             self._add_server(RWServer(port=dma.rw_port, bus=bus, base_addr=dma.base_addr))
             # DES one-shot tick fires at exactly arm_vtime + transfer_ns.
             self._add_server(TickServer(port=dma.tick_port, tick_fn=dma_ctrl.on_tick))
@@ -492,8 +537,14 @@ class PythonDeviceDomain:
         # ── 9. HSM ────────────────────────────────────────────────────────
         if hsm is not None and dma_ctrl is not None:
             hsm_irq_ctrl = IRQController()
+            hsm_addr_space = BusMasterAddressSpace(
+                fabric_channel = fabric_channel,
+                mmio_bus     = bus,
+                mmio_regions = mmio_regions,
+                master_id    = MASTER_ID_HSM,
+            )
             hsm_dev = HsmDevice(
-                address_space  = addr_space,
+                address_space  = hsm_addr_space,
                 irq_controller = hsm_irq_ctrl,
                 irq_idx        = 0,   # device IRQ output index (always 0)
                 otp_file       = hsm.otp_file,
@@ -507,11 +558,12 @@ class PythonDeviceDomain:
         # ── 10. FLASH controller + DFLASH memory window ──────────────────
         if flash_ctrl is not None:
             flash_irq_ctrl = IRQController()
-            flash_mem_channel = MemChannel()
+            flash_fabric_channel = FabricChannel(master_id=MASTER_ID_FLASH_CTRL)
             flash_addr_space = BusMasterAddressSpace(
-                mem_channel  = flash_mem_channel,
+                fabric_channel = flash_fabric_channel,
                 mmio_bus     = bus,
                 mmio_regions = mmio_regions,
+                master_id    = MASTER_ID_FLASH_CTRL,
             )
             flash_dev = FlashControllerDevice(
                 address_space  = flash_addr_space,
@@ -525,10 +577,31 @@ class PythonDeviceDomain:
             bus.register(flash_ctrl.base_addr, flash_ctrl.size, flash_dev)
             bus.register(flash_ctrl.ahb_base_addr, flash_ctrl.ahb_size, flash_dev.window)
             self._add_server(IRQServer(port=flash_ctrl.irq_port, irq_controller=flash_irq_ctrl))
-            self._add_server(MemServer(port=flash_ctrl.mem_port, mem_channel=flash_mem_channel))
+            self._add_server(FabricServer(port=flash_ctrl.mem_port, fabric_channel=flash_fabric_channel))
             self._add_server(RWServer(port=flash_ctrl.rw_port, bus=bus, base_addr=flash_ctrl.base_addr))
             self._add_server(RWServer(port=flash_ctrl.ahb_rw_port, bus=bus,
                                       base_addr=flash_ctrl.ahb_base_addr))
+
+        # ── Platform fabric + Python demo master ─────────────────────────
+        # The first fabric client is intentionally tick-driven and has no MMIO
+        # slave window. It proves that a Python master can access another
+        # device's registers through the shared fabric surface without adding
+        # new QEMU command-line ports.
+        if enable_fabric_demo_master:
+            fabric_channel = system_fabric_channel if system_fabric_channel is not None else FabricChannel()
+            fabric = PlatformFabric(
+                fabric_channel = fabric_channel,
+                local_bus      = bus,
+                local_regions  = fabric_local_regions,
+                memory_regions = fabric_memory_regions,
+                tracer         = tracer,
+            )
+            fabric_master = PythonFabricMasterDemo(
+                fabric = fabric.client(MASTER_ID_PY_FABRIC_DEMO, 'py_fabric_demo'),
+                tracer = tracer,
+            )
+            bus.add_tick_observer(fabric)
+            bus.add_tick_observer(fabric_master)
 
         # ── CRU notify server (optional) ──────────────────────────────────
         # Maps CRU device indices (matching kx6625_cru_devices[] in kx6625.c)
