@@ -15,9 +15,9 @@ The platform currently has three related but not fully unified access paths.
 
 | Path | Current owner | Main files | Behavior |
 |------|---------------|------------|----------|
-| CPU to external register | QEMU `mmio-sockdev` | `scripts/qemu-fork/hw/misc/mmio_sockdev.c`, `device_model/mmio_device_server.py`, `sv_device/sv_timer_bridge.cpp` | CPU MMIO is translated into synchronous socket R/W transactions toward a Python or SV endpoint. |
+| CPU to external register | QEMU `mmio-sockdev` | `scripts/qemu-fork/hw/misc/mmio_sockdev.c`, `device_model/mmio_device_server.py`, `sv_device/sv_host_shell.cpp`, `sv_device/sv_apb_ingress.sv` | CPU MMIO is translated into synchronous socket R/W transactions. For SV endpoints, the C++ host shell submits a host request and the APB setup/access sequencing is performed in SV. |
 | Python bus-master access | Python device domain | `device_model/mmio_base.py` | `BusMasterAddressSpace` routes Python master accesses to in-process Python MMIO or to QEMU through `FabricChannel` fabric frames. |
-| SV bus-master access | SV bridge | `sv_device/sv_device_top.sv`, `sv_device/sv_master_router.sv`, `sv_device/sv_timer_bridge.cpp` | SV master requests leave through an AHB-like adapter and are serviced by the bridge as `fabric-chardev` fabric frames. |
+| SV bus-master access | SV RTL domain | `sv_device/sv_device_top.sv`, `sv_device/sv_master_router.sv`, `sv_device/sv_fabric_egress_dpi.sv`, `sv_device/sv_host_shell.cpp` | SV master request/response sequencing stays in SV. SV calls timing-independent DPI functions implemented by the C++ host shell to emit `fabric-chardev` frames. |
 
 This is good enough for local device validation, but it leaves a gap for
 cross-domain SoC behavior:
@@ -122,7 +122,7 @@ The fabric should decode by absolute address, not by source domain.
 | Address class | Target path |
 |---------------|-------------|
 | Python-owned APB peripheral window | Dispatch to `PeripheralBus` / `MMIODevice`. |
-| SV-owned APB peripheral window | Dispatch to the SV bridge and RTL APB decoder. |
+| SV-owned APB peripheral window | Dispatch to the SV host shell and RTL APB decoder. |
 | QEMU-native peripheral window | Dispatch through QEMU's address space as a native MMIO access. |
 | SRAM, flash, instruction memory, data memory, and other AHB memory windows | Dispatch through the APB-to-AHB bridge to QEMU physical memory or a modeled AHB slave. APB masters are allowed to reach the full modeled AHB memory map unless a generated policy entry explicitly denies the access. |
 | Unmapped window | Return a decode error and trace the failed access. |
@@ -208,6 +208,59 @@ and registration with the fabric.
 Slave implementations receive endpoint-local offsets. The fabric performs the
 absolute-address decode and subtracts the selected base address.
 
+## SystemVerilog Fabric Hierarchy
+
+The SV side is best viewed as one Verilated device island. The C++ file is not
+part of the bus hierarchy; it is the host shell that owns sockets, wave dump,
+IRQ forwarding, and DPI functions.
+
+```text
+sv_host_shell.cpp
+  host shell: sockets + Verilator clock + IRQ + DPI fabric functions
+    |
+    | host_req / host_rsp
+    v
+sv_device_top.sv
+  SV device island top
+    |
+    +-- inbound slave path: CPU/QEMU -> SV registers
+    |     sv_apb_ingress.sv
+    |       host request to APB setup/access FSM
+    |            |
+    |            v
+    |     sv_apb_decoder.sv
+    |            |
+    |            +-- sv_timer_apb.sv      APB slave registers
+    |            +-- sv_dma_apb.sv        APB slave registers + DMA master control
+    |
+    +-- outbound master path: SV DMA -> platform fabric
+      sv_dma_apb.sv / sv_dma_core.sv
+        |
+        v
+      sv_master_router.sv
+        |
+        v
+      sv_fabric_egress_dpi.sv
+        SV request/response FSM, calls DPI read/write helpers
+        |
+        v
+      sv_host_shell.cpp -> fabric-chardev -> QEMU fabric
+```
+
+In this hierarchy, `sv_device_top.sv` is the SV device-domain top. Its inbound
+register window behaves as APB slaves behind `sv_apb_decoder.sv`; it is not
+meant to make the C++ host shell manually drive APB pins. `sv_apb_ingress.sv`
+is the SV-side ingress bridge that turns a host request from C++ into real APB
+setup/access phases.
+
+For outbound access, `sv_dma_core.sv` is the SV bus master. It sends generic
+request/response transactions through `sv_master_router.sv`. The current
+external target endpoint is `sv_fabric_egress_dpi.sv`, which keeps the
+request/response sequencing in SV and calls timing-independent C++ DPI helpers
+only when a transaction reaches the external fabric. Later, `sv_master_router.sv`
+can grow local decode so an SV master can reach local SV APB windows before
+falling through to the external fabric endpoint.
+
 ## Transport Direction
 
 The external bus-master channel is a fabric transaction channel. Python and SV
@@ -287,7 +340,7 @@ The fabric can be introduced without rewriting every device at once.
 2. Rename or wrap `BusMasterAddressSpace` as the Python fabric client while
    preserving existing DMA/HSM/flash users.
 3. Add a QEMU-side fabric helper for native masters such as SYSCTRL.
-4. Extend the SV bridge with a bus transaction channel or extend the current
+4. Extend the SV host shell with a bus transaction channel or extend the current
    memory channel into address-decoded fabric access.
 5. Teach `sv_master_router.sv` to decode local SV windows first and forward
    external windows to the bridge.
@@ -316,8 +369,15 @@ and adds both Python-side and QEMU-side fabric runtime pieces:
   `mem-chardev` property and `M` packet parser have been removed.
 - `device_model/mmio_base.py` exposes `FabricChannel`, which emits fabric frames
   with per-request master IDs.
-- `sv_device/sv_timer_bridge.cpp` emits fabric frames with `MASTER_ID_SV_DMA`
-  for SV AHB master accesses.
+- `sv_device/sv_apb_ingress.sv` performs APB setup/access sequencing for
+  host-originated CPU MMIO requests into the SV device window.
+- `sv_device/sv_fabric_egress_dpi.sv` performs SV bus-master request/response
+  sequencing and calls timing-independent DPI helpers for external fabric
+  read/write operations.
+- `sv_device/sv_host_shell.cpp` is now primarily a socket, Verilator clock,
+  IRQ, waveform, and DPI host-function shim. It no longer owns APB or AHB
+  transaction state machines; it only sends fabric frames with
+  `MASTER_ID_SV_DMA` when called by SV DPI.
 - `scripts/qemu-fork/hw/arm/kx6625.c` routes SYSCTRL DEVCTL and secure-boot
   device-register transactions through `mmio_fabric` with
   `KX6625_MASTER_ID_SYSCTRL`.

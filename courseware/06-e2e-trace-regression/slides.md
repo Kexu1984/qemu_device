@@ -33,11 +33,11 @@ Regression：
 ## e2e_test.sh 流程
 
 ```text
-1. 检查 QEMU/firmware/SV bridge 是否存在
+1. 检查 QEMU/firmware/SV host shell 是否存在
 2. 清理端口
 3. 启动 Python device server
 4. 启动 UART capture client
-5. 启动 SV timer bridge
+5. 启动 SV host shell
 6. 启动 QEMU
 7. 等待 firmware menu
 8. 注入命令 a
@@ -98,7 +98,7 @@ printf 'a\n' | nc -q1 127.0.0.1 "$UART_TERM_PORT"
 build/e2e_server.log
 build/e2e_qemu.log
 build/e2e_uart.log
-build/e2e_sv_timer.log
+build/e2e_sv_host_shell.log
 build/device_trace.jsonl
 build/trace_report.html
 ```
@@ -108,7 +108,7 @@ build/trace_report.html
 - firmware 没输出：看 UART/server/QEMU
 - QEMU 不启动：看 e2e_qemu.log
 - Python model 异常：看 e2e_server.log
-- SV IRQ 异常：看 e2e_sv_timer.log
+- SV IRQ 异常：看 e2e_sv_host_shell.log
 - 事件顺序异常：看 trace_report.html
 
 ---

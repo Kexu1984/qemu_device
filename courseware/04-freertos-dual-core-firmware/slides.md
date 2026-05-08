@@ -136,7 +136,7 @@ a) All tests
 
 ```text
 SV RTL irq_o
--> sv_timer_bridge IRQ message
+-> sv_host_shell IRQ message
 -> QEMU mmio-sockdev IRQ line
 -> ARMv7-M NVIC IRQ5
 -> vector table sv_timer_irq_handler

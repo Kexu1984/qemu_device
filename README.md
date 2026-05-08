@@ -19,7 +19,7 @@ The intended abstraction boundary is:
 |--------|------|------------------|
 | QEMU CPU/SoC | Behavioural CPU, NVIC, memory map, firmware execution | QEMU virtual time with optional `icount`; MMIO callbacks are synchronous from the guest CPU's perspective |
 | Python devices | Fast functional models and reference/checker models | Can use QEMU virtual-time ticks/DES for deterministic device events |
-| SystemVerilog devices | RTL device models with local state machines and registers | Independent local clock maintained by the SV bridge; no claim of cycle-accurate CPU/APB alignment |
+| SystemVerilog devices | RTL device models with local state machines and registers | Independent local clock maintained by the SV host shell; no claim of cycle-accurate CPU/APB alignment |
 
 MMIO access to an SV device is a synchronous transaction boundary: QEMU blocks while the bridge completes the APB/RTL operation, then the guest continues. The elapsed host time and the number of SV pclk cycles consumed by that transaction do not automatically advance QEMU guest cycles. This makes the environment well suited for software bring-up and device functional validation, while keeping the boundary honest about what is not modelled: CPU bus wait-state timing and exact 48 MHz : 16 MHz cross-domain cycle alignment.
 
@@ -34,7 +34,7 @@ This project implements:
 - **SystemVerilog Device Prototype** (`sv_device/`): A Verilator-built APB peripheral subsystem listening on TCP ports 7906/7907/7912. QEMU drives it through a normal `mmio-sockdev` instance at `0x4000B000`; the SV subsystem contains an APB timer at offset `0x000` and a first-version SV DMA at offset `0x100`, with completion IRQs returned through NVIC IRQ5.
 - **KX6625 Custom SoC** (`scripts/qemu-fork/hw/arm/kx6625.c`): Dual Cortex-M4 @ 48 MHz, 512 KB FLASH @ `0x00000000`, 128 KB SRAM @ `0x20000000`, NVIC with 16 external IRQs per ARMv7-M container.
 - **FreeRTOS Cortex-M4F Firmware**: CPU0 boots FreeRTOS using the official GCC `ARM_CM4F` port and Cortex-M SysTick; CPU1 runs a lightweight bare-metal IPC loop. The demo task exercises UART, DMA M2M, DMA peripheral DREQ/DACK, CRC-32, dual-core IPC, SV timer IRQ, SV DMA M2M copy, OTP programming/read protection, HSM AES-CBC/CMAC including OTP-backed `KEY_ID`, SYSCTRL, and WDT countdown-reset warm-boot detection.
-- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server and the SV bridge, boots QEMU with `icount shift=5`, exercises all devices including SV timer/DMA, OTP/HSM direct key wiring, HSM crypto, SYSCTRL indirect register access, and a WDT-triggered system reset, asserts firmware output, and generates an HTML trace report.
+- **End-to-End Smoke Test** (`scripts/e2e_test.sh`): Starts Python server and the SV host shell, boots QEMU with `icount shift=5`, exercises all devices including SV timer/DMA, OTP/HSM direct key wiring, HSM crypto, SYSCTRL indirect register access, and a WDT-triggered system reset, asserts firmware output, and generates an HTML trace report.
 - **Event Tracer** (`device_model/tracer.py`): Non-blocking JSONL event trace for every device — records virtual time, wall time, and device-specific fields. Written by a background thread so device models never block on I/O. Visualised as a self-contained HTML report (`build/trace_report.html`) by `scripts/visualize_trace.py`.
 
 ## Architecture
@@ -88,17 +88,19 @@ flowchart TB
     subgraph SV["SystemVerilog / RTL Domain"]
         direction TB
 
-        SVBR["Verilator TCP bridge\nsv_timer_bridge.cpp"]
-        SVTOP["sv_device_top.sv\nAPB decoder + MMIODevice RTL"]
+        SVBR["Verilator host shell\nsv_host_shell.cpp"]
+        SVTOP["sv_device_top.sv\nAPB ingress + decoder + RTL slaves"]
         SVCLOCK["Local RTL clock"]
         SVROUTER["sv_master_router.sv\ncurrent pass-through router"]
+        SVEGRESS["sv_fabric_egress_dpi.sv\nDPI fabric endpoint"]
         SVDMA["SV bus-master RTL"]
 
-        SVBR <--> SVTOP
+        SVBR <-->|"host_req / host_rsp"| SVTOP
         SVCLOCK --> SVTOP
         SVTOP <--> SVDMA
         SVDMA <--> SVROUTER
-        SVROUTER <-->|"AHB-like master"| SVBR
+        SVROUTER <--> SVEGRESS
+        SVEGRESS --> SVBR
     end
 
     SOCK <-->|"MMIO R/W TCP"| PYSRV
@@ -108,8 +110,8 @@ flowchart TB
     SVBR -->|"IRQ TCP"| SOCK
 
     SOCK -->|"periodic tick / DES tick"| PYSRV
-    PYADDR <-->|"mem-chardev DMA"| SOCK
-    SVBR <-->|"mem-chardev DMA"| SOCK
+    PYADDR <-->|"fabric-chardev DMA"| SOCK
+    SVBR <-->|"fabric-chardev"| SOCK
     PYRST -->|"rst-chardev"| SOCK
 ```
 
@@ -233,38 +235,40 @@ mmio-sockdev (QEMU)  ──►  NVIC (IRQ line)  ──►  Cortex-M4
 
 NVIC pulse pattern: assert then immediately deassert so the NVIC edge-trigger does not re-fire.
 
-### Bus-Master DMA Flow
+### Bus-Master Fabric Flow
 
-The DMA controller model acts as a bus master: it directly reads/writes QEMU physical memory without involving the firmware CPU. This is modelled via a dedicated `mem-chardev` TCP channel:
+DMA-capable models act as bus masters: they read and write platform addresses
+without involving the firmware CPU. This is modelled through the shared
+`fabric-chardev` transaction channel:
 
 ```
-DmaController._tick_channel() calls:
-    MemChannel.dma_read(src_addr, length)
-        │  'M'(1B)|'R'(1B)|phys_addr(8B LE)|length(4B LE)  → QEMU
-        │  QEMU executes cpu_physical_memory_read() and responds data(lengthB)
-        ▼
-    MemChannel.dma_write(dst_addr, data)
-        │  'M'(1B)|'W'(1B)|phys_addr(8B LE)|length(4B LE)|data(lengthB)  → QEMU
-        ▼
-        QEMU executes cpu_physical_memory_write() into SRAM
-        │
-        └── ack(1B) ← QEMU  (0 = OK; non-zero reserved for future bus-error modelling)
+FabricChannel.read(master_id, address, length)
+    │  'F'|'R'|master_id|flags|address|length  → QEMU fabric
+    │  status|data(length)                      ← QEMU fabric
+    ▼
+FabricChannel.write(master_id, address, data)
+    │  'F'|'W'|master_id|flags|address|length|data  → QEMU fabric
+    │  status                                      ← QEMU fabric
 ```
 
-The same MEM channel is used by Python models and by the SystemVerilog bridge. DMA writes are acknowledged so device models can later distinguish a successful bus write from simulated bus faults, protection failures, or unmapped-address responses without changing the packet framing again.
+The same fabric frame is used by Python masters, SV masters, and native QEMU
+masters. Status codes let device models distinguish a successful bus write from
+simulated bus faults, protection failures, or unmapped-address responses without
+changing the packet framing again.
 
 ### SystemVerilog APB Peripheral Subsystem
 
-`sv_device/sv_device_top.sv` is the Verilated top for the SV prototype region at `0x4000B000`. It composes a standalone APB decoder, APB timer, split DMA register/core blocks, and a shared master adapter:
+`sv_device/sv_device_top.sv` is the Verilated top for the SV prototype region at `0x4000B000`. It composes APB ingress, an APB decoder, APB timer, split DMA register/core blocks, and an outbound fabric endpoint:
 
 | Module | Responsibility |
 |--------|----------------|
 | `sv_apb_decoder` | Decode QEMU-visible APB register windows and mux APB responses |
+| `sv_apb_ingress` | Convert host shell requests into APB setup/access cycles |
 | `sv_timer_apb` | APB timer smoke test and IRQ generation at offset `0x000`-`0x0ff` |
 | `sv_dma_regs` | DMA APB register file, start/clear pulses, and status presentation |
 | `sv_dma_core` | DMA transfer state machine using a generic master request/response interface |
-| `sv_master_router` | Route SV master transactions; first version forwards all requests to QEMU memory, later can target local APB/FIFO windows |
-| `sv_master_ahb_adapter` | Convert internal master transactions to the bridge-facing AHB-like signals |
+| `sv_master_router` | Route SV master transactions; first version forwards all requests to the external fabric endpoint, later can target local APB/FIFO windows |
+| `sv_fabric_egress_dpi` | Keep SV master response timing in SV and call C++ DPI helpers at the fabric boundary |
 
 The public APB register map remains:
 
@@ -273,7 +277,7 @@ The public APB register map remains:
 | `0x000`-`0x0ff` | `sv_timer_apb` | APB timer smoke test and IRQ generation |
 | `0x100`-`0x1ff` | `sv_dma_apb` | First-version 32-bit aligned M2M DMA prototype |
 
-The SV DMA keeps its own local RTL clock inside `sv_timer_bridge.cpp`. Firmware configures the DMA through MMIO/APB registers, the bridge returns the MMIO write response immediately, and the DMA core advances later during bridge idle cycles. When the DMA needs memory access, the shared master adapter presents an AHB-like request to the bridge, which translates it into `mem-chardev` reads/writes against QEMU physical memory. Completion is signalled by the shared SV IRQ line through NVIC IRQ5.
+The SV DMA keeps its own local RTL clock inside `sv_host_shell.cpp`. Firmware configures the DMA through MMIO/APB registers; `sv_apb_ingress.sv` performs the APB setup/access cycles inside SV, and the host shell returns the MMIO response once SV produces `host_rsp`. When the DMA needs memory access, `sv_dma_core.sv` sends a generic master transaction through `sv_master_router.sv` into `sv_fabric_egress_dpi.sv`, which calls the host shell's timing-independent DPI helpers to emit `fabric-chardev` reads/writes into QEMU fabric. Completion is signalled by the shared SV IRQ line through NVIC IRQ5.
 
 ### DMA Controller Architecture
 
@@ -655,7 +659,7 @@ Output: `build/firmware.elf`, `build/firmware.bin`, and `build/firmware.hex`. QE
 make sv
 ```
 
-Output: `sv_device/build/sv_timer_bridge`, a Verilator-backed APB timer process used by the e2e and interactive runners. The bridge is built with VCD trace support and dumps waveforms by default; pass `--wave-file PATH` to choose the output file or `--no-wave` to disable dumping.
+Output: `sv_device/build/sv_host_shell`, a Verilator-backed host shell process used by the e2e and interactive runners. The host shell is built with VCD trace support and dumps waveforms by default; pass `--wave-file PATH` to choose the output file or `--no-wave` to disable dumping.
 
 ### 3. Build QEMU (first time only — ~10-15 minutes)
 
@@ -672,17 +676,17 @@ ICOUNT_SHIFT=5 bash scripts/e2e_test.sh
 ```
 
 This single command:
-1. Starts the Python device server and the SV timer bridge
+1. Starts the Python device server and the SV host shell
 2. Waits for the UART port to be ready
 3. Starts QEMU (`-M kx6625 -icount shift=5,sleep=off,align=off`) with all `mmio-sockdev` instances and preloads `build/firmware.hex` into FLASH
 4. Polls firmware output in the server log for up to 120 s
 5. Asserts all expected log lines are present and prints PASS or FAIL
-6. Generates `build/e2e_sv_timer.vcd` for SV waveform inspection
+6. Generates `build/e2e_sv_host_shell.vcd` for SV waveform inspection
 7. Generates `build/trace_report.html` — a self-contained HTML visualizer of all device events
 
 Without `ICOUNT_SHIFT`, the test still runs in realtime wall-clock mode (functional, but non-deterministic timing).
 
-Logs are written to `build/e2e_server.log`, `build/e2e_qemu.log`, and `build/e2e_sv_timer.log` for post-mortem inspection. The SV waveform is written to `build/e2e_sv_timer.vcd`; interactive runs write `build/interactive_sv_timer.vcd`.
+Logs are written to `build/e2e_server.log`, `build/e2e_qemu.log`, and `build/e2e_sv_host_shell.log` for post-mortem inspection. The SV waveform is written to `build/e2e_sv_host_shell.vcd`; interactive runs write `build/interactive_sv_host_shell.vcd`.
 
 **Expected output:**
 
@@ -866,8 +870,8 @@ qemu_device/
 │   └── FreeRTOS-Kernel/              # Vendored FreeRTOS kernel source + GCC ARM_CM4F port
 ├── sv_device/                        # SystemVerilog device prototypes
 │   ├── sv_timer_apb.sv               # APB register timer RTL
-│   ├── sv_timer_bridge.cpp           # Verilator + TCP bridge for mmio-sockdev
-│   └── Makefile                      # Builds sv_device/build/sv_timer_bridge
+│   ├── sv_host_shell.cpp           # Verilator + TCP bridge for mmio-sockdev
+│   └── Makefile                      # Builds sv_device/build/sv_host_shell
 ├── device_model/                     # Python device emulation layer
 │   ├── mmio_base.py                  # MMIODevice ABC; IRQController; MemChannel;
 │   │                                 #   RstController; UartChannel;

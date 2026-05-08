@@ -1,35 +1,35 @@
-// SystemVerilog / RTL Domain top.
+// SystemVerilog / RTL device-island top.
 //
 // QEMU reaches this block through one mmio-sockdev instance and the
-// sv_timer_bridge.cpp TCP bridge. Guest MMIO accesses are translated
-// into APB transactions here; RTL bus-master requests leave through the
-// bridge-facing AHB-like signals and are serviced by the bridge over
-// mmio-sockdev fabric-chardev.
+// sv_host_shell.cpp process. The C++ host shell owns sockets and the
+// simulation clock, while APB sequencing and SV bus-master fabric access live
+// in SystemVerilog. SV calls timing-independent DPI functions for host fabric
+// reads/writes.
 module sv_device_top (
     input  logic        clk,
     input  logic        rst_n,
 
-    input  logic        psel,
-    input  logic        penable,
-    input  logic        pwrite,
-    input  logic [11:0] paddr,
-    input  logic [31:0] pwdata,
-    output logic [31:0] prdata,
-    output logic        pready,
-    output logic        pslverr,
-
-    output logic        hreq_o,
-    output logic        hwrite_o,
-    output logic [31:0] haddr_o,
-    output logic [2:0]  hsize_o,
-    output logic [1:0]  htrans_o,
-    output logic [31:0] hwdata_o,
-    input  logic [31:0] hrdata_i,
-    input  logic        hready_i,
-    input  logic        hresp_i,
+    input  logic        host_req_valid,
+    output logic        host_req_ready,
+    input  logic        host_req_write,
+    input  logic [11:0] host_req_addr,
+    input  logic [2:0]  host_req_size,
+    input  logic [31:0] host_req_wdata,
+    output logic        host_rsp_valid,
+    output logic [31:0] host_rsp_rdata,
+    output logic        host_rsp_error,
 
     output logic        irq_o
 );
+
+    logic psel;
+    logic penable;
+    logic pwrite;
+    logic [11:0] paddr;
+    logic [31:0] pwdata;
+    logic [31:0] prdata;
+    logic pready;
+    logic pslverr;
 
     logic timer_psel;
     logic timer_penable;
@@ -69,6 +69,28 @@ module sv_device_top (
     logic ext_rsp_valid;
     logic [31:0] ext_rsp_rdata;
     logic ext_rsp_error;
+
+    sv_apb_ingress u_apb_ingress (
+        .clk              (clk),
+        .rst_n            (rst_n),
+        .host_req_valid_i (host_req_valid),
+        .host_req_ready_o (host_req_ready),
+        .host_req_write_i (host_req_write),
+        .host_req_addr_i  (host_req_addr),
+        .host_req_size_i  (host_req_size),
+        .host_req_wdata_i (host_req_wdata),
+        .host_rsp_valid_o (host_rsp_valid),
+        .host_rsp_rdata_o (host_rsp_rdata),
+        .host_rsp_error_o (host_rsp_error),
+        .psel_o           (psel),
+        .penable_o        (penable),
+        .pwrite_o         (pwrite),
+        .paddr_o          (paddr),
+        .pwdata_o         (pwdata),
+        .prdata_i         (prdata),
+        .pready_i         (pready),
+        .pslverr_i        (pslverr)
+    );
 
     sv_apb_decoder u_apb_decoder (
         .psel           (psel),
@@ -155,7 +177,7 @@ module sv_device_top (
         .ext_rsp_error_i (ext_rsp_error)
     );
 
-    sv_master_ahb_adapter u_master_adapter (
+    sv_fabric_egress_dpi u_fabric_egress (
         .clk           (clk),
         .rst_n         (rst_n),
         .req_valid_i   (ext_req_valid),
@@ -166,16 +188,7 @@ module sv_device_top (
         .req_size_i    (ext_req_size),
         .rsp_valid_o   (ext_rsp_valid),
         .rsp_rdata_o   (ext_rsp_rdata),
-        .rsp_error_o   (ext_rsp_error),
-        .hreq_o        (hreq_o),
-        .hwrite_o      (hwrite_o),
-        .haddr_o       (haddr_o),
-        .hsize_o       (hsize_o),
-        .htrans_o      (htrans_o),
-        .hwdata_o      (hwdata_o),
-        .hrdata_i      (hrdata_i),
-        .hready_i      (hready_i),
-        .hresp_i       (hresp_i)
+        .rsp_error_o   (ext_rsp_error)
     );
 
     assign irq_o = timer_irq | dma_irq;

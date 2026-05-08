@@ -36,7 +36,7 @@ host wait != guest virtual cycle elapsed
 
 ### Q: `icount` 是否能让 QEMU 与 SV pclk 对齐？
 
-不能自动对齐。SV pclk 是 SV bridge 的本地模型。两者通过 transaction/IRQ 边界交互。
+不能自动对齐。SV pclk 是 SV host shell 的本地模型。两者通过 transaction/IRQ 边界交互。
 
 ### Q: 为什么还要用 icount？
 

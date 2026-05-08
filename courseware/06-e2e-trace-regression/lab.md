@@ -28,7 +28,7 @@ sed -n '1,340p' scripts/e2e_test.sh
 - port cleanup
 - Python server 启动
 - UART client
-- SV bridge
+- SV host shell
 - QEMU command line
 - EXPECTED array
 - command injection

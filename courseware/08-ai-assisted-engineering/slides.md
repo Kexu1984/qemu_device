@@ -106,7 +106,7 @@ AI 不应单独负责：
 3. 跑通 FreeRTOS
 4. 跑通 Python device
 5. 跑通 e2e
-6. 跑通 SV bridge
+6. 跑通 SV host shell
 7. 文档化平台边界
 8. 规划 CI/CD
 

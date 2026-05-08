@@ -19,7 +19,7 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 QEMU_BIN="$PROJECT_ROOT/scripts/qemu-fork/build/qemu-system-arm"
 FIRMWARE_HEX="$PROJECT_ROOT/build/firmware.hex"
 SERVER_SCRIPT="$PROJECT_ROOT/device_model/mmio_device_server.py"
-SV_BRIDGE="$PROJECT_ROOT/sv_device/build/sv_timer_bridge"
+SV_BRIDGE="$PROJECT_ROOT/sv_device/build/sv_host_shell"
 SECBOOT_SCRIPT="$PROJECT_ROOT/scripts/secure_boot_otp.py"
 
 RW_PORT=7890
@@ -41,8 +41,8 @@ LOG_DIR="$PROJECT_ROOT/build"
 SERVER_LOG="$LOG_DIR/e2e_server.log"
 QEMU_LOG="$LOG_DIR/e2e_qemu.log"
 UART_LOG="$LOG_DIR/e2e_uart.log"
-SV_LOG="$LOG_DIR/e2e_sv_timer.log"
-SV_WAVE="$LOG_DIR/e2e_sv_timer.vcd"
+SV_LOG="$LOG_DIR/e2e_sv_host_shell.log"
+SV_WAVE="$LOG_DIR/e2e_sv_host_shell.vcd"
 UART_TERM_PORT=7904
 
 # Colours
@@ -155,10 +155,10 @@ info "UART terminal client PID: $UART_PID  (log: $UART_LOG)"
 # -----------------------------------------------------------------------
 # 2c. Start SystemVerilog/Verilator timer bridge
 # -----------------------------------------------------------------------
-info "Starting SV peripheral bridge (RW:7906, IRQ:7907, MEM:7912)..."
+info "Starting SV host shell (RW:7906, IRQ:7907, FABRIC:7912)..."
 "$SV_BRIDGE" --rw-port 7906 --irq-port 7907 --mem-port 7912 --wave-file "$SV_WAVE" > "$SV_LOG" 2>&1 &
 SV_PID=$!
-info "SV timer bridge PID: $SV_PID  (log: $SV_LOG, wave: $SV_WAVE)"
+info "SV host shell PID: $SV_PID  (log: $SV_LOG, wave: $SV_WAVE)"
 sleep 0.5
 
 # -----------------------------------------------------------------------
@@ -324,7 +324,7 @@ echo "============================== Server output =============================
 cat "$SERVER_LOG"
 echo "============================================================================="
 echo ""
-echo "============================ SV timer bridge log ============================"
+echo "============================ SV host shell log ============================="
 cat "$SV_LOG"
 echo "============================================================================="
 echo ""

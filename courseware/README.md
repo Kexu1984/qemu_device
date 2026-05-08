@@ -158,7 +158,7 @@ courseware/
 内容：
 
 - `sv_device/sv_timer_apb.sv` 的 APB register timer
-- `sv_timer_bridge.cpp` 如何把 socket MMIO 转成 APB cycle
+- `sv_host_shell.cpp` 如何把 socket MMIO 转成 APB cycle
 - Verilator build flow
 - IRQ5 从 RTL `irq_o` 到 firmware ISR 的路径
 - SV 独立 pclk 与 QEMU CPU clock 不做 cycle 对齐的原因
@@ -166,7 +166,7 @@ courseware/
 实验建议：
 
 - 修改 SV timer LOAD 值和 firmware test
-- 在 bridge log 中观察 IRQ assert/deassert
+- 在 host shell log 中观察 IRQ assert/deassert
 
 ### 06. 自动化 e2e、trace 和软件回归测试
 
@@ -174,7 +174,7 @@ courseware/
 
 内容：
 
-- `scripts/e2e_test.sh` 的流程：启动 server、SV bridge、QEMU、UART capture、注入命令、检查日志
+- `scripts/e2e_test.sh` 的流程：启动 server、SV host shell、QEMU、UART capture、注入命令、检查日志
 - expected strings 的优点和局限
 - JSONL trace 与 HTML report
 - 如何定位失败：QEMU log、server log、SV log、UART log

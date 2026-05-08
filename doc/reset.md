@@ -35,7 +35,7 @@ In this simulation environment the split is cleanly modeled:
   can intercept accesses to *all* device types — Python-backed and
   SystemVerilog-backed — before they are forwarded over TCP, because both
   device types are accessed through `mmio-sockdev` in QEMU.  A Python-side
-  guard would never see accesses destined for the SV bridge.
+  guard would never see accesses destined for the SV host shell.
 - When CRU RST_N bits change, native CRU sends explicit reset-notification
   messages over dedicated TCP channels to the Python device server and the SV
   bridge respectively.  Neither backend needs to track CRU register state
@@ -98,11 +98,11 @@ In this simulation environment the split is cleanly modeled:
              CRU then sends a 'D' reset-notification message over the dedicated
              CRU-notify TCP channel to the appropriate backend:
                • Python device  → CruNotifyServer port (Python server)
-               • SV device      → CruNotifyServer port (SV bridge)
+               • SV device      → CruNotifyServer port (SV host shell)
   Python   : CruNotifyServer dispatches:
              On assert  : device._cru_in_reset = True  (device holds its state)
              On release : device.on_device_reset() called; registers → reset values
-  SV bridge: SV bridge receives the same 'D' message; performs its own reset
+  SV host shell: SV host shell receives the same 'D' message; performs its own reset
              action on the local RTL state (drain pipeline, clear register file).
   Retention: Device-level retention is not defined; all registers return to
              reset values on release.
@@ -399,9 +399,9 @@ typedef struct KX6625CruState {
     KX6625CruEntry entries[KX6625_CRU_MAX_DEVICES];
     int            n_entries;
 
-    /* Notify channels — TCP connections to Python server and SV bridge */
+    /* Notify channels — TCP connections to Python server and SV host shell */
     CharBackend    py_notify_chr;  /* → Python CruNotifyServer  */
-    CharBackend    sv_notify_chr;  /* → SV bridge notify port   */
+    CharBackend    sv_notify_chr;  /* → SV host shell notify port   */
 } KX6625CruState;
 
 /* Called from kx6625_soc_init() for every socket-backed device */
@@ -456,7 +456,7 @@ if (s->cru && !kx6625_cru_check_access(s->cru, s->base_addr + offset)) {
 
 This single check point covers **all** device backends uniformly:
 - Python devices — QEMU ↔ Python server over TCP
-- SV devices — QEMU ↔ SV bridge over TCP  
+- SV devices — QEMU ↔ SV host shell over TCP  
 - Any future backend
 
 No Python code participates in the guard.  Python and SV servers never need
@@ -512,9 +512,9 @@ Python devices no longer need any clock/reset awareness in their own
 `read()`/`write()` methods.  The QEMU guard enforces access ordering;
 `CruNotifyServer` keeps device state correct on reset transitions.
 
-**SV bridge — notify port**:
+**SV host shell — notify port**:
 
-The SV bridge (`sv_device/sv_timer_bridge.cpp`) opens a listening port for
+The SV host shell (`sv_device/sv_host_shell.cpp`) opens a listening port for
 CRU reset notifications (proposed: `7918`).  On receiving a `'D'` message:
 - assert reset: drain any in-progress APB transactions; mark device as reset
 - release reset: call the Verilator model's reset deassert sequence
@@ -673,7 +673,7 @@ Firmware      QEMU native CRU    mmio-sockdev     CruNotifyServer   DmaControlle
 ### 9.4 SV Device Access Guard (same QEMU guard, different backend)
 
 ```
-Firmware      QEMU native CRU    mmio-sockdev     SV bridge
+Firmware      QEMU native CRU    mmio-sockdev     SV host shell
    │                │            (sv_sockdev)          │
    │ (SV_RST_N=0)   │                 │                │
    │                │ rst_ctrl1[0]←0  │                │
@@ -751,7 +751,7 @@ after power-on.
    the only location that can intercept accesses to *all* device types —
    Python-backed and SV-backed — uniformly before any TCP forwarding occurs.
    A Python-side guard (e.g. in `MMIOBus`) would be bypassed entirely for SV
-   device accesses, which go through QEMU directly to the SV bridge without
+   device accesses, which go through QEMU directly to the SV host shell without
    entering the Python server.  Python and SV backends have zero clock/reset
    boilerplate; they only receive explicit `'D'` reset-notification messages.
 

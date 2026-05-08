@@ -11,7 +11,7 @@ The most important rule is simple: this project has multiple time domains. They 
 | Host wall-clock | host time | Linux scheduler, TCP, process execution | Not deterministic | Process runtime and socket latency |
 | QEMU virtual time | nanoseconds | QEMU `QEMU_CLOCK_VIRTUAL`; deterministic with `-icount` | Deterministic when `ICOUNT_SHIFT=5` is used | CPU execution, QEMU timers, Python timed events |
 | Python device time | QEMU virtual-time timestamps | Tick/DES messages from `mmio-sockdev` | Deterministic when driven by QEMU virtual time | Timer, WDT, DMA latency, modeled device events |
-| SV local time | Verilator cycles | SV bridge `eval_cycle()` loop | Local to the bridge, not tied to QEMU virtual time | RTL pclk/APB/register state machines |
+| SV local time | Verilator cycles | SV host shell `eval_cycle()` loop | Local to the bridge, not tied to QEMU virtual time | RTL pclk/APB/register state machines |
 
 The platform intentionally does not force these into a single cycle-accurate full-chip clock. QEMU provides a CPU/software behavioral model; Python devices provide deterministic functional device timing; SV devices keep a local RTL-style clock and communicate through MMIO/IRQ transaction boundaries.
 
@@ -161,7 +161,7 @@ From QEMU's point of view, an SV device is still accessed through a synchronous 
 ```text
 Firmware MMIO access
     -> QEMU mmio-sockdev
-    -> TCP request to SV bridge
+    -> TCP request to SV host shell
     -> bridge performs APB cycles on Verilated RTL
     -> bridge returns register data or write response
     -> QEMU resumes guest CPU
@@ -196,7 +196,7 @@ The platform models:
 - CPU-visible functional ordering of MMIO accesses.
 - NVIC interrupt delivery at the behavioral level.
 - Deterministic QEMU/Python virtual-time events under `icount`.
-- Local RTL cycles inside the SV bridge.
+- Local RTL cycles inside the SV host shell.
 - DMA-style memory access through the QEMU physical memory channel.
 - WFI wakeup from virtual timer or interrupt events.
 

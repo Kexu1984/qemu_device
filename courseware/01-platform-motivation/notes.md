@@ -63,7 +63,7 @@
 git log -1 --oneline
 ICOUNT_SHIFT=5 bash scripts/e2e_test.sh
 less build/e2e_server.log
-less build/e2e_sv_timer.log
+less build/e2e_sv_host_shell.log
 ```
 
 ## 建议讨论

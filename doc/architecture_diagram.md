@@ -47,17 +47,19 @@ flowchart TB
     subgraph SV["SystemVerilog / RTL Domain"]
         direction TB
 
-        SVBR["Verilator TCP bridge\nsv_timer_bridge.cpp"]
-        SVTOP["sv_device_top.sv\nAPB decoder + MMIODevice RTL"]
+        SVBR["Verilator host shell\nsv_host_shell.cpp"]
+        SVTOP["sv_device_top.sv\nAPB ingress + decoder + RTL slaves"]
         SVCLOCK["Local RTL clock"]
         SVROUTER["sv_master_router.sv\ncurrent pass-through router"]
+        SVEGRESS["sv_fabric_egress_dpi.sv\nDPI fabric endpoint"]
         SVDMA["SV bus-master RTL"]
 
-        SVBR <--> SVTOP
+        SVBR <-->|"host_req / host_rsp"| SVTOP
         SVCLOCK --> SVTOP
         SVTOP <--> SVDMA
         SVDMA <--> SVROUTER
-        SVROUTER <-->|"AHB-like master"| SVBR
+        SVROUTER <--> SVEGRESS
+        SVEGRESS --> SVBR
     end
 
     SOCK <-->|"MMIO R/W TCP"| PYSRV
@@ -67,7 +69,7 @@ flowchart TB
     SVBR -->|"IRQ TCP"| SOCK
 
     SOCK -->|"periodic tick / DES tick"| PYSRV
-    PYADDR <-->|"mem-chardev DMA"| SOCK
-    SVBR <-->|"mem-chardev DMA"| SOCK
+    PYADDR <-->|"fabric-chardev DMA"| SOCK
+    SVBR <-->|"fabric-chardev"| SOCK
     PYRST -->|"rst-chardev"| SOCK
 ```

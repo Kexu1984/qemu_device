@@ -22,9 +22,10 @@ constexpr uint16_t kDefaultMemPort = 7912;
 constexpr uint8_t kSvDmaMasterId = 0x20;
 constexpr uint32_t kIdleCyclesPerPoll = 16;
 constexpr uint64_t kTraceFlushPeriod = 4096;
-constexpr const char *kDefaultWaveFile = "build/sv_timer_bridge.vcd";
+constexpr const char *kDefaultWaveFile = "build/sv_host_shell.vcd";
 
 volatile std::sig_atomic_t g_stop_requested = 0;
+int g_fabric_fd = -1;
 
 void request_stop(int)
 {
@@ -123,7 +124,7 @@ int listen_on(uint16_t port)
         std::perror("listen");
         std::exit(1);
     }
-    std::printf("[SV-PERIPH] Listening on 127.0.0.1:%u\n", port);
+    std::printf("[SV-HOST] Listening on 127.0.0.1:%u\n", port);
     std::fflush(stdout);
     return fd;
 }
@@ -137,37 +138,33 @@ int accept_one(int listen_fd, const char *name)
         std::perror("accept");
         std::exit(1);
     }
-    std::printf("[SV-PERIPH] %s connected\n", name);
+    std::printf("[SV-HOST] %s connected\n", name);
     std::fflush(stdout);
     return fd;
 }
 
 class SvPeriphBridge {
 public:
-    SvPeriphBridge(int mem_fd, const std::string &wave_file)
+    explicit SvPeriphBridge(const std::string &wave_file)
         : context_(std::make_unique<VerilatedContext>()),
-          dut_(std::make_unique<Vsv_device_top>(context_.get(), "sv_device_top")),
-          mem_fd_(mem_fd)
+          dut_(std::make_unique<Vsv_device_top>(context_.get(), "sv_device_top"))
     {
         if (!wave_file.empty()) {
             Verilated::traceEverOn(true);
             trace_ = std::make_unique<VerilatedVcdC>();
             dut_->trace(trace_.get(), 99);
             trace_->open(wave_file.c_str());
-            std::printf("[SV-PERIPH] Wave dump: %s\n", wave_file.c_str());
+            std::printf("[SV-HOST] Wave dump: %s\n", wave_file.c_str());
             std::fflush(stdout);
         }
 
         dut_->clk = 0;
         dut_->rst_n = 0;
-        dut_->psel = 0;
-        dut_->penable = 0;
-        dut_->pwrite = 0;
-        dut_->paddr = 0;
-        dut_->pwdata = 0;
-        dut_->hrdata_i = 0;
-        dut_->hready_i = 0;
-        dut_->hresp_i = 0;
+        dut_->host_req_valid = 0;
+        dut_->host_req_write = 0;
+        dut_->host_req_addr = 0;
+        dut_->host_req_size = 2;
+        dut_->host_req_wdata = 0;
         eval_cycle(false);
         eval_cycle(false);
         dut_->rst_n = 1;
@@ -184,40 +181,22 @@ public:
 
     uint32_t apb_read(uint32_t offset)
     {
-        dut_->paddr = offset & 0xfffU;
-        dut_->pwrite = 0;
-        dut_->psel = 1;
-        dut_->penable = 0;
-        eval_half();
-        dut_->penable = 1;
-        eval_cycle(false);
-        uint32_t value = dut_->prdata;
-        dut_->psel = 0;
-        dut_->penable = 0;
-        eval_cycle(false);
+        uint32_t value = 0;
+        bool error = false;
+        host_apb_access(false, offset, 0, &value, &error);
         return value;
     }
 
     void apb_write(uint32_t offset, uint32_t value)
     {
-        dut_->paddr = offset & 0xfffU;
-        dut_->pwdata = value;
-        dut_->pwrite = 1;
-        dut_->psel = 1;
-        dut_->penable = 0;
-        eval_half();
-        dut_->penable = 1;
-        eval_cycle(false);
-        dut_->psel = 0;
-        dut_->penable = 0;
-        dut_->pwrite = 0;
-        eval_cycle(false);
+        bool error = false;
+        host_apb_access(true, offset, value, nullptr, &error);
     }
 
     void run_cycles(uint32_t cycles)
     {
         for (uint32_t i = 0; i < cycles; ++i) {
-            eval_cycle(true);
+            eval_cycle(false);
         }
     }
 
@@ -227,6 +206,33 @@ public:
     }
 
 private:
+    void host_apb_access(bool write, uint32_t offset, uint32_t wdata,
+                         uint32_t *rdata, bool *error)
+    {
+        while (!dut_->host_req_ready && !g_stop_requested) {
+            eval_cycle(false);
+        }
+
+        dut_->host_req_valid = 1;
+        dut_->host_req_write = write ? 1 : 0;
+        dut_->host_req_addr = offset & 0xfffU;
+        dut_->host_req_size = 2;
+        dut_->host_req_wdata = wdata;
+        eval_cycle(false);
+        dut_->host_req_valid = 0;
+
+        while (!dut_->host_rsp_valid && !g_stop_requested) {
+            eval_cycle(false);
+        }
+
+        if (rdata) {
+            *rdata = dut_->host_rsp_rdata;
+        }
+        if (error) {
+            *error = dut_->host_rsp_error != 0;
+        }
+    }
+
     void eval_half()
     {
         dut_->eval();
@@ -242,102 +248,26 @@ private:
 
     void eval_cycle(bool service_ahb)
     {
+        (void)service_ahb;
         dut_->clk = 0;
         eval_half();
-        if (service_ahb) {
-            service_ahb_if_needed();
-        }
         dut_->clk = 1;
         eval_half();
         dut_->clk = 0;
-        dut_->hready_i = 0;
-        dut_->hresp_i = 0;
         eval_half();
-    }
-
-    void service_ahb_if_needed()
-    {
-        if (!dut_->hreq_o || dut_->htrans_o == 0) {
-            return;
-        }
-
-        uint32_t addr = dut_->haddr_o;
-        bool write = dut_->hwrite_o != 0;
-        bool ok = true;
-        uint32_t rdata = 0;
-
-        if (write) {
-            ok = mem_write32(addr, dut_->hwdata_o);
-            std::printf("[SV-DMA] AHB WRITE addr=0x%08x data=0x%08x %s\n",
-                        addr, static_cast<uint32_t>(dut_->hwdata_o), ok ? "OK" : "ERR");
-        } else {
-            ok = mem_read32(addr, &rdata);
-            std::printf("[SV-DMA] AHB READ  addr=0x%08x data=0x%08x %s\n",
-                        addr, rdata, ok ? "OK" : "ERR");
-        }
-        std::fflush(stdout);
-
-        dut_->hrdata_i = rdata;
-        dut_->hresp_i = ok ? 0 : 1;
-        dut_->hready_i = 1;
-    }
-
-    bool mem_read32(uint32_t addr, uint32_t *value)
-    {
-        uint8_t hdr[16] = {};
-        hdr[0] = 'F';
-        hdr[1] = 'R';
-        hdr[2] = kSvDmaMasterId;
-        hdr[3] = 0;
-        store_le64(hdr + 4, addr);
-        store_le32(hdr + 12, 4);
-        if (!write_all(mem_fd_, hdr, sizeof(hdr))) {
-            return false;
-        }
-        uint8_t status = 0xff;
-        if (!read_exact(mem_fd_, &status, sizeof(status)) || status != 0) {
-            return false;
-        }
-        uint8_t data[4] = {};
-        if (!read_exact(mem_fd_, data, sizeof(data))) {
-            return false;
-        }
-        *value = load_le32(data);
-        return true;
-    }
-
-    bool mem_write32(uint32_t addr, uint32_t value)
-    {
-        uint8_t pkt[20] = {};
-        pkt[0] = 'F';
-        pkt[1] = 'W';
-        pkt[2] = kSvDmaMasterId;
-        pkt[3] = 0;
-        store_le64(pkt + 4, addr);
-        store_le32(pkt + 12, 4);
-        store_le32(pkt + 16, value);
-        if (!write_all(mem_fd_, pkt, sizeof(pkt))) {
-            return false;
-        }
-        uint8_t ack = 0xff;
-        if (!read_exact(mem_fd_, &ack, sizeof(ack))) {
-            return false;
-        }
-        return ack == 0;
     }
 
     std::unique_ptr<VerilatedContext> context_;
     std::unique_ptr<Vsv_device_top> dut_;
     std::unique_ptr<VerilatedVcdC> trace_;
     uint64_t trace_dump_count_ = 0;
-    int mem_fd_;
 };
 
 void send_irq(int irq_fd, bool level)
 {
     uint8_t msg[3] = {'I', 0, static_cast<uint8_t>(level ? 1 : 0)};
     if (write_all(irq_fd, msg, sizeof(msg))) {
-        std::printf("[SV-PERIPH] IRQ %s\n", level ? "assert" : "deassert");
+        std::printf("[SV-HOST] IRQ %s\n", level ? "assert" : "deassert");
         std::fflush(stdout);
     }
 }
@@ -351,6 +281,62 @@ void usage(const char *argv0)
 }
 
 } // namespace
+
+extern "C" uint64_t sv_fabric_read32(uint32_t addr)
+{
+    uint8_t hdr[16] = {};
+    hdr[0] = 'F';
+    hdr[1] = 'R';
+    hdr[2] = kSvDmaMasterId;
+    hdr[3] = 0;
+    store_le64(hdr + 4, addr);
+    store_le32(hdr + 12, 4);
+    if (!write_all(g_fabric_fd, hdr, sizeof(hdr))) {
+        std::printf("[SV-DMA] FABRIC READ  addr=0x%08x data=0x00000000 ERR\n", addr);
+        std::fflush(stdout);
+        return 1ULL << 32;
+    }
+
+    uint8_t status = 0xff;
+    if (!read_exact(g_fabric_fd, &status, sizeof(status)) || status != 0) {
+        std::printf("[SV-DMA] FABRIC READ  addr=0x%08x data=0x00000000 ERR\n", addr);
+        std::fflush(stdout);
+        return 1ULL << 32;
+    }
+
+    uint8_t data[4] = {};
+    if (!read_exact(g_fabric_fd, data, sizeof(data))) {
+        std::printf("[SV-DMA] FABRIC READ  addr=0x%08x data=0x00000000 ERR\n", addr);
+        std::fflush(stdout);
+        return 1ULL << 32;
+    }
+
+    uint32_t value = load_le32(data);
+    std::printf("[SV-DMA] FABRIC READ  addr=0x%08x data=0x%08x OK\n", addr, value);
+    std::fflush(stdout);
+    return value;
+}
+
+extern "C" int sv_fabric_write32(uint32_t addr, uint32_t value)
+{
+    uint8_t pkt[20] = {};
+    pkt[0] = 'F';
+    pkt[1] = 'W';
+    pkt[2] = kSvDmaMasterId;
+    pkt[3] = 0;
+    store_le64(pkt + 4, addr);
+    store_le32(pkt + 12, 4);
+    store_le32(pkt + 16, value);
+    bool ok = false;
+    if (write_all(g_fabric_fd, pkt, sizeof(pkt))) {
+        uint8_t ack = 0xff;
+        ok = read_exact(g_fabric_fd, &ack, sizeof(ack)) && ack == 0;
+    }
+    std::printf("[SV-DMA] FABRIC WRITE addr=0x%08x data=0x%08x %s\n",
+                addr, value, ok ? "OK" : "ERR");
+    std::fflush(stdout);
+    return ok ? 1 : 0;
+}
 
 int main(int argc, char **argv)
 {
@@ -387,8 +373,9 @@ int main(int argc, char **argv)
     int rw_fd = accept_one(rw_listen, "RW channel");
     int irq_fd = accept_one(irq_listen, "IRQ channel");
     int mem_fd = accept_one(mem_listen, "fabric channel");
+    g_fabric_fd = mem_fd;
 
-    SvPeriphBridge bridge(mem_fd, wave_file);
+    SvPeriphBridge bridge(wave_file);
     bool last_irq = bridge.irq();
     if (last_irq) {
         send_irq(irq_fd, true);
@@ -429,12 +416,12 @@ int main(int argc, char **argv)
 
             if (op == 'R') {
                 uint32_t value = bridge.apb_read(offset);
-                bridge.run_cycles(1);
                 uint8_t out[4] = {};
                 store_le32(out, value);
                 if (!write_all(rw_fd, out, size <= 4 ? size : 4)) {
                     break;
                 }
+                bridge.run_cycles(kIdleCyclesPerPoll);
             } else if (op == 'W') {
                 uint8_t payload[4] = {};
                 if (size > sizeof(payload) || !read_exact(rw_fd, payload, size)) {
@@ -447,9 +434,10 @@ int main(int argc, char **argv)
                 if (!write_all(rw_fd, resp, sizeof(resp))) {
                     break;
                 }
+                bridge.run_cycles(kIdleCyclesPerPoll);
 
             } else {
-                std::fprintf(stderr, "[SV-PERIPH] Unknown op 0x%02x\n", op);
+                std::fprintf(stderr, "[SV-HOST] Unknown op 0x%02x\n", op);
                 break;
             }
         }
@@ -461,7 +449,7 @@ int main(int argc, char **argv)
         }
     }
 
-    std::printf("[SV-PERIPH] disconnected\n");
+    std::printf("[SV-HOST] disconnected\n");
     ::close(rw_fd);
     ::close(irq_fd);
     ::close(mem_fd);

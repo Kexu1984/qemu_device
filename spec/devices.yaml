@@ -118,9 +118,9 @@ devices:
     size:        0x1000
     irq_num:     5           # External IRQ 5 on KX6625
     irq_delay:   0.0
-    rw_port:     7906        # QEMU → SV bridge MMIO R/W channel
-    irq_port:    7907        # SV bridge → QEMU IRQ injection channel
-    mem_port:    7912        # SV bridge → QEMU physical memory (DMA AHB-master channel)
+    rw_port:     7906        # QEMU → SV host shell MMIO R/W channel
+    irq_port:    7907        # SV host shell → QEMU IRQ injection channel
+    mem_port:    7912        # SV host shell -> QEMU fabric channel
     spec:        sv_timer.yaml
 
   - name:        hsm

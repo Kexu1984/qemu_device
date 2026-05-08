@@ -114,7 +114,7 @@ ICOUNT_SHIFT=5 bash scripts/run_interactive.sh
 
 Direct invocation is useful while debugging Python devices, transport behavior, or trace output.
 
-## SystemVerilog Bridge
+## SystemVerilog Host Shell
 
 The SystemVerilog prototype is built and run through the scripts used by e2e and interactive flows. It provides RTL-style APB devices behind a QEMU `mmio-sockdev` instance.
 
@@ -200,7 +200,7 @@ ICOUNT_SHIFT=5
 
 ## Validation Expectations
 
-For changes that affect specs, firmware, QEMU, Python models, SV bridge, boot, reset, security, or timing, run the narrowest useful validation and then the e2e test when practical.
+For changes that affect specs, firmware, QEMU, Python models, SV host shell, boot, reset, security, or timing, run the narrowest useful validation and then the e2e test when practical.
 
 Typical full validation sequence:
 

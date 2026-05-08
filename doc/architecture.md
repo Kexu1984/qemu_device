@@ -131,7 +131,7 @@ ICOUNT_SHIFT=5 bash scripts/run_interactive.sh
 
 With `-icount shift=5`, `QEMU_CLOCK_VIRTUAL` advances as instruction count times 32 ns. Python timed devices can receive QEMU virtual-time ticks or one-shot DES events through `mmio-sockdev`.
 
-SystemVerilog devices keep their own local clock. An MMIO access to an SV device is a synchronous transaction boundary. The SV bridge can spend local pclk cycles to complete a register operation, but those cycles are not automatically back-annotated into QEMU CPU execution time.
+SystemVerilog devices keep their own local clock. An MMIO access to an SV device is a synchronous transaction boundary. The SV host shell can spend local pclk cycles to complete a register operation, but those cycles are not automatically back-annotated into QEMU CPU execution time.
 
 ## Reset Model
 

@@ -16,7 +16,7 @@
 
 - `build/e2e_server.log`
 - `build/e2e_qemu.log`
-- `build/e2e_sv_timer.log`
+- `build/e2e_sv_host_shell.log`
 - `build/trace_report.html`
 
 让学员看到同一事件在不同日志中的位置。

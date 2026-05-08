@@ -66,10 +66,10 @@ less build/e2e_qemu.log
 mmio-sockdev: IRQ[0] connected to ARMv7M/NVIC input 5
 ```
 
-查看 SV bridge 输出：
+查看 SV host shell 输出：
 
 ```bash
-less build/e2e_sv_timer.log
+less build/e2e_sv_host_shell.log
 ```
 
 建议观察：
@@ -128,7 +128,7 @@ xdg-open build/trace_report.html
 
 完成本实验后，学员应能说明：
 
-- 平台中的主要进程：QEMU、Python device server、SV bridge
+- 平台中的主要进程：QEMU、Python device server、SV host shell
 - firmware 如何通过 UART menu 驱动测试
 - e2e 如何判断 PASS/FAIL
 - trace report 在调试中的价值

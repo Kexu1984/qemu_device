@@ -4,7 +4,7 @@
 
 理解 SystemVerilog timer 如何通过 Verilator bridge 接入 QEMU。
 
-## 实验 1：构建 SV bridge
+## 实验 1：构建 SV host shell
 
 ```bash
 make sv
@@ -13,7 +13,7 @@ make sv
 确认输出：
 
 ```bash
-test -x sv_device/build/sv_timer_bridge && echo OK
+test -x sv_device/build/sv_host_shell && echo OK
 ```
 
 ## 实验 2：查看 SV RTL
@@ -33,7 +33,7 @@ sed -n '1,140p' sv_device/sv_timer_apb.sv
 ## 实验 3：查看 bridge
 
 ```bash
-sed -n '1,220p' sv_device/sv_timer_bridge.cpp
+sed -n '1,220p' sv_device/sv_host_shell.cpp
 ```
 
 关注：
@@ -65,10 +65,10 @@ RUN_INLINE=1 ICOUNT_SHIFT=5 bash scripts/run_interactive.sh
 [SVTIMER] IRQ observed and cleared PASSED!
 ```
 
-## 实验 5：查看 bridge log
+## 实验 5：查看 host shell log
 
 ```bash
-less build/interactive_sv_timer.log
+less build/interactive_sv_host_shell.log
 ```
 
 关注：
@@ -82,7 +82,7 @@ IRQ deassert
 
 ## 思考题
 
-1. 为什么 SV bridge 需要同时监听 R/W 和 IRQ 两个端口？
+1. 为什么 SV host shell 需要同时监听 R/W 和 IRQ 两个端口？
 2. APB transaction 和 QEMU MMIO transaction 是什么关系？
 3. 为什么不把 SV pclk cycles 自动反算到 QEMU CPU cycles？
 4. 如果 RTL 卡住不返回 PREADY，bridge 应该如何处理？

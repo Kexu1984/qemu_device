@@ -24,7 +24,7 @@ Architecture
   Native QEMU devices (no Python model, implemented in kx6625.c):
     SYSCTRL @ 0x4000A000,  CRU @ 0x4000F000
 
-  SystemVerilog bridge (separate sv_timer_bridge process, ports 7906/7907/7912):
+    SystemVerilog host shell (separate sv_host_shell process, ports 7906/7907/7912):
     sv_timer @ 0x4000B000
 
 Port assignments (all 127.0.0.1):
@@ -34,7 +34,7 @@ Port assignments (all 127.0.0.1):
   DmaDemo   RW=7898  IRQ=7899
   CRC       RW=7900
   WDT       RW=7901  IRQ=7902  RST=7903
-  sv_timer  RW=7906  IRQ=7907  MEM=7912  (sv_timer_bridge, not this server)
+  sv_timer  RW=7906  IRQ=7907  MEM=7912  (sv_host_shell, not this server)
   HSM       RW=7908  IRQ=7909
   OTP       RW=7910  IRQ=7911
   FlashCtrl RW=7913  IRQ=7914  MEM=7915

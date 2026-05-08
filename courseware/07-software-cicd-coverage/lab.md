@@ -54,7 +54,7 @@ artifacts/
 ├── e2e_server.log
 ├── e2e_qemu.log
 ├── e2e_uart.log
-├── e2e_sv_timer.log
+├── e2e_sv_host_shell.log
 ├── device_trace.jsonl
 ├── trace_report.html
 └── summary.json

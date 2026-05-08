@@ -29,7 +29,7 @@ SV RTL 接入的价值：
 
 ```text
 sv_device/sv_timer_apb.sv
-sv_device/sv_timer_bridge.cpp
+sv_device/sv_host_shell.cpp
 sv_device/Makefile
 spec/sv_timer.yaml
 ```
@@ -63,7 +63,7 @@ IRQ port:  7907
 firmware mmio_write32(SV_TIMER_CTRL_REG, ...)
 -> QEMU mmio-sockdev write callback
 -> TCP port 7906
--> sv_timer_bridge.cpp
+-> sv_host_shell.cpp
 -> APB setup/access cycles
 -> sv_timer_apb.sv state update
 ```
@@ -161,7 +161,7 @@ SV pclk: bridge-maintained local RTL clock
 
 ## 本讲总结
 
-- SV bridge 证明了 QEMU firmware 到 RTL device 的路径可行
+- SV host shell 证明了 QEMU firmware 到 RTL device 的路径可行
 - MMIO 是同步 transaction boundary
 - SV device 保持本地 clock，不与 QEMU CPU 做 cycle 对齐
 - 该路径适合 RTL device 功能验证，不适合作为 RTL timing signoff

@@ -24,7 +24,7 @@ QEMU_BIN="$PROJECT_ROOT/scripts/qemu-fork/build/qemu-system-arm"
 FIRMWARE_HEX="$PROJECT_ROOT/build/firmware.hex"
 SERVER_SCRIPT="$PROJECT_ROOT/device_model/mmio_device_server.py"
 CONSOLE_SCRIPT="$PROJECT_ROOT/scripts/uart_console.py"
-SV_BRIDGE="$PROJECT_ROOT/sv_device/build/sv_timer_bridge"
+SV_BRIDGE="$PROJECT_ROOT/sv_device/build/sv_host_shell"
 SECBOOT_SCRIPT="$PROJECT_ROOT/scripts/secure_boot_otp.py"
 
 UART_TERM_PORT=7904
@@ -47,8 +47,8 @@ RUN_INLINE="${RUN_INLINE:-0}"
 LOG_DIR="$PROJECT_ROOT/build"
 SERVER_LOG="$LOG_DIR/interactive_server.log"
 QEMU_LOG="$LOG_DIR/interactive_qemu.log"
-SV_LOG="$LOG_DIR/interactive_sv_timer.log"
-SV_WAVE="$LOG_DIR/interactive_sv_timer.vcd"
+SV_LOG="$LOG_DIR/interactive_sv_host_shell.log"
+SV_WAVE="$LOG_DIR/interactive_sv_host_shell.vcd"
 QEMU_PID_FILE="$LOG_DIR/interactive_qemu.pid"
 
 # Colours for this script's own messages
@@ -259,7 +259,7 @@ done
 ok "Device server ready."
 
 # ── 1b. Start SystemVerilog/Verilator timer bridge ──────────────────────────
-info "Starting SV peripheral bridge..."
+info "Starting SV host shell..."
 "$SV_BRIDGE" --rw-port 7906 --irq-port 7907 --mem-port 7912 --wave-file "$SV_WAVE" > "$SV_LOG" 2>&1 &
 SV_PID=$!
 info "SV timer PID $SV_PID  →  $SV_LOG"
