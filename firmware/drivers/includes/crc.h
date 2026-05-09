@@ -1,0 +1,9 @@
+#ifndef FIRMWARE_DRIVERS_CRC_H
+#define FIRMWARE_DRIVERS_CRC_H
+
+#define CRC_CTRL_RESET 0x1U
+#define CRC_EXPECTED   0xCBF43926U
+
+void test_crc(void);
+
+#endif /* FIRMWARE_DRIVERS_CRC_H */

@@ -40,6 +40,7 @@ endif
 CFLAGS  = -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=softfp \
 		  -ffreestanding -nostdlib -fno-unwind-tables -fno-asynchronous-unwind-tables -Wall -Wextra \
 		  -I . \
+		  -I drivers/includes \
 		  -I ../build/generated \
 		  -I ../freertos/FreeRTOS-Kernel/include \
 		  -I ../freertos/FreeRTOS-Kernel/portable/GCC/ARM_CM4F \
@@ -59,7 +60,21 @@ endif
 BUILD_DIR  = ../build
 GEN_HEADER = $(BUILD_DIR)/generated/mmio_devices.h
 FREERTOS_KERNEL = ../freertos/FreeRTOS-Kernel
-APP_SOURCES = start.S main.c cpu1_main.c runtime.c
+DRIVER_SOURCES = \
+	drivers/console_uart/console_uart.c \
+	drivers/crc/crc.c \
+	drivers/cru/cru.c \
+	drivers/dma/dma.c \
+	drivers/dma_client/dma_client.c \
+	drivers/dual_cpu/dual_cpu.c \
+	drivers/hsm/hsm.c \
+	drivers/irq/irq.c \
+	drivers/otp/otp.c \
+	drivers/sv_periph/sv_periph.c \
+	drivers/sysctrl/sysctrl.c \
+	drivers/wdt/wdt.c
+
+APP_SOURCES = start.S main.c cpu1_main.c runtime.c $(DRIVER_SOURCES)
 ifeq ($(COVERAGE),1)
 APP_SOURCES += coverage_runtime.c
 endif
@@ -94,6 +109,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(BUILD_DIR)/%.o: %.c $(GEN_HEADER) | $(BUILD_DIR)
+	mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(COVERAGE_CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/coverage_runtime.o: coverage_runtime.c $(GEN_HEADER) | $(BUILD_DIR)
@@ -118,5 +134,6 @@ $(TARGET).hex: $(TARGET).elf
 clean:
 	rm -f $(BUILD_DIR)/firmware.*
 	rm -f $(BUILD_DIR)/*.o
+	rm -rf $(BUILD_DIR)/drivers
 	rm -rf $(BUILD_DIR)/freertos
 	rm -rf $(BUILD_DIR)/generated

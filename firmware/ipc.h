@@ -5,7 +5,9 @@
  *
  *   CPU0 fills IPC_ARG0 + IPC_REQ, then writes IPC_STATUS = PENDING.
  *   CPU1 spins on IPC_STATUS; on PENDING it processes the request,
- *   writes IPC_RESP, then sets IPC_STATUS = DONE.
+ *   writes IPC_RESP, then sets IPC_STATUS = DONE.  Some requests also
+ *   let CPU1 issue MMIO accesses so CPU0/CPU1 can exercise the fabric as
+ *   concurrent masters.
  *   CPU0 spins on IPC_STATUS == DONE, reads IPC_RESP, resets to IDLE.
  *
  * SRAM layout (top 8 KB of 128 KB SRAM):
@@ -45,6 +47,8 @@
 /* ── Request opcodes ─────────────────────────────────────────────────── */
 /* CPU1 XORs IPC_ARG0 with 0xCAFEBABEU and returns the result in IPC_RESP */
 #define IPC_REQ_ECHO_XOR   0x01U
+/* CPU1 performs a deterministic MMIO access burst and returns a signature */
+#define IPC_REQ_MMIO_BURST 0x02U
 
 /* ── SYSCTRL registers ───────────────────────────────────────────────── */
 #ifndef SYSCTRL_BASE
