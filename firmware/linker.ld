@@ -43,6 +43,14 @@ SECTIONS
     .rodata : {
         *(.rodata)
         *(.rodata.*)
+        . = ALIGN(4);
+        __llvm_covmap_start = .;
+        KEEP(*(__llvm_covmap))
+        __llvm_covmap_end = .;
+        . = ALIGN(4);
+        __llvm_prf_names_start = .;
+        KEEP(*(__llvm_prf_names))
+        __llvm_prf_names_end = .;
     } > FLASH
 
     . = ALIGN(4);
@@ -52,6 +60,14 @@ SECTIONS
         _sdata = .;
         *(.data)
         *(.data.*)
+        . = ALIGN(8);
+        __llvm_prf_data_start = .;
+        KEEP(*(__llvm_prf_data))
+        __llvm_prf_data_end = .;
+        . = ALIGN(8);
+        __llvm_prf_cnts_start = .;
+        KEEP(*(__llvm_prf_cnts))
+        __llvm_prf_cnts_end = .;
         . = ALIGN(4);
         _edata = .;
     } > RAM AT > FLASH

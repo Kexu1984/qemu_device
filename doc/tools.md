@@ -8,10 +8,13 @@ This document is the entry point for development tools used by the KX6625 QEMU p
 |------|---------|
 | Generate constants from specs | `make gen` |
 | Build firmware | `make fw` |
+| Build firmware with Clang | `make -C firmware clean && make -C firmware TOOLCHAIN=clang` |
+| Build firmware with LLVM coverage instrumentation | `make -C firmware clean && make -C firmware TOOLCHAIN=clang COVERAGE=1` |
 | Build QEMU fork | `SKIP_APT=1 bash scripts/build_qemu.sh` |
 | Run deterministic e2e test | `ICOUNT_SHIFT=5 bash scripts/e2e_test.sh` |
 | Run interactive system | `ICOUNT_SHIFT=5 bash scripts/run_interactive.sh` |
 | Visualize trace | `python3 scripts/visualize_trace.py build/device_trace.jsonl build/trace_report.html` |
+| Generate LLVM coverage report | `scripts/llvm_coverage_report.py` |
 
 Use `ICOUNT_SHIFT=5` for deterministic chip-virtual-time runs unless a test explicitly needs realtime behavior.
 
@@ -45,6 +48,37 @@ Typical use:
 ```bash
 make fw
 ```
+
+The default firmware toolchain is `arm-none-eabi-gcc`. For LLVM/Clang method proof work, build the same firmware sources with:
+
+```bash
+make -C firmware clean
+make -C firmware TOOLCHAIN=clang
+```
+
+The Clang mode uses `clang --target=arm-none-eabi` for compilation and keeps `arm-none-eabi-ld` / `arm-none-eabi-objcopy` as the default link and image conversion tools. Override `CC`, `LD`, or `OBJCOPY` on the command line if evaluating a full LLVM path such as `ld.lld` or `llvm-objcopy`.
+
+To build a method-proof firmware image with LLVM source coverage instrumentation enabled for the in-repository firmware C sources:
+
+```bash
+make -C firmware clean
+make -C firmware TOOLCHAIN=clang COVERAGE=1
+```
+
+This embeds LLVM coverage mapping/profile counter sections into the firmware and enables the MMIO coverage dump path. After running the deterministic e2e test, generate standard LLVM artifacts and reports with:
+
+```bash
+scripts/llvm_coverage_report.py
+```
+
+Important coverage outputs:
+
+- `build/coverage/firmware.kxcv`: MMIO coverage device dump container
+- `build/coverage/firmware.profraw`: LLVM raw profile converted from `KXCV`
+- `build/coverage/firmware.profdata`: merged LLVM profile data
+- `build/coverage/llvm_cov_report.txt`: summary report
+- `build/coverage/llvm_cov_show.txt`: line-level text report
+- `build/coverage/html/index.html`: HTML report
 
 Important outputs:
 

@@ -1,0 +1,88 @@
+# ============================================================================
+# Coverage MMIO device — LLVM coverage data export sink
+# ============================================================================
+
+registers:
+  - offset:      0x00
+    name:        ID
+    access:      R
+    description: "Device ID: ASCII 'COV1' encoded little-endian"
+    reset_value: 0x31564F43
+
+  - offset:      0x04
+    name:        VERSION
+    access:      R
+    description: "Coverage device model version: major.minor encoded as 0x00010000 for v1.0"
+    reset_value: 0x00010000
+
+  - offset:      0x08
+    name:        CTRL
+    access:      W
+    description: "Control: bit0=RESET_CAPTURE, bit1=FLUSH_CAPTURE"
+    reset_value: 0x00
+
+  - offset:      0x0C
+    name:        STATUS
+    access:      R
+    description: "Status: bit0=ACTIVE, bit1=COMPLETE, bit2=ERROR"
+    reset_value: 0x00
+
+  - offset:      0x10
+    name:        ERROR
+    access:      R
+    description: "Last error code: 0=NONE, 1=BAD_REGION, 2=OVERFLOW, 3=IO_ERROR"
+    reset_value: 0x00
+
+  - offset:      0x14
+    name:        REGION
+    access:      RW
+    description: "Active region ID: 1=prf_data, 2=prf_cnts, 3=prf_names, 4=covmap"
+    reset_value: 0x00
+
+  - offset:      0x18
+    name:        SIZE
+    access:      RW
+    description: "Expected byte size for the active region; writing starts a new region capture"
+    reset_value: 0x00
+
+  - offset:      0x1C
+    name:        WRITTEN
+    access:      R
+    description: "Bytes written for the active region"
+    reset_value: 0x00
+
+  - offset:      0x20
+    name:        DATA
+    access:      W
+    description: "Streaming data window. Byte/halfword/word writes append to the active region"
+    reset_value: 0x00
+
+  - offset:      0x24
+    name:        TOTAL_BYTES
+    access:      R
+    description: "Total captured bytes across all regions"
+    reset_value: 0x00
+
+  - offset:      0x28
+    name:        CHUNKS
+    access:      R
+    description: "Number of DATA writes received"
+    reset_value: 0x00
+
+  - offset:      0x2C
+    name:        NONZERO_WORDS
+    access:      R
+    description: "Number of non-zero 64-bit words seen in profile counter data"
+    reset_value: 0x00
+
+  - offset:      0x30
+    name:        REGION_COUNT
+    access:      R
+    description: "Number of non-empty regions captured"
+    reset_value: 0x00
+
+  - offset:      0x34
+    name:        CRC32
+    access:      R
+    description: "CRC-32 of captured KXCV payload bytes"
+    reset_value: 0x00

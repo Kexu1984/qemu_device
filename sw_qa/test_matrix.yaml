@@ -1,0 +1,328 @@
+version: 0.1
+purpose: >
+  Demo firmware coverage matrix for method proof on the KX6625 QEMU virtual
+  platform. This file maps firmware scenarios to demo requirements and current
+  e2e evidence strings. It is intentionally lightweight and can later feed a
+  coverage summary generator.
+
+scope:
+  source_under_test:
+    - firmware/main.c
+    - firmware/cpu1_main.c
+    - firmware/runtime.c
+  excluded_from_initial_gate:
+    - freertos/FreeRTOS-Kernel
+  target: internal_method_proof
+  gate_policy: trend_monitoring_only
+
+execution:
+  default_script: scripts/e2e_test.sh
+  default_command: ICOUNT_SHIFT=5 bash scripts/e2e_test.sh
+  firmware_menu_command: a
+  evidence_logs:
+    - build/e2e_server.log
+    - build/e2e_uart.log
+    - build/e2e_qemu.log
+    - build/device_trace.jsonl
+    - build/trace_report.html
+
+requirements:
+  - id: DEMO_REQ_UART_IRQ
+    title: UART RX interrupt path is observable from firmware
+    module: UART
+  - id: DEMO_REQ_DMA_M2M
+    title: DMA memory-to-memory transfer completes and verifies data
+    module: DMA
+  - id: DEMO_REQ_DMA_CLIENT
+    title: DMA client peripheral transfer completes through IRQ path
+    module: DMA_CLIENT
+  - id: DEMO_REQ_CRC_DIRECT
+    title: CRC engine returns the IEEE CRC-32 reference value
+    module: CRC
+  - id: DEMO_REQ_DMA_CRC
+    title: DMA can feed CRC engine through peripheral-style flow
+    module: CRC
+  - id: DEMO_REQ_DUAL_CPU_IPC
+    title: CPU0 can release CPU1 and complete shared SRAM IPC
+    module: IPC
+  - id: DEMO_REQ_SV_TIMER
+    title: SystemVerilog APB timer can raise and clear IRQ through QEMU
+    module: SV_TIMER
+  - id: DEMO_REQ_SV_DMA
+    title: SystemVerilog DMA prototype can identify itself and copy SRAM data
+    module: SV_DMA
+  - id: DEMO_REQ_OTP
+    title: OTP model supports ID, program, read protection, and negative program checks
+    module: OTP
+  - id: DEMO_REQ_HSM
+    title: HSM model supports AES-CBC and AES-CMAC firmware flows
+    module: HSM
+  - id: DEMO_REQ_OTP_HSM_KEY
+    title: HSM can consume OTP-backed KEY_ID material
+    module: HSM_OTP
+  - id: DEMO_REQ_SYSCTRL
+    title: Native SYSCTRL exposes boot, CPU, device policy, and indirect register status
+    module: SYSCTRL
+  - id: DEMO_REQ_WDT_RESET
+    title: WDT can trigger reset and firmware can detect warm boot reason
+    module: WDT
+
+tests:
+  - test_id: FW_UART_001
+    requirement: DEMO_REQ_UART_IRQ
+    module: UART
+    scenario: UART RX interrupt smoke path
+    trigger:
+      menu_command: "1"
+      all_suite_command: "a"
+    expected_log:
+      - UART IRQ demo
+      - IRQs enabled
+      - UART interrupt handled
+    coverage_type:
+      - feature
+      - irq
+      - function
+    initial_priority: P0
+
+  - test_id: FW_DMA_001
+    requirement: DEMO_REQ_DMA_M2M
+    module: DMA
+    scenario: DMA memory-to-memory copy with IRQ completion
+    trigger:
+      menu_command: "2"
+      all_suite_command: "a"
+    expected_log:
+      - DMA demo
+      - DMA started
+      - Verification PASSED
+      - Demo complete
+    coverage_type:
+      - feature
+      - irq
+      - function
+    initial_priority: P0
+
+  - test_id: FW_DMA_CLIENT_001
+    requirement: DEMO_REQ_DMA_CLIENT
+    module: DMA_CLIENT
+    scenario: DMA client peripheral request and IRQ completion
+    trigger:
+      menu_command: "3"
+      all_suite_command: "a"
+    expected_log:
+      - DMA client test
+      - DMA client transfer started
+      - Transfer verified PASSED
+      - All demos complete
+    coverage_type:
+      - feature
+      - irq
+      - function
+    initial_priority: P0
+
+  - test_id: FW_CRC_001
+    requirement: DEMO_REQ_CRC_DIRECT
+    module: CRC
+    scenario: Direct CRC-32 calculation for string 123456789
+    trigger:
+      menu_command: "4"
+      all_suite_command: "a"
+    expected_log:
+      - CRC test
+      - 0xCBF43926 PASSED
+    coverage_type:
+      - feature
+      - function
+    initial_priority: P0
+
+  - test_id: FW_CRC_002
+    requirement: DEMO_REQ_DMA_CRC
+    module: CRC
+    scenario: DMA feeds CRC peripheral and validates CRC-32 result
+    trigger:
+      menu_command: "4"
+      all_suite_command: "a"
+    expected_log:
+      - DMA-CRC test
+      - DMA-CRC] Result 0xCBF43926 PASSED
+      - All tests done
+    coverage_type:
+      - feature
+      - irq
+      - function
+    initial_priority: P1
+
+  - test_id: FW_IPC_001
+    requirement: DEMO_REQ_DUAL_CPU_IPC
+    module: IPC
+    scenario: CPU0 releases CPU1 and verifies XOR response over shared SRAM
+    trigger:
+      menu_command: "6"
+      all_suite_command: "a"
+    expected_log:
+      - Dual-CPU IPC PASS
+    coverage_type:
+      - feature
+      - multicore
+      - function
+    initial_priority: P0
+
+  - test_id: FW_SV_TIMER_001
+    requirement: DEMO_REQ_SV_TIMER
+    module: SV_TIMER
+    scenario: SV APB timer IRQ is observed and cleared by firmware
+    trigger:
+      menu_command: "7"
+      all_suite_command: "a"
+    expected_log:
+      - SV APB timer
+      - SV timer fired
+      - IRQ observed and cleared PASSED
+    coverage_type:
+      - feature
+      - irq
+      - sv_bridge
+      - function
+    initial_priority: P0
+
+  - test_id: FW_SV_DMA_001
+    requirement: DEMO_REQ_SV_DMA
+    module: SV_DMA
+    scenario: SV DMA register identity and memory copy path
+    trigger:
+      menu_command: "7"
+      all_suite_command: "a"
+    expected_log:
+      - SV DMA prototype
+      - SV DMA ID SDMA PASSED
+      - SV DMA M2M copy PASSED
+    coverage_type:
+      - feature
+      - irq
+      - sv_bridge
+      - function
+    initial_priority: P0
+
+  - test_id: FW_OTP_001
+    requirement: DEMO_REQ_OTP
+    module: OTP
+    scenario: OTP ID, program, read protection, non-secret read, and zero-to-one rejection
+    trigger:
+      menu_command: "0"
+      all_suite_command: "a"
+    expected_log:
+      - OTP controller test
+      - OTP] ID OTP1 PASSED
+      - OTP] Key slot0 programmed PASSED
+      - OTP] Key read protection PASSED
+      - OTP] Non-secret row read PASSED
+      - OTP] Zero-to-one rejection PASSED
+    coverage_type:
+      - feature
+      - negative
+      - security
+      - branch_candidate
+    initial_priority: P0
+
+  - test_id: FW_HSM_001
+    requirement: DEMO_REQ_HSM
+    module: HSM
+    scenario: HSM AES-CBC encrypt and AES-CMAC operations complete through IRQ path
+    trigger:
+      menu_command: "8"
+      all_suite_command: "a"
+    expected_log:
+      - HSM AES-CBC encrypt test
+      - HSM AES-CBC encrypt PASSED
+      - HSM AES-CMAC PASSED
+    coverage_type:
+      - feature
+      - irq
+      - security
+      - function
+    initial_priority: P0
+
+  - test_id: FW_HSM_OTP_001
+    requirement: DEMO_REQ_OTP_HSM_KEY
+    module: HSM_OTP
+    scenario: HSM consumes OTP-backed KEY_ID0 for AES-CBC operation
+    trigger:
+      menu_command: "0"
+      all_suite_command: "a"
+    expected_log:
+      - OTP] HSM OTP KEY_ID0 AES-CBC PASSED
+    coverage_type:
+      - feature
+      - security
+      - integration
+      - branch_candidate
+    initial_priority: P0
+
+  - test_id: FW_SYSCTRL_001
+    requirement: DEMO_REQ_SYSCTRL
+    module: SYSCTRL
+    scenario: Native SYSCTRL boot, secure boot, CPU, reset policy, and DEVCTL checks
+    trigger:
+      menu_command: "9"
+      all_suite_command: "a"
+    expected_log:
+      - Native SYSCTRL register test
+      - SYSCTRL] ID SCTL PASSED
+      - SYSCTRL] BOOT_STATUS flash/vector PASSED
+      - SYSCTRL] SECURE_BOOT CMAC PASSED
+      - SYSCTRL] CPU_STATUS CPU1 released PASSED
+      - SYSCTRL] DEVICE reset policy PASSED
+      - SYSCTRL] DEVCTL UART STATUS read PASSED
+    coverage_type:
+      - feature
+      - security
+      - reset_policy
+      - branch_candidate
+    initial_priority: P0
+
+  - test_id: FW_WDT_001
+    requirement: DEMO_REQ_WDT_RESET
+    module: WDT
+    scenario: WDT timeout reset and warm boot reason detection
+    trigger:
+      menu_command: "5"
+      all_suite_command: "a"
+    expected_log:
+      - Power-on reset (RESET_REASON=POR)
+      - Kick 1
+      - Kick 2
+      - Waiting for WDT timeout
+      - WDT] TIMEOUT
+      - "Warm boot detected: RESET_REASON=WDT"
+      - WDT demo complete
+    coverage_type:
+      - feature
+      - reset
+      - virtual_time
+      - branch_candidate
+    initial_priority: P0
+
+method_proof_extensions:
+  coverage_data_channels:
+    preferred:
+      - mmio_coverage_device
+    evaluate:
+      - semihosting
+  fault_injection_candidates:
+    - id: FI_OTP_ZERO_TO_ONE
+      target_test: FW_OTP_001
+      location: Python OTP model
+      purpose: Demonstrate negative path and branch evidence
+    - id: FI_HSM_ERROR_IRQ
+      target_test: FW_HSM_001
+      location: Python HSM model
+      purpose: Demonstrate HSM error handling branch and MC/DC candidate setup
+    - id: FI_SV_DMA_ERROR
+      target_test: FW_SV_DMA_001
+      location: SV DMA model
+      purpose: Demonstrate SV-side injected error visible to firmware
+    - id: FI_SYSCTRL_SECURE_BOOT_FAIL
+      target_test: FW_SYSCTRL_001
+      location: QEMU native SYSCTRL or secure boot OTP setup
+      purpose: Demonstrate secure boot decision coverage candidate

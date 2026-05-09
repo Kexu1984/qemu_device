@@ -109,6 +109,7 @@ from device_model.wdt_model         import WdtDevice            # noqa: E402
 from device_model.hsm_model         import HsmDevice            # noqa: E402
 from device_model.otp_model         import OtpControllerDevice   # noqa: E402
 from device_model.flash_controller  import FlashControllerDevice # noqa: E402
+from device_model.coverage_device    import CoverageDevice        # noqa: E402
 from device_model.tracer            import Tracer               # noqa: E402
 try:                                                        # noqa: E402
     from device_model.generated.device_consts import (
@@ -321,6 +322,16 @@ class FlashCtrlCfg:
     size:          int = 0x1000
 
 
+@dataclass
+class CoverageCfg:
+    """Configuration for the coverage capture sink."""
+    base_addr:    int
+    rw_port:      int
+    output_file:  str = 'build/coverage/firmware.kxcv'
+    summary_file: str = 'build/coverage/firmware_coverage_summary.json'
+    size:         int = 0x1000
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PythonDeviceDomain
 # ─────────────────────────────────────────────────────────────────────────────
@@ -372,6 +383,7 @@ class PythonDeviceDomain:
         otp:             Optional[OtpCfg]           = None,
         hsm:             Optional[HsmCfg]           = None,
         flash_ctrl:      Optional[FlashCtrlCfg]     = None,
+        coverage:        Optional[CoverageCfg]      = None,
         enable_fabric_demo_master: bool             = True,
         tick_port:       int                        = 7896,
         cru_notify_port: Optional[int]              = None,
@@ -403,6 +415,7 @@ class PythonDeviceDomain:
             + ([(hsm.base_addr, hsm.size)] if hsm else [])
             + ([(flash_ctrl.base_addr, flash_ctrl.size),
                 (flash_ctrl.ahb_base_addr, flash_ctrl.ahb_size)] if flash_ctrl else [])
+            + ([(coverage.base_addr, coverage.size)] if coverage else [])
         )
 
         fabric_local_regions = [
@@ -582,6 +595,17 @@ class PythonDeviceDomain:
             self._add_server(RWServer(port=flash_ctrl.ahb_rw_port, bus=bus,
                                       base_addr=flash_ctrl.ahb_base_addr))
 
+        # ── 11. Coverage capture sink ───────────────────────────────────
+        if coverage is not None:
+            cov_dev = CoverageDevice(
+                output_file  = coverage.output_file,
+                summary_file = coverage.summary_file,
+                tracer       = tracer,
+            )
+            bus.register(coverage.base_addr, coverage.size, cov_dev)
+            self._add_server(RWServer(port=coverage.rw_port, bus=bus,
+                                      base_addr=coverage.base_addr))
+
         # ── Platform fabric + Python demo master ─────────────────────────
         # The first fabric client is intentionally tick-driven and has no MMIO
         # slave window. It proves that a Python master can access another
@@ -710,6 +734,7 @@ def kx6625_default(
         otp     @ 0x4000D000  rw=7910 irq=7911 nvic_irq=7 file=build/otp.hex
         flash   @ 0x4000E000  rw=7913 irq=7914 mem=7915 nvic_irq=8
         dflash  @ 0x10000000  rw=7916 size=512KB file=build/dflash.hex
+        coverage @ 0x40010000 rw=7918 file=build/coverage/firmware.kxcv
     """
     return PythonDeviceDomain(
         uarts=[
@@ -782,6 +807,12 @@ def kx6625_default(
             ahb_size      = 0x00080000,
             ahb_rw_port   = 7916,
             storage_file  = 'build/dflash.hex',
+        ),
+        coverage=CoverageCfg(
+            base_addr    = 0x40010000,
+            rw_port      = 7918,
+            output_file  = 'build/coverage/firmware.kxcv',
+            summary_file = 'build/coverage/firmware_coverage_summary.json',
         ),
         tick_port = 7896,
         tracer    = tracer,

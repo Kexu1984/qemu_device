@@ -148,6 +148,10 @@
 #define CRU_BIT_OTP            (1U << 8)
 #define CRU_ALL_DEVICES        (0x1FFU)  /* bits 0–8 */
 
+#ifdef COVERAGE_BUILD
+extern uint32_t coverage_dump_mmio(void);
+#endif
+
 #define CRU_RESET_REASON_POR    0x00U
 #define CRU_RESET_REASON_WDT    0x01U
 #define CRU_RESET_REASON_SW_SYS 0x02U
@@ -186,6 +190,15 @@ static void send_string(const char *str)
     while (*str) {
         send_char(*str++);
     }
+}
+
+static void coverage_dump_if_enabled(void)
+{
+#ifdef COVERAGE_BUILD
+    uint32_t status = coverage_dump_mmio();
+    send_string((status & 0x2U) ? "[COV] MMIO coverage dump complete\n"
+                              : "[COV] MMIO coverage dump failed\n");
+#endif
 }
 
 /* Read one character from UART RX FIFO.
@@ -944,6 +957,7 @@ static void app_task(void *arg)
             test_otp();
             test_hsm();
             test_sysctrl();
+            coverage_dump_if_enabled();
             test_wdt();
             /* If WDT path causes reset, we return here on warm boot */
         } else {

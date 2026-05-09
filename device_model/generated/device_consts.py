@@ -350,6 +350,28 @@ FLASH_CTRL_INJECT_ECC_MASK_REG           = 0x4000E08C  # offset 0x008C  RW  ECC-
 FLASH_CTRL_INJECT_CTRL_REG               = 0x4000E090  # offset 0x0090  W  Error injection control. bit0 = APPLY once by XORing data/ecc masks into the backend without recomputing ECC; bit1 = CLEAR_MASKS after apply.
 
 
+# ── COVERAGE ────────────────────────────────────────────────────
+# Coverage capture sink — receives LLVM coverage/profile sections from firmware over MMIO
+COVERAGE_BASE         = 0x40010000
+COVERAGE_SIZE         = 0x1000
+COVERAGE_RW_PORT      = 7918
+
+# Registers
+COVERAGE_ID_REG                          = 0x40010000  # offset 0x0000  R  Device ID: ASCII 'COV1' encoded little-endian
+COVERAGE_VERSION_REG                     = 0x40010004  # offset 0x0004  R  Coverage device model version: major.minor encoded as 0x00010000 for v1.0
+COVERAGE_CTRL_REG                        = 0x40010008  # offset 0x0008  W  Control: bit0=RESET_CAPTURE, bit1=FLUSH_CAPTURE
+COVERAGE_STATUS_REG                      = 0x4001000C  # offset 0x000C  R  Status: bit0=ACTIVE, bit1=COMPLETE, bit2=ERROR
+COVERAGE_ERROR_REG                       = 0x40010010  # offset 0x0010  R  Last error code: 0=NONE, 1=BAD_REGION, 2=OVERFLOW, 3=IO_ERROR
+COVERAGE_REGION_REG                      = 0x40010014  # offset 0x0014  RW  Active region ID: 1=prf_data, 2=prf_cnts, 3=prf_names, 4=covmap
+COVERAGE_SIZE_REG                        = 0x40010018  # offset 0x0018  RW  Expected byte size for the active region; writing starts a new region capture
+COVERAGE_WRITTEN_REG                     = 0x4001001C  # offset 0x001C  R  Bytes written for the active region
+COVERAGE_DATA_REG                        = 0x40010020  # offset 0x0020  W  Streaming data window. Byte/halfword/word writes append to the active region
+COVERAGE_TOTAL_BYTES_REG                 = 0x40010024  # offset 0x0024  R  Total captured bytes across all regions
+COVERAGE_CHUNKS_REG                      = 0x40010028  # offset 0x0028  R  Number of DATA writes received
+COVERAGE_NONZERO_WORDS_REG               = 0x4001002C  # offset 0x002C  R  Number of non-zero 64-bit words seen in profile counter data
+COVERAGE_REGION_COUNT_REG                = 0x40010030  # offset 0x0030  R  Number of non-empty regions captured
+COVERAGE_CRC32_REG                       = 0x40010034  # offset 0x0034  R  CRC-32 of captured KXCV payload bytes
+
 # ── DATA_FLASH memory region ──────────────────────────────────────────────────
 # Data FLASH read-only memory window; program/erase via FLASH controller
 DATA_FLASH_BASE         = 0x10000000

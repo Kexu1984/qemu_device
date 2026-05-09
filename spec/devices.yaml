@@ -158,6 +158,15 @@ devices:
     storage_file:  build/dflash.hex
     spec:        flash_ctrl.yaml
 
+  - name:        coverage
+    description: "Coverage capture sink — receives LLVM coverage/profile sections from firmware over MMIO"
+    base_addr:   0x40010000
+    size:        0x1000
+    rw_port:     7918
+    output_file: build/coverage/firmware.kxcv
+    summary_file: build/coverage/firmware_coverage_summary.json
+    spec:        coverage.yaml
+
 # ── Physical Memory Regions ──────────────────────────────────────────────────────────────────
 #
 # RAM regions visible to both firmware (CPU) and device models through QEMU fabric.

@@ -39,6 +39,7 @@ Port assignments (all 127.0.0.1):
   OTP       RW=7910  IRQ=7911
   FlashCtrl RW=7913  IRQ=7914  MEM=7915
   DFlash    RW=7916
+    Coverage  RW=7918
   CRU-NOTIFY=7917  (optional; not yet wired in e2e_test.sh / run_interactive.sh)
 
 Adding a new device
