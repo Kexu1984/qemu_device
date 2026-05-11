@@ -51,6 +51,16 @@ module sv_device_top (
     logic dma_pslverr;
     logic dma_irq;
 
+    logic gpio_psel;
+    logic gpio_penable;
+    logic gpio_pwrite;
+    logic [11:0] gpio_paddr;
+    logic [31:0] gpio_pwdata;
+    logic [31:0] gpio_prdata;
+    logic gpio_pready;
+    logic gpio_pslverr;
+    logic gpio_irq;
+
     logic m_req_valid;
     logic m_req_ready;
     logic m_req_write;
@@ -116,7 +126,15 @@ module sv_device_top (
         .dma_pwdata     (dma_pwdata),
         .dma_prdata     (dma_prdata),
         .dma_pready     (dma_pready),
-        .dma_pslverr    (dma_pslverr)
+        .dma_pslverr    (dma_pslverr),
+        .gpio_psel      (gpio_psel),
+        .gpio_penable   (gpio_penable),
+        .gpio_pwrite    (gpio_pwrite),
+        .gpio_paddr     (gpio_paddr),
+        .gpio_pwdata    (gpio_pwdata),
+        .gpio_prdata    (gpio_prdata),
+        .gpio_pready    (gpio_pready),
+        .gpio_pslverr   (gpio_pslverr)
     );
 
     sv_timer_apb u_timer (
@@ -156,6 +174,20 @@ module sv_device_top (
         .irq_o         (dma_irq)
     );
 
+    sv_gpio_apb u_gpio (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .psel     (gpio_psel),
+        .penable  (gpio_penable),
+        .pwrite   (gpio_pwrite),
+        .paddr    (gpio_paddr),
+        .pwdata   (gpio_pwdata),
+        .prdata   (gpio_prdata),
+        .pready   (gpio_pready),
+        .pslverr  (gpio_pslverr),
+        .irq_o    (gpio_irq)
+    );
+
     sv_master_router u_master_router (
         .req_valid_i     (m_req_valid),
         .req_ready_o     (m_req_ready),
@@ -191,6 +223,6 @@ module sv_device_top (
         .rsp_error_o   (ext_rsp_error)
     );
 
-    assign irq_o = timer_irq | dma_irq;
+    assign irq_o = timer_irq | dma_irq | gpio_irq;
 
 endmodule

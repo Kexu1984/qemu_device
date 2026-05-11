@@ -15,6 +15,7 @@
 #include "dma.h"
 #include "dma_client.h"
 #include "dual_cpu.h"
+#include "gpio.h"
 #include "hsm.h"
 #include "irq.h"
 #include "otp.h"
@@ -92,6 +93,7 @@ static void app_task(void *arg)
         send_string(" 8) HSM AES/CMAC\n");
         send_string(" 9) SYSCTRL native controller\n");
         send_string(" 0) OTP controller\n");
+        send_string(" g) SV GPIO\n");
         send_string(" a) All tests\n");
         send_string("# ");
 
@@ -119,6 +121,8 @@ static void app_task(void *arg)
             test_sysctrl();
         } else if (cmd == '0') {
             test_otp();
+        } else if (cmd == 'g') {
+            test_gpio();
         } else if (cmd == 'a') {
             console_uart_reset_irq_count();
             test_uart_irq();
@@ -128,13 +132,14 @@ static void app_task(void *arg)
             test_dual_cpu();
             test_sv_timer();
             test_sv_dma();
+            test_gpio();
             test_otp();
             test_hsm();
             test_sysctrl();
             coverage_dump_if_enabled();
             test_wdt();
         } else {
-            send_string("[FW] Unknown command. Enter 0-9 or 'a'.\n");
+            send_string("[FW] Unknown command. Enter 0-9, 'g', or 'a'.\n");
         }
     }
 }

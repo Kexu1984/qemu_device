@@ -14,7 +14,7 @@ spec/
 ├── otp.yaml              # One-time-programmable storage controller register map
 ├── flash_ctrl.yaml       # Data FLASH command controller register map
 ├── sysctrl.yaml          # Native system controller register map
-├── sv_timer.yaml         # SystemVerilog APB timer prototype register map
+├── sv_device.yaml        # SystemVerilog APB timer/GPIO/DMA prototype register map
 ├── soc.yaml              # SoC-level configuration (clock, reset)
 └── wdt.yaml              # Watchdog timer register map
 ```

@@ -113,7 +113,7 @@ devices:
     spec:        cru.yaml
 
   - name:        sv_timer
-    description: "SystemVerilog APB peripheral subsystem — timer plus DMA prototype"
+    description: "SystemVerilog APB peripheral subsystem — timer, GPIO, and DMA prototype"
     base_addr:   0x4000B000
     size:        0x1000
     irq_num:     5           # External IRQ 5 on KX6625
@@ -121,7 +121,7 @@ devices:
     rw_port:     7906        # QEMU → SV host shell MMIO R/W channel
     irq_port:    7907        # SV host shell → QEMU IRQ injection channel
     mem_port:    7912        # SV host shell -> QEMU fabric channel
-    spec:        sv_timer.yaml
+    spec:        sv_device.yaml
 
   - name:        hsm
     description: "HSM crypto accelerator — AES-128 ECB/CBC/CFB/CTR/CMAC with OTP KEY_ID or open-register key source"

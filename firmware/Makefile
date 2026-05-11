@@ -40,6 +40,7 @@ endif
 CFLAGS  = -mcpu=cortex-m4 -mthumb -mfpu=fpv4-sp-d16 -mfloat-abi=softfp \
 		  -ffreestanding -nostdlib -fno-unwind-tables -fno-asynchronous-unwind-tables -Wall -Wextra \
 		  -I . \
+		  -I MCAL/includes \
 		  -I drivers/includes \
 		  -I ../build/generated \
 		  -I ../freertos/FreeRTOS-Kernel/include \
@@ -67,6 +68,7 @@ DRIVER_SOURCES = \
 	drivers/dma/dma.c \
 	drivers/dma_client/dma_client.c \
 	drivers/dual_cpu/dual_cpu.c \
+	drivers/gpio/gpio.c \
 	drivers/hsm/hsm.c \
 	drivers/irq/irq.c \
 	drivers/otp/otp.c \
@@ -74,7 +76,12 @@ DRIVER_SOURCES = \
 	drivers/sysctrl/sysctrl.c \
 	drivers/wdt/wdt.c
 
-APP_SOURCES = start.S main.c cpu1_main.c runtime.c $(DRIVER_SOURCES)
+MCAL_SOURCES = \
+	MCAL/gpio/mcal_gpio.c \
+	MCAL/mcal/mcal.c \
+	MCAL/uart/mcal_uart.c
+
+APP_SOURCES = start.S main.c cpu1_main.c runtime.c $(DRIVER_SOURCES) $(MCAL_SOURCES)
 ifeq ($(COVERAGE),1)
 APP_SOURCES += coverage_runtime.c
 endif
@@ -134,6 +141,7 @@ $(TARGET).hex: $(TARGET).elf
 clean:
 	rm -f $(BUILD_DIR)/firmware.*
 	rm -f $(BUILD_DIR)/*.o
+	rm -rf $(BUILD_DIR)/MCAL
 	rm -rf $(BUILD_DIR)/drivers
 	rm -rf $(BUILD_DIR)/freertos
 	rm -rf $(BUILD_DIR)/generated

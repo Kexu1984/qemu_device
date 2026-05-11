@@ -172,7 +172,7 @@ CRU_SOFT_SYSRST_REQ_REG                  = 0x4000F01C  # offset 0x001C  W  Write
 
 
 # ── SV_TIMER ────────────────────────────────────────────────────
-# SystemVerilog APB peripheral subsystem — timer plus DMA prototype
+# SystemVerilog APB peripheral subsystem — timer, GPIO, and DMA prototype
 SV_TIMER_BASE         = 0x4000B000
 SV_TIMER_SIZE         = 0x1000
 SV_TIMER_IRQ_INTID    = 5
@@ -195,6 +195,16 @@ SV_TIMER_DMA_LENGTH_REG                  = 0x4000B114  # offset 0x0114  RW  SV D
 SV_TIMER_DMA_ERROR_REG                   = 0x4000B118  # offset 0x0118  R  SV DMA error: 0=NONE, 1=BAD_CONFIG, 2=AHB_READ_ERROR, 3=AHB_WRITE_ERROR
 SV_TIMER_DMA_IRQ_CLEAR_REG               = 0x4000B11C  # offset 0x011C  W  Write bit0=1 to clear SV DMA DONE/ERROR IRQ and return DMA FSM to idle
 SV_TIMER_DMA_COUNT_REG                   = 0x4000B120  # offset 0x0120  R  Number of bytes completed by the SV DMA engine
+SV_TIMER_GPIO_ID_REG                     = 0x4000B200  # offset 0x0200  R  SV GPIO ID: ASCII 'GPIO' little-endian
+SV_TIMER_GPIO_DATA_OUT_REG               = 0x4000B204  # offset 0x0204  RW  GPIO output data shadow
+SV_TIMER_GPIO_DATA_IN_REG                = 0x4000B208  # offset 0x0208  R  GPIO sampled input data; output pins read back DATA_OUT
+SV_TIMER_GPIO_DIR_REG                    = 0x4000B20C  # offset 0x020C  RW  GPIO direction bitmap: bit=1 output, bit=0 input
+SV_TIMER_GPIO_SET_REG                    = 0x4000B210  # offset 0x0210  W  Write-one set bits in GPIO_DATA_OUT
+SV_TIMER_GPIO_CLR_REG                    = 0x4000B214  # offset 0x0214  W  Write-one clear bits in GPIO_DATA_OUT
+SV_TIMER_GPIO_TOGGLE_REG                 = 0x4000B218  # offset 0x0218  W  Write-one toggle bits in GPIO_DATA_OUT
+SV_TIMER_GPIO_IRQ_EN_REG                 = 0x4000B21C  # offset 0x021C  RW  GPIO data-change IRQ enable bitmap
+SV_TIMER_GPIO_IRQ_STATUS_REG             = 0x4000B220  # offset 0x0220  RW  GPIO data-change IRQ pending bitmap; write-one clears bits
+SV_TIMER_GPIO_INPUT_SIM_REG              = 0x4000B224  # offset 0x0224  RW  Simulation input value for pins configured as inputs
 
 # ── HSM ─────────────────────────────────────────────────────────
 # HSM crypto accelerator — AES-128 ECB/CBC/CFB/CTR/CMAC with OTP KEY_ID or open-register key source

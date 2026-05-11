@@ -31,7 +31,7 @@ SV RTL 接入的价值：
 sv_device/sv_timer_apb.sv
 sv_device/sv_host_shell.cpp
 sv_device/Makefile
-spec/sv_timer.yaml
+spec/sv_device.yaml
 ```
 
 地址与端口：

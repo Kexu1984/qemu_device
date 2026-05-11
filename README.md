@@ -865,7 +865,7 @@ qemu_device/
 │   ├── otp.yaml                      # OTP controller register map and HSM direct-key provider
 │   ├── sysctrl.yaml                  # Native SYSCTRL register map
 │   ├── wdt.yaml                      # Watchdog Timer register map
-│   └── sv_timer.yaml                 # SystemVerilog APB timer prototype register map
+│   └── sv_device.yaml                # SystemVerilog APB timer/GPIO/DMA prototype register map
 ├── firmware/                         # FreeRTOS Cortex-M4F firmware
 │   ├── FreeRTOSConfig.h              # KX6625 FreeRTOS config (48 MHz, 1 kHz SysTick)
 │   ├── start.S                       # Vector table, Reset_Handler, CPU0/CPU1 split

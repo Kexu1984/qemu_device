@@ -10,6 +10,15 @@
 #   0x100..0x1ff: SV DMA prototype
 #   DMA_CTRL   bit0=START, bit1=IRQ_EN
 #   DMA_STATUS bit0=BUSY, bit1=DONE, bit2=ERROR
+#   0x200..0x2ff: SV GPIO prototype
+#   GPIO_ID        ASCII 'GPIO' little-endian
+#   GPIO_DATA_OUT  output data shadow
+#   GPIO_DATA_IN   sampled pin value; output pins loop DATA_OUT back
+#   GPIO_DIR       bit=1 output, bit=0 input
+#   GPIO_SET/CLR/TOGGLE write-one data modifiers
+#   GPIO_IRQ_EN    bit mask for data-change IRQ generation
+#   GPIO_IRQ_STATUS W1C pending data-change bits
+#   GPIO_INPUT_SIM simulation input shadow for input pins
 
 registers:
   - offset:      0x00
@@ -82,3 +91,54 @@ registers:
     name:        dma_count
     access:      R
     description: "Number of bytes completed by the SV DMA engine"
+
+  - offset:      0x200
+    name:        gpio_id
+    access:      R
+    reset:       0x4F495047
+    description: "SV GPIO ID: ASCII 'GPIO' little-endian"
+
+  - offset:      0x204
+    name:        gpio_data_out
+    access:      RW
+    description: "GPIO output data shadow"
+
+  - offset:      0x208
+    name:        gpio_data_in
+    access:      R
+    description: "GPIO sampled input data; output pins read back DATA_OUT"
+
+  - offset:      0x20C
+    name:        gpio_dir
+    access:      RW
+    description: "GPIO direction bitmap: bit=1 output, bit=0 input"
+
+  - offset:      0x210
+    name:        gpio_set
+    access:      W
+    description: "Write-one set bits in GPIO_DATA_OUT"
+
+  - offset:      0x214
+    name:        gpio_clr
+    access:      W
+    description: "Write-one clear bits in GPIO_DATA_OUT"
+
+  - offset:      0x218
+    name:        gpio_toggle
+    access:      W
+    description: "Write-one toggle bits in GPIO_DATA_OUT"
+
+  - offset:      0x21C
+    name:        gpio_irq_en
+    access:      RW
+    description: "GPIO data-change IRQ enable bitmap"
+
+  - offset:      0x220
+    name:        gpio_irq_status
+    access:      RW
+    description: "GPIO data-change IRQ pending bitmap; write-one clears bits"
+
+  - offset:      0x224
+    name:        gpio_input_sim
+    access:      RW
+    description: "Simulation input value for pins configured as inputs"

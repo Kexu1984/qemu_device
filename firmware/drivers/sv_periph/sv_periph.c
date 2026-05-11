@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include "mmio_devices.h"
 #include "console_uart.h"
+#include "gpio.h"
 #include "mmio.h"
 #include "sv_periph.h"
 
@@ -25,6 +26,7 @@ void sv_timer_irq_handler(void)
 {
     uint32_t status = mmio_read32(SV_TIMER_STATUS_REG);
     uint32_t dma_status = mmio_read32(SV_TIMER_DMA_STATUS_REG);
+    uint32_t gpio_status = gpio_irq_status();
     if (status & SV_TIMER_STATUS_IRQ) {
         mmio_write32(SV_TIMER_IRQ_CLEAR_REG, SV_TIMER_STATUS_IRQ);
         sv_timer_irq_fired++;
@@ -38,6 +40,9 @@ void sv_timer_irq_handler(void)
         } else {
             send_string("[IRQ] SV DMA error! INTID=5\n");
         }
+    }
+    if (gpio_status != 0U) {
+        gpio_handle_irq();
     }
 }
 
