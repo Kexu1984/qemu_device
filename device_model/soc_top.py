@@ -119,8 +119,8 @@ try:                                                        # noqa: E402
         MASTER_ID_PY_FABRIC_DEMO,
         SRAM_BASE,
         SRAM_SIZE,
-        SV_TIMER_BASE,
-        SV_TIMER_SIZE,
+        SV_ISLAND_BASE,
+        SV_ISLAND_SIZE,
     )
 except ModuleNotFoundError:                                # noqa: E402
     MASTER_ID_DMA = 0x10
@@ -129,8 +129,8 @@ except ModuleNotFoundError:                                # noqa: E402
     MASTER_ID_PY_FABRIC_DEMO = 0x13
     SRAM_BASE = 0x20000000
     SRAM_SIZE = 0x00020000
-    SV_TIMER_BASE = 0x4000B000
-    SV_TIMER_SIZE = 0x1000
+    SV_ISLAND_BASE = 0x4000B000
+    SV_ISLAND_SIZE = 0x1000
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -429,7 +429,7 @@ class PythonDeviceDomain:
         ]
         fabric_memory_regions = [
             FabricRegion('sram', SRAM_BASE, SRAM_SIZE, 'qemu_memory'),
-            FabricRegion('sv_timer', SV_TIMER_BASE, SV_TIMER_SIZE, 'sv_apb'),
+            FabricRegion('sv_island', SV_ISLAND_BASE, SV_ISLAND_SIZE, 'sv_apb'),
         ]
 
         system_fabric_channel: Optional[FabricChannel] = None
@@ -639,7 +639,7 @@ class PythonDeviceDomain:
                 0x40007000: 3,   # dma_demo
                 0x40008000: 4,   # crc
                 0x40009000: 5,   # wdt
-                0x4000B000: 6,   # sv_timer (no Python model; idx still reserved)
+                0x4000B000: 6,   # sv_island (no Python model; idx still reserved)
                 0x4000C000: 7,   # hsm
                 0x4000D000: 8,   # otp
             }

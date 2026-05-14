@@ -128,7 +128,7 @@ class CruNotifyServer:
 
     ``device_map`` maps CRU device-index (int) to ``MMIODevice`` instance,
     matching the ``kx6625_cru_devices[]`` table in ``kx6625.c``:
-      0=uart  1=dma  2=timer0  3=dma_demo  4=crc  5=wdt  6=sv_timer  7=hsm  8=otp
+    0=uart  1=dma  2=timer0  3=dma_demo  4=crc  5=wdt  6=sv_island  7=hsm  8=otp
     """
 
     _MSG_SIZE       = 3     # 'D'(1B) + dev_idx(1B) + action(1B)

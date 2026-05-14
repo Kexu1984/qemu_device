@@ -14,7 +14,7 @@
  *   IRQ0: console_uart
  *   IRQ1: dma
  *   IRQ2: timer0
- *   IRQ5: sv_timer
+ *   IRQ5: sv_island
  *   IRQ6: hsm
  */
 
@@ -35,7 +35,7 @@
 .extern timer_irq_handler
 .extern dma_client_irq_handler
 .extern wdt_irq_handler
-.extern sv_timer_irq_handler
+.extern sv_island_irq_handler
 .extern hsm_irq_handler
 .extern vPortSVCHandler
 .extern xPortPendSVHandler
@@ -70,7 +70,7 @@ _vectors:
     .word   timer_irq_handler      /* IRQ2: timer0 device        */
     .word   dma_client_irq_handler /* IRQ3: dma_client_demo      */
     .word   wdt_irq_handler        /* IRQ4: watchdog timer       */
-    .word   sv_timer_irq_handler   /* IRQ5: SV APB timer         */
+    .word   sv_island_irq_handler  /* IRQ5: SV APB island        */
     .word   hsm_irq_handler        /* IRQ6: HSM crypto           */
 
     /* ── External IRQs 7-15 (indices 23-31) — default ────────────────── */

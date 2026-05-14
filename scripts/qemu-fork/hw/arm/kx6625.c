@@ -166,7 +166,7 @@ static const KX6625CruEntry kx6625_cru_devices[KX6625_CRU_NDEVICES] = {
     { "dma_demo",     0x40007000UL, 0x40008000UL },  /* bit 3 */
     { "crc",          0x40008000UL, 0x40009000UL },  /* bit 4 */
     { "wdt",          0x40009000UL, 0x4000A000UL },  /* bit 5 */
-    { "sv_timer",     0x4000B000UL, 0x4000C000UL },  /* bit 6 */
+    { "sv_island",    0x4000B000UL, 0x4000C000UL },  /* bit 6 */
     { "hsm",          0x4000C000UL, 0x4000D000UL },  /* bit 7 */
     { "otp",          0x4000D000UL, 0x4000E000UL },  /* bit 8 */
 };

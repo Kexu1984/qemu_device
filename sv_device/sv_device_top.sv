@@ -31,6 +31,24 @@ module sv_device_top (
     logic pready;
     logic pslverr;
 
+    logic fabric_psel;
+    logic fabric_penable;
+    logic fabric_pwrite;
+    logic [11:0] fabric_paddr;
+    logic [31:0] fabric_pwdata;
+    logic [31:0] fabric_prdata;
+    logic fabric_pready;
+    logic fabric_pslverr;
+
+    logic dec_psel;
+    logic dec_penable;
+    logic dec_pwrite;
+    logic [11:0] dec_paddr;
+    logic [31:0] dec_pwdata;
+    logic [31:0] dec_prdata;
+    logic dec_pready;
+    logic dec_pslverr;
+
     logic timer_psel;
     logic timer_penable;
     logic timer_pwrite;
@@ -60,6 +78,17 @@ module sv_device_top (
     logic gpio_pready;
     logic gpio_pslverr;
     logic gpio_irq;
+
+    logic spi_psel;
+    logic spi_penable;
+    logic spi_pwrite;
+    logic [11:0] spi_paddr;
+    logic [31:0] spi_pwdata;
+    logic [31:0] spi_prdata;
+    logic spi_pready;
+    logic spi_pslverr;
+    logic spi_irq;
+    logic spi_dma_req;
 
     logic m_req_valid;
     logic m_req_ready;
@@ -102,15 +131,27 @@ module sv_device_top (
         .pslverr_i        (pslverr)
     );
 
+    assign dec_psel = fabric_psel ? fabric_psel : psel;
+    assign dec_penable = fabric_psel ? fabric_penable : penable;
+    assign dec_pwrite = fabric_psel ? fabric_pwrite : pwrite;
+    assign dec_paddr = fabric_psel ? fabric_paddr : paddr;
+    assign dec_pwdata = fabric_psel ? fabric_pwdata : pwdata;
+    assign prdata = dec_prdata;
+    assign pready = fabric_psel ? 1'b0 : dec_pready;
+    assign pslverr = fabric_psel ? 1'b0 : dec_pslverr;
+    assign fabric_prdata = dec_prdata;
+    assign fabric_pready = fabric_psel ? dec_pready : 1'b0;
+    assign fabric_pslverr = fabric_psel ? dec_pslverr : 1'b0;
+
     sv_apb_decoder u_apb_decoder (
-        .psel           (psel),
-        .penable        (penable),
-        .pwrite         (pwrite),
-        .paddr          (paddr),
-        .pwdata         (pwdata),
-        .prdata         (prdata),
-        .pready         (pready),
-        .pslverr        (pslverr),
+        .psel           (dec_psel),
+        .penable        (dec_penable),
+        .pwrite         (dec_pwrite),
+        .paddr          (dec_paddr),
+        .pwdata         (dec_pwdata),
+        .prdata         (dec_prdata),
+        .pready         (dec_pready),
+        .pslverr        (dec_pslverr),
         .timer_psel     (timer_psel),
         .timer_penable  (timer_penable),
         .timer_pwrite   (timer_pwrite),
@@ -134,7 +175,15 @@ module sv_device_top (
         .gpio_pwdata    (gpio_pwdata),
         .gpio_prdata    (gpio_prdata),
         .gpio_pready    (gpio_pready),
-        .gpio_pslverr   (gpio_pslverr)
+        .gpio_pslverr   (gpio_pslverr),
+        .spi_psel       (spi_psel),
+        .spi_penable    (spi_penable),
+        .spi_pwrite     (spi_pwrite),
+        .spi_paddr      (spi_paddr),
+        .spi_pwdata     (spi_pwdata),
+        .spi_prdata     (spi_prdata),
+        .spi_pready     (spi_pready),
+        .spi_pslverr    (spi_pslverr)
     );
 
     sv_timer_apb u_timer (
@@ -171,6 +220,7 @@ module sv_device_top (
         .m_rsp_valid_i (m_rsp_valid),
         .m_rsp_rdata_i (m_rsp_rdata),
         .m_rsp_error_i (m_rsp_error),
+        .spi_req_i     (spi_dma_req),
         .irq_o         (dma_irq)
     );
 
@@ -188,7 +238,24 @@ module sv_device_top (
         .irq_o    (gpio_irq)
     );
 
+    sv_spi_tx_apb u_spi_tx (
+        .clk      (clk),
+        .rst_n    (rst_n),
+        .psel     (spi_psel),
+        .penable  (spi_penable),
+        .pwrite   (spi_pwrite),
+        .paddr    (spi_paddr),
+        .pwdata   (spi_pwdata),
+        .prdata   (spi_prdata),
+        .pready   (spi_pready),
+        .pslverr  (spi_pslverr),
+        .dma_req_o (spi_dma_req),
+        .irq_o    (spi_irq)
+    );
+
     sv_master_router u_master_router (
+        .clk             (clk),
+        .rst_n           (rst_n),
         .req_valid_i     (m_req_valid),
         .req_ready_o     (m_req_ready),
         .req_write_i     (m_req_write),
@@ -198,6 +265,14 @@ module sv_device_top (
         .rsp_valid_o     (m_rsp_valid),
         .rsp_rdata_o     (m_rsp_rdata),
         .rsp_error_o     (m_rsp_error),
+        .local_psel_o    (fabric_psel),
+        .local_penable_o (fabric_penable),
+        .local_pwrite_o  (fabric_pwrite),
+        .local_paddr_o   (fabric_paddr),
+        .local_pwdata_o  (fabric_pwdata),
+        .local_prdata_i  (fabric_prdata),
+        .local_pready_i  (fabric_pready),
+        .local_pslverr_i (fabric_pslverr),
         .ext_req_valid_o (ext_req_valid),
         .ext_req_ready_i (ext_req_ready),
         .ext_req_write_o (ext_req_write),
@@ -223,6 +298,6 @@ module sv_device_top (
         .rsp_error_o   (ext_rsp_error)
     );
 
-    assign irq_o = timer_irq | dma_irq | gpio_irq;
+    assign irq_o = timer_irq | dma_irq | gpio_irq | spi_irq;
 
 endmodule

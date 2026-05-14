@@ -9,7 +9,7 @@
 #define CRU_BIT_DMA_DEMO       (1U << 3)
 #define CRU_BIT_CRC            (1U << 4)
 #define CRU_BIT_WDT            (1U << 5)
-#define CRU_BIT_SV_TIMER       (1U << 6)
+#define CRU_BIT_SV_ISLAND      (1U << 6)
 #define CRU_BIT_HSM            (1U << 7)
 #define CRU_BIT_OTP            (1U << 8)
 #define CRU_ALL_DEVICES        0x1FFU

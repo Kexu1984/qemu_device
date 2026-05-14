@@ -1,4 +1,4 @@
-# SystemVerilog-backed APB timer prototype.
+# SystemVerilog-backed APB peripheral island.
 #
 # Register contract exposed to firmware through mmio-sockdev:
 #   0x000..0x0ff: APB timer
@@ -10,6 +10,11 @@
 #   0x100..0x1ff: SV DMA prototype
 #   DMA_CTRL   bit0=START, bit1=IRQ_EN
 #   DMA_STATUS bit0=BUSY, bit1=DONE, bit2=ERROR
+#   Legacy 0x100..0x120 registers are CH0 aliases for the M2M DMA path.
+#   0x140..0x164: SV DMA CH1 request-driven memory-to-peripheral fabric channel.
+#   DMA_CH1_CTRL bit0=START, bit1=IRQ_EN
+#   DMA_CH1_DST_ADDR is normally programmed to a fixed peripheral register such as SPI_TX_TXDATA.
+#   DMA_CH1_PERIPH_SEL selects the peripheral request source: 1=SPI_TX dma_req.
 #   0x200..0x2ff: SV GPIO prototype
 #   GPIO_ID        ASCII 'GPIO' little-endian
 #   GPIO_DATA_OUT  output data shadow
@@ -19,6 +24,10 @@
 #   GPIO_IRQ_EN    bit mask for data-change IRQ generation
 #   GPIO_IRQ_STATUS W1C pending data-change bits
 #   GPIO_INPUT_SIM simulation input shadow for input pins
+#   0x300..0x3ff: SPI TX transmit-only master
+#   SPI_TX_CTRL    bit0=ENABLE, bit1=START, bit2=ABORT, bit3=SOFT_RESET
+#   SPI_TX_STATUS  bit0=BUSY, bit1=DONE, bit2=ERROR, bits15:8=TX_LEVEL
+#   SPI_TX_TXDATA  write-only TX FIFO enqueue port
 
 registers:
   - offset:      0x00
@@ -92,6 +101,57 @@ registers:
     access:      R
     description: "Number of bytes completed by the SV DMA engine"
 
+  - offset:      0x140
+    name:        dma_ch1_id
+    access:      R
+    reset:       0x31484344
+    description: "SV DMA CH1 ID: ASCII 'DCH1' little-endian"
+
+  - offset:      0x144
+    name:        dma_ch1_ctrl
+    access:      RW
+    description: "SV DMA CH1 control: bit0=START, bit1=IRQ_EN"
+
+  - offset:      0x148
+    name:        dma_ch1_status
+    access:      R
+    description: "SV DMA CH1 status: bit0=BUSY, bit1=DONE, bit2=ERROR"
+
+  - offset:      0x14C
+    name:        dma_ch1_src_addr
+    access:      RW
+    description: "SV DMA CH1 source physical address; first prototype requires 32-bit alignment"
+
+  - offset:      0x150
+    name:        dma_ch1_length
+    access:      RW
+    description: "SV DMA CH1 transfer length in bytes; first prototype requires a non-zero multiple of 4"
+
+  - offset:      0x154
+    name:        dma_ch1_dst_addr
+    access:      RW
+    description: "SV DMA CH1 fixed destination physical address; for SPI TX use SPI_TX_TXDATA"
+
+  - offset:      0x158
+    name:        dma_ch1_periph_sel
+    access:      RW
+    description: "SV DMA CH1 request source selector: 1=SPI_TX dma_req"
+
+  - offset:      0x15C
+    name:        dma_ch1_error
+    access:      R
+    description: "SV DMA CH1 error: 0=NONE, 1=BAD_CONFIG, 2=FABRIC_READ_ERROR, 3=FABRIC_WRITE_ERROR"
+
+  - offset:      0x160
+    name:        dma_ch1_irq_clear
+    access:      W
+    description: "Write bit0=1 to clear SV DMA CH1 DONE/ERROR IRQ and return CH1 FSM to idle"
+
+  - offset:      0x164
+    name:        dma_ch1_count
+    access:      R
+    description: "Number of bytes completed by SV DMA CH1"
+
   - offset:      0x200
     name:        gpio_id
     access:      R
@@ -142,3 +202,98 @@ registers:
     name:        gpio_input_sim
     access:      RW
     description: "Simulation input value for pins configured as inputs"
+
+  - offset:      0x300
+    name:        spi_tx_id
+    access:      R
+    description: "SPI TX ID: ASCII 'SPTX' little-endian"
+
+  - offset:      0x304
+    name:        spi_tx_version
+    access:      R
+    description: "SPI TX spec version: 0x00010000 for v1.0"
+
+  - offset:      0x308
+    name:        spi_tx_ctrl
+    access:      RW
+    description: "SPI TX control: bit0=ENABLE, bit1=START, bit2=ABORT, bit3=SOFT_RESET, bit4=CS_AUTO, bit5=CS_HOLD_ACTIVE"
+
+  - offset:      0x30C
+    name:        spi_tx_status
+    access:      R
+    description: "SPI TX status: bit0=BUSY, bit1=DONE, bit2=ERROR, bit3=TX_EMPTY, bit4=TX_FULL, bit5=TX_THRESHOLD_HIT, bit6=CS_ACTIVE, bit7=IRQ_PENDING, bits15:8=TX_LEVEL"
+
+  - offset:      0x310
+    name:        spi_tx_int_status
+    access:      RW
+    description: "SPI TX interrupt status, W1C: bit0=DONE_IRQ, bit1=TX_THRESHOLD_IRQ, bit2=ERROR_IRQ"
+
+  - offset:      0x314
+    name:        spi_tx_int_enable
+    access:      RW
+    description: "SPI TX interrupt enable: bit0=DONE_IRQ, bit1=TX_THRESHOLD_IRQ, bit2=ERROR_IRQ"
+
+  - offset:      0x318
+    name:        spi_tx_error
+    access:      R
+    description: "SPI TX last error: 0=NONE, 1=TX_OVERFLOW, 2=TX_UNDERRUN, 3=INVALID_CFG, 4=BUSY_START, 5=ABORTED"
+
+  - offset:      0x31C
+    name:        spi_tx_cfg
+    access:      RW
+    description: "SPI TX format: bit0=CPOL, bit1=CPHA, bit2=LSB_FIRST, bits12:8=FRAME_BITS_MINUS_1"
+
+  - offset:      0x320
+    name:        spi_tx_baud_div
+    access:      RW
+    description: "SPI TX clock divider. Legal values >=2; SCLK = PCLK / (2 * BAUD_DIV)."
+
+  - offset:      0x324
+    name:        spi_tx_txdata
+    access:      W
+    description: "SPI TX FIFO write port. One write enqueues one frame using low FRAME_BITS bits."
+
+  - offset:      0x328
+    name:        spi_tx_tx_level
+    access:      R
+    description: "SPI TX FIFO queued frame count, range 0..16"
+
+  - offset:      0x32C
+    name:        spi_tx_tx_threshold
+    access:      RW
+    description: "SPI TX threshold level; IRQ condition is TX_LEVEL <= TX_THRESHOLD"
+
+  - offset:      0x330
+    name:        spi_tx_frame_count
+    access:      RW
+    description: "SPI TX frames remaining in the active transfer; firmware writes the requested frame count before START"
+
+  - offset:      0x334
+    name:        spi_tx_cs_setup
+    access:      RW
+    description: "SPI TX chip-select setup delay in SV clock cycles"
+
+  - offset:      0x338
+    name:        spi_tx_cs_hold
+    access:      RW
+    description: "SPI TX chip-select hold delay in SV clock cycles"
+
+  - offset:      0x33C
+    name:        spi_tx_fifo_ctrl
+    access:      W
+    description: "SPI TX FIFO control: write bit0=1 to clear the TX FIFO"
+
+  - offset:      0x340
+    name:        spi_tx_last_frame
+    access:      R
+    description: "SPI TX debug: most recently completed frame, right-aligned"
+
+  - offset:      0x344
+    name:        spi_tx_frame_done_count
+    access:      R
+    description: "SPI TX debug: number of completed frames since reset or SOFT_RESET"
+
+  - offset:      0x348
+    name:        spi_tx_bit_count
+    access:      R
+    description: "SPI TX debug: number of shifted bits since reset or SOFT_RESET"

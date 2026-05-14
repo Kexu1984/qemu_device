@@ -103,7 +103,7 @@ registers:
   - offset:      0x30
     name:        DEVICE_CLK_EN
     access:      RW
-    description: "Coarse peripheral clock enable bitmap. bit0=UART, bit1=DMA, bit2=TIMER0, bit3=DMA_CLIENT_DEMO, bit4=CRC, bit5=WDT, bit6=SV_TIMER, bit7=HSM. Current models keep clocks effectively enabled but expose policy state here."
+    description: "Coarse peripheral clock enable bitmap. bit0=UART, bit1=DMA, bit2=TIMER0, bit3=DMA_CLIENT_DEMO, bit4=CRC, bit5=WDT, bit6=SV_ISLAND, bit7=HSM. Current models keep clocks effectively enabled but expose policy state here."
     reset_value: 0x000000FF
 
   - offset:      0x34

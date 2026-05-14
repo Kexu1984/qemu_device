@@ -256,18 +256,21 @@ masters. Status codes let device models distinguish a successful bus write from
 simulated bus faults, protection failures, or unmapped-address responses without
 changing the packet framing again.
 
-### SystemVerilog APB Peripheral Subsystem
+### SystemVerilog APB Island
 
-`sv_device/sv_device_top.sv` is the Verilated top for the SV prototype region at `0x4000B000`. It composes APB ingress, an APB decoder, APB timer, split DMA register/core blocks, and an outbound fabric endpoint:
+`sv_device/sv_device_top.sv` is the Verilated top for the SV island region at `0x4000B000`. It composes APB ingress, an APB decoder, APB timer, split DMA register/core blocks, GPIO, and an outbound fabric endpoint:
 
 | Module | Responsibility |
 |--------|----------------|
 | `sv_apb_decoder` | Decode QEMU-visible APB register windows and mux APB responses |
 | `sv_apb_ingress` | Convert host shell requests into APB setup/access cycles |
 | `sv_timer_apb` | APB timer smoke test and IRQ generation at offset `0x000`-`0x0ff` |
-| `sv_dma_regs` | DMA APB register file, start/clear pulses, and status presentation |
-| `sv_dma_core` | DMA transfer state machine using a generic master request/response interface |
+| `sv_dma_regs` | DMA APB register file, CH0/CH1 start/clear pulses, and status presentation |
+| `sv_dma_core` | CH0 M2M transfer state machine using a generic master request/response interface |
+| `sv_dma_core` | Parameterized DMA channel engine for legacy M2M and request-driven M2P fabric transfers |
+| `sv_gpio_apb` | GPIO APB prototype with output/input simulation and change IRQ |
 | `sv_master_router` | Route SV master transactions; first version forwards all requests to the external fabric endpoint, later can target local APB/FIFO windows |
+| `sv_spi_tx_apb` | SPI transmit-only master with CPU-fed TX FIFO and simulation frame logs |
 | `sv_fabric_egress_dpi` | Keep SV master response timing in SV and call C++ DPI helpers at the fabric boundary |
 
 The public APB register map remains:
@@ -276,6 +279,8 @@ The public APB register map remains:
 |---------------|--------|---------|
 | `0x000`-`0x0ff` | `sv_timer_apb` | APB timer smoke test and IRQ generation |
 | `0x100`-`0x1ff` | `sv_dma_apb` | First-version 32-bit aligned M2M DMA prototype |
+| `0x200`-`0x2ff` | `sv_gpio_apb` | GPIO output/input simulation and change IRQ prototype |
+| `0x300`-`0x3ff` | `sv_spi_tx_apb` | SPI TX master CPU FIFO path and frame logging |
 
 The SV DMA keeps its own local RTL clock inside `sv_host_shell.cpp`. Firmware configures the DMA through MMIO/APB registers; `sv_apb_ingress.sv` performs the APB setup/access cycles inside SV, and the host shell returns the MMIO response once SV produces `host_rsp`. When the DMA needs memory access, `sv_dma_core.sv` sends a generic master transaction through `sv_master_router.sv` into `sv_fabric_egress_dpi.sv`, which calls the host shell's timing-independent DPI helpers to emit `fabric-chardev` reads/writes into QEMU fabric. Completion is signalled by the shared SV IRQ line through NVIC IRQ5.
 
@@ -815,11 +820,11 @@ The FreeRTOS application task (`firmware/main.c`) executes nine demos from the U
 
 ### Phase 6 — SystemVerilog APB Timer
 
-1. Firmware writes `SV_TIMER_LOAD=8`, then starts the SV timer with IRQ enabled.
+1. Firmware writes `SV_ISLAND_LOAD=8`, then starts the SV timer with IRQ enabled.
 2. QEMU forwards the MMIO writes to the SV host shell at TCP port 7906.
 3. `sv_apb_ingress.sv` turns the host request into APB setup/access cycles on `sv_timer_apb.sv`, advances the timer in the SV device's local pclk domain, and the host shell observes `irq_o`.
 4. The host shell sends an IRQ message on port 7907; QEMU raises NVIC IRQ5.
-5. Firmware handles IRQ5, writes `SV_TIMER_IRQ_CLEAR`, and prints `[SVTIMER] IRQ observed and cleared PASSED!`.
+5. Firmware handles IRQ5, writes `SV_ISLAND_IRQ_CLEAR`, and prints `[SVTIMER] IRQ observed and cleared PASSED!`.
 
 This phase validates the QEMU-to-SV transaction path and RTL interrupt behaviour. It does not model CPU bus wait states or force the SV pclk to remain cycle-aligned with QEMU's 48 MHz CPU clock.
 

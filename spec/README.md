@@ -14,6 +14,7 @@ spec/
 ├── otp.yaml              # One-time-programmable storage controller register map
 ├── flash_ctrl.yaml       # Data FLASH command controller register map
 ├── sysctrl.yaml          # Native system controller register map
+├── spi_tx.yaml           # SPI transmit-only master draft register map (not mapped yet)
 ├── sv_device.yaml        # SystemVerilog APB timer/GPIO/DMA prototype register map
 ├── soc.yaml              # SoC-level configuration (clock, reset)
 └── wdt.yaml              # Watchdog timer register map
@@ -32,7 +33,7 @@ spec/
 | CRC-32 Engine    | `0x40008000`  | 4 KB   | —        | 7900     | —        | —         | —        | —        | —         |
 | Watchdog Timer   | `0x40009000`  | 4 KB   | 4        | 7901     | 7902     | —         | —        | 7903     | —         |
 | SYSCTRL          | `0x4000A000`  | 4 KB   | —        | native   | —        | —         | —        | —        | —         |
-| SV APB Timer     | `0x4000B000`  | 4 KB   | 5        | 7906     | 7907     | —         | —        | —        | —         |
+| SV APB Island    | `0x4000B000`  | 4 KB   | 5        | 7906     | 7907     | —         | —        | —        | —         |
 | HSM Crypto       | `0x4000C000`  | 4 KB   | 6        | 7908     | 7909     | —         | —        | —        | —         |
 | OTP Controller   | `0x4000D000`  | 4 KB   | 7        | 7910     | 7911     | —         | —        | —        | —         |
 | FLASH Controller | `0x4000E000`  | 4 KB   | 8        | 7913     | 7914     | —         | 7915     | —        | —         |
@@ -145,7 +146,17 @@ Test vector: `CRC-32("123456789") = 0xCBF43926`. Supports byte and word writes; 
 
 ---
 
-## SV APB Timer (`sv_device/sv_timer_apb.sv`)
+## SV APB Island (`sv_device/`)
+
+The SV island is one 4 KB `mmio-sockdev` window backed by the Verilated
+`sv_device_top` subsystem. Internal APB decode currently assigns:
+
+- `0x000..0x0FF`: `sv_timer_apb.sv`
+- `0x100..0x1FF`: `sv_dma_apb.sv`
+- `0x200..0x2FF`: `sv_gpio_apb.sv`
+- `0x300..0x3FF`: `sv_spi_tx_apb.sv`
+
+### SV APB Timer (`sv_device/sv_timer_apb.sv`)
 
 | Offset | Name      | Access | Reset | Description                                  |
 |--------|-----------|--------|-------|----------------------------------------------|

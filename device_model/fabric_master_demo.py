@@ -18,13 +18,13 @@ try:
         CRC_CTRL_REG,
         CRC_DATA_REG,
         CRC_RESULT_REG,
-        SV_TIMER_DMA_ID_REG,
+        SV_ISLAND_DMA_ID_REG,
     )
 except ModuleNotFoundError:
     CRC_DATA_REG = 0x40008000
     CRC_RESULT_REG = 0x40008004
     CRC_CTRL_REG = 0x40008008
-    SV_TIMER_DMA_ID_REG = 0x4000B100
+    SV_ISLAND_DMA_ID_REG = 0x4000B100
 
 
 class PythonFabricMasterDemo:
@@ -86,7 +86,7 @@ class PythonFabricMasterDemo:
 
     def _run_sv_probe(self, vtime_ns: int) -> bool:
         self._sv_attempts += 1
-        result, read_rsp = self._fabric.read32(SV_TIMER_DMA_ID_REG)
+        result, read_rsp = self._fabric.read32(SV_ISLAND_DMA_ID_REG)
         if read_rsp.ok and result == self._EXPECTED_SV_DMA_ID:
             print('[FABRIC] Python master SV register access PASSED')
             self._tr.emit(

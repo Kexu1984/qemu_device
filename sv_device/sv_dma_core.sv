@@ -1,4 +1,8 @@
-module sv_dma_core (
+module sv_dma_core #(
+    parameter bit REQUEST_DRIVEN = 1'b0,
+    parameter bit DST_FIXED = 1'b0,
+    parameter bit WRITE_BYTES_FROM_WORD = 1'b0
+) (
     input  logic        clk,
     input  logic        rst_n,
 
@@ -8,6 +12,8 @@ module sv_dma_core (
     input  logic [31:0] src_addr_i,
     input  logic [31:0] dst_addr_i,
     input  logic [31:0] length_i,
+    input  logic [31:0] periph_sel_i,
+    input  logic        periph_req_i,
 
     output logic        busy_o,
     output logic        done_o,
@@ -28,13 +34,22 @@ module sv_dma_core (
 );
 
     localparam logic [2:0] SIZE_WORD = 3'b010;
+    localparam logic [31:0] PERIPH_NONE = 32'h0000_0000;
+    localparam logic [31:0] PERIPH_SPI_TX = 32'h0000_0001;
 
-    typedef enum logic [2:0] {
+    typedef enum logic [3:0] {
         ST_IDLE,
+        ST_WAIT_REQ,
         ST_READ_REQ,
         ST_READ_RSP,
-        ST_WRITE_REQ,
-        ST_WRITE_RSP,
+        ST_WRITE0_REQ,
+        ST_WRITE0_RSP,
+        ST_WRITE1_REQ,
+        ST_WRITE1_RSP,
+        ST_WRITE2_REQ,
+        ST_WRITE2_RSP,
+        ST_WRITE3_REQ,
+        ST_WRITE3_RSP,
         ST_DONE,
         ST_ERROR
     } state_t;
@@ -44,11 +59,12 @@ module sv_dma_core (
     logic [31:0] read_data_q;
     logic [31:0] error_code_q;
 
+    wire periph_cfg_valid = REQUEST_DRIVEN ? (periph_sel_i == PERIPH_SPI_TX) : (periph_sel_i == PERIPH_NONE);
     wire valid_cfg = (length_i != 32'h0) && (length_i[1:0] == 2'b00) &&
-                     (src_addr_i[1:0] == 2'b00) && (dst_addr_i[1:0] == 2'b00);
+                     (src_addr_i[1:0] == 2'b00) && (dst_addr_i[1:0] == 2'b00) &&
+                     periph_cfg_valid;
 
-    assign busy_o = (state_q == ST_READ_REQ) || (state_q == ST_READ_RSP) ||
-                    (state_q == ST_WRITE_REQ) || (state_q == ST_WRITE_RSP);
+    assign busy_o = (state_q != ST_IDLE) && (state_q != ST_DONE) && (state_q != ST_ERROR);
     assign done_o = (state_q == ST_DONE);
     assign error_o = (state_q == ST_ERROR);
     assign error_code_o = error_code_q;
@@ -58,19 +74,37 @@ module sv_dma_core (
         m_req_valid_o = 1'b0;
         m_req_write_o = 1'b0;
         m_req_addr_o  = 32'h0000_0000;
-        m_req_wdata_o = read_data_q;
+        m_req_wdata_o = 32'h0000_0000;
         m_req_size_o  = SIZE_WORD;
 
         unique case (state_q)
             ST_READ_REQ: begin
                 m_req_valid_o = 1'b1;
-                m_req_addr_o  = src_addr_i + count_q;
+                m_req_addr_o = src_addr_i + count_q;
             end
-            ST_WRITE_REQ: begin
+            ST_WRITE0_REQ: begin
                 m_req_valid_o = 1'b1;
                 m_req_write_o = 1'b1;
-                m_req_addr_o  = dst_addr_i + count_q;
-                m_req_wdata_o = read_data_q;
+                m_req_addr_o = DST_FIXED ? dst_addr_i : (dst_addr_i + count_q);
+                m_req_wdata_o = WRITE_BYTES_FROM_WORD ? {24'h0, read_data_q[7:0]} : read_data_q;
+            end
+            ST_WRITE1_REQ: begin
+                m_req_valid_o = 1'b1;
+                m_req_write_o = 1'b1;
+                m_req_addr_o = dst_addr_i;
+                m_req_wdata_o = {24'h0, read_data_q[15:8]};
+            end
+            ST_WRITE2_REQ: begin
+                m_req_valid_o = 1'b1;
+                m_req_write_o = 1'b1;
+                m_req_addr_o = dst_addr_i;
+                m_req_wdata_o = {24'h0, read_data_q[23:16]};
+            end
+            ST_WRITE3_REQ: begin
+                m_req_valid_o = 1'b1;
+                m_req_write_o = 1'b1;
+                m_req_addr_o = dst_addr_i;
+                m_req_wdata_o = {24'h0, read_data_q[31:24]};
             end
             default: begin
             end
@@ -79,11 +113,11 @@ module sv_dma_core (
 
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            state_q      <= ST_IDLE;
-            count_q      <= 32'h0000_0000;
-            read_data_q  <= 32'h0000_0000;
+            state_q <= ST_IDLE;
+            count_q <= 32'h0000_0000;
+            read_data_q <= 32'h0000_0000;
             error_code_q <= 32'h0000_0000;
-            irq_o        <= 1'b0;
+            irq_o <= 1'b0;
         end else begin
             if (irq_clear_i) begin
                 irq_o <= 1'b0;
@@ -99,12 +133,17 @@ module sv_dma_core (
                             error_code_q <= 32'h0000_0000;
                             irq_o <= 1'b0;
                             if (valid_cfg) begin
-                                state_q <= ST_READ_REQ;
+                                state_q <= REQUEST_DRIVEN ? ST_WAIT_REQ : ST_READ_REQ;
                             end else begin
                                 state_q <= ST_ERROR;
                                 error_code_q <= 32'h0000_0001;
                                 irq_o <= irq_en_i;
                             end
+                        end
+                    end
+                    ST_WAIT_REQ: begin
+                        if (periph_req_i) begin
+                            state_q <= ST_READ_REQ;
                         end
                     end
                     ST_READ_REQ: begin
@@ -120,28 +159,84 @@ module sv_dma_core (
                                 irq_o <= irq_en_i;
                             end else begin
                                 read_data_q <= m_rsp_rdata_i;
-                                state_q <= ST_WRITE_REQ;
+                                state_q <= ST_WRITE0_REQ;
                             end
                         end
                     end
-                    ST_WRITE_REQ: begin
+                    ST_WRITE0_REQ: begin
                         if (m_req_ready_i) begin
-                            state_q <= ST_WRITE_RSP;
+                            state_q <= ST_WRITE0_RSP;
                         end
                     end
-                    ST_WRITE_RSP: begin
+                    ST_WRITE0_RSP: begin
                         if (m_rsp_valid_i) begin
                             if (m_rsp_error_i) begin
                                 state_q <= ST_ERROR;
                                 error_code_q <= 32'h0000_0003;
                                 irq_o <= irq_en_i;
+                            end else if (WRITE_BYTES_FROM_WORD) begin
+                                state_q <= ST_WRITE1_REQ;
                             end else if (count_q + 32'd4 >= length_i) begin
                                 count_q <= count_q + 32'd4;
                                 state_q <= ST_DONE;
                                 irq_o <= irq_en_i;
                             end else begin
                                 count_q <= count_q + 32'd4;
-                                state_q <= ST_READ_REQ;
+                                state_q <= REQUEST_DRIVEN ? ST_WAIT_REQ : ST_READ_REQ;
+                            end
+                        end
+                    end
+                    ST_WRITE1_REQ: begin
+                        if (m_req_ready_i) begin
+                            state_q <= ST_WRITE1_RSP;
+                        end
+                    end
+                    ST_WRITE1_RSP: begin
+                        if (m_rsp_valid_i) begin
+                            if (m_rsp_error_i) begin
+                                state_q <= ST_ERROR;
+                                error_code_q <= 32'h0000_0003;
+                                irq_o <= irq_en_i;
+                            end else begin
+                                state_q <= ST_WRITE2_REQ;
+                            end
+                        end
+                    end
+                    ST_WRITE2_REQ: begin
+                        if (m_req_ready_i) begin
+                            state_q <= ST_WRITE2_RSP;
+                        end
+                    end
+                    ST_WRITE2_RSP: begin
+                        if (m_rsp_valid_i) begin
+                            if (m_rsp_error_i) begin
+                                state_q <= ST_ERROR;
+                                error_code_q <= 32'h0000_0003;
+                                irq_o <= irq_en_i;
+                            end else begin
+                                state_q <= ST_WRITE3_REQ;
+                            end
+                        end
+                    end
+                    ST_WRITE3_REQ: begin
+                        if (m_req_ready_i) begin
+                            state_q <= ST_WRITE3_RSP;
+                        end
+                    end
+                    ST_WRITE3_RSP: begin
+                        if (m_rsp_valid_i) begin
+                            if (m_rsp_error_i) begin
+                                state_q <= ST_ERROR;
+                                error_code_q <= 32'h0000_0003;
+                                irq_o <= irq_en_i;
+                            end else begin
+                                count_q <= count_q + 32'd4;
+                                if (count_q + 32'd4 >= length_i) begin
+                                    state_q <= ST_DONE;
+                                    irq_o <= irq_en_i;
+                                end else begin
+                                    state_q <= REQUEST_DRIVEN ? ST_WAIT_REQ : ST_READ_REQ;
+                                end
                             end
                         end
                     end
@@ -150,6 +245,9 @@ module sv_dma_core (
                     ST_ERROR: begin
                     end
                     default: begin
+                        state_q <= ST_ERROR;
+                        error_code_q <= 32'h0000_0003;
+                        irq_o <= irq_en_i;
                     end
                 endcase
             end

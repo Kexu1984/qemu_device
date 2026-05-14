@@ -72,6 +72,7 @@ DRIVER_SOURCES = \
 	drivers/hsm/hsm.c \
 	drivers/irq/irq.c \
 	drivers/otp/otp.c \
+	drivers/spi_tx/spi_tx.c \
 	drivers/sv_periph/sv_periph.c \
 	drivers/sysctrl/sysctrl.c \
 	drivers/wdt/wdt.c

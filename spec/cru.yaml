@@ -19,7 +19,7 @@
 #   Bit 3  dma_demo      0x40007000
 #   Bit 4  crc           0x40008000
 #   Bit 5  wdt           0x40009000
-#   Bit 6  sv_timer      0x4000B000
+#   Bit 6  sv_island     0x4000B000
 #   Bit 7  hsm           0x4000C000
 #   Bit 8  otp           0x4000D000
 
@@ -58,7 +58,7 @@ registers:
       - { name: CLK_DMA_DEMO,     bit: 3 }
       - { name: CLK_CRC,          bit: 4 }
       - { name: CLK_WDT,          bit: 5 }
-      - { name: CLK_SV_TIMER,     bit: 6 }
+      - { name: CLK_SV_ISLAND,    bit: 6 }
       - { name: CLK_HSM,          bit: 7 }
       - { name: CLK_OTP,          bit: 8 }
 
@@ -84,7 +84,7 @@ registers:
       - { name: RST_DMA_DEMO,     bit: 3 }
       - { name: RST_CRC,          bit: 4 }
       - { name: RST_WDT,          bit: 5 }
-      - { name: RST_SV_TIMER,     bit: 6 }
+      - { name: RST_SV_ISLAND,    bit: 6 }
       - { name: RST_HSM,          bit: 7 }
       - { name: RST_OTP,          bit: 8 }
 

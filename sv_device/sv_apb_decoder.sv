@@ -33,16 +33,27 @@ module sv_apb_decoder (
     output logic [31:0] gpio_pwdata,
     input  logic [31:0] gpio_prdata,
     input  logic        gpio_pready,
-    input  logic        gpio_pslverr
+    input  logic        gpio_pslverr,
+
+    output logic        spi_psel,
+    output logic        spi_penable,
+    output logic        spi_pwrite,
+    output logic [11:0] spi_paddr,
+    output logic [31:0] spi_pwdata,
+    input  logic [31:0] spi_prdata,
+    input  logic        spi_pready,
+    input  logic        spi_pslverr
 );
 
     logic timer_sel;
     logic dma_sel;
     logic gpio_sel;
+    logic spi_sel;
 
     assign timer_sel = psel && (paddr[11:8] == 4'h0);
     assign dma_sel   = psel && (paddr[11:8] == 4'h1);
     assign gpio_sel  = psel && (paddr[11:8] == 4'h2);
+    assign spi_sel   = psel && (paddr[11:8] == 4'h3);
 
     assign timer_psel    = timer_sel;
     assign timer_penable = penable;
@@ -62,6 +73,12 @@ module sv_apb_decoder (
     assign gpio_paddr   = {4'h0, paddr[7:0]};
     assign gpio_pwdata  = pwdata;
 
+    assign spi_psel    = spi_sel;
+    assign spi_penable = penable;
+    assign spi_pwrite  = pwrite;
+    assign spi_paddr   = {4'h0, paddr[7:0]};
+    assign spi_pwdata  = pwdata;
+
     always_comb begin
         if (timer_sel) begin
             prdata  = timer_prdata;
@@ -75,6 +92,10 @@ module sv_apb_decoder (
             prdata  = gpio_prdata;
             pready  = gpio_pready;
             pslverr = gpio_pslverr;
+        end else if (spi_sel) begin
+            prdata  = spi_prdata;
+            pready  = spi_pready;
+            pslverr = spi_pslverr;
         end else begin
             prdata  = 32'h0000_0000;
             pready  = 1'b1;

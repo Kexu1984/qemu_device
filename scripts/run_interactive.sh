@@ -211,10 +211,10 @@ start_qemu() {
         -chardev socket,id=wdt_irq,host=127.0.0.1,port=7902 \
         -chardev socket,id=wdt_rst,host=127.0.0.1,port=7903 \
         -device mmio-sockdev,chardev=wdt_rw,irq-chardev=wdt_irq,rst-chardev=wdt_rst,addr=0x40009000,irq-num=4 \
-        -chardev socket,id=sv_timer_rw,host=127.0.0.1,port=7906 \
-        -chardev socket,id=sv_timer_irq,host=127.0.0.1,port=7907 \
-        -chardev socket,id=sv_timer_mem,host=127.0.0.1,port=7912 \
-        -device mmio-sockdev,chardev=sv_timer_rw,irq-chardev=sv_timer_irq,fabric-chardev=sv_timer_mem,addr=0x4000B000,irq-num=5 \
+        -chardev socket,id=sv_island_rw,host=127.0.0.1,port=7906 \
+        -chardev socket,id=sv_island_irq,host=127.0.0.1,port=7907 \
+        -chardev socket,id=sv_island_mem,host=127.0.0.1,port=7912 \
+        -device mmio-sockdev,chardev=sv_island_rw,irq-chardev=sv_island_irq,fabric-chardev=sv_island_mem,addr=0x4000B000,irq-num=5 \
         -chardev socket,id=hsm_rw,host=127.0.0.1,port=7908 \
         -chardev socket,id=hsm_irq,host=127.0.0.1,port=7909 \
         -device mmio-sockdev,chardev=hsm_rw,irq-chardev=hsm_irq,addr=0x4000C000,irq-num=6 \
@@ -264,7 +264,7 @@ ok "Device server ready."
 info "Starting SV host shell..."
 "$SV_BRIDGE" --rw-port 7906 --irq-port 7907 --mem-port 7912 --wave-file "$SV_WAVE" > "$SV_LOG" 2>&1 &
 SV_PID=$!
-info "SV timer PID $SV_PID  →  $SV_LOG"
+info "SV island PID $SV_PID  →  $SV_LOG"
 info "SV wave      →  $SV_WAVE"
 sleep 0.5
 
@@ -304,7 +304,7 @@ else
     info "  UART output  : ${TERM_OPEN#_open_} window (port $UART_TERM_PORT)"
 fi
 info "  Server log   : $SERVER_LOG"
-info "  SV timer log : $SV_LOG"
+info "  SV island log: $SV_LOG"
 info "  SV wave dump : $SV_WAVE"
 info "  QEMU log     : $QEMU_LOG"
 echo ""

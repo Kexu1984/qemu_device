@@ -194,10 +194,10 @@ info "Starting QEMU..."
     -chardev socket,id=wdt_irq,host=127.0.0.1,port=7902 \
     -chardev socket,id=wdt_rst,host=127.0.0.1,port=7903 \
     -device mmio-sockdev,chardev=wdt_rw,irq-chardev=wdt_irq,rst-chardev=wdt_rst,addr=0x40009000,irq-num=4 \
-    -chardev socket,id=sv_timer_rw,host=127.0.0.1,port=7906 \
-    -chardev socket,id=sv_timer_irq,host=127.0.0.1,port=7907 \
-    -chardev socket,id=sv_timer_mem,host=127.0.0.1,port=7912 \
-    -device mmio-sockdev,chardev=sv_timer_rw,irq-chardev=sv_timer_irq,fabric-chardev=sv_timer_mem,addr=0x4000B000,irq-num=5 \
+    -chardev socket,id=sv_island_rw,host=127.0.0.1,port=7906 \
+    -chardev socket,id=sv_island_irq,host=127.0.0.1,port=7907 \
+    -chardev socket,id=sv_island_mem,host=127.0.0.1,port=7912 \
+    -device mmio-sockdev,chardev=sv_island_rw,irq-chardev=sv_island_irq,fabric-chardev=sv_island_mem,addr=0x4000B000,irq-num=5 \
     -chardev socket,id=hsm_rw,host=127.0.0.1,port=7908 \
     -chardev socket,id=hsm_irq,host=127.0.0.1,port=7909 \
     -device mmio-sockdev,chardev=hsm_rw,irq-chardev=hsm_irq,addr=0x4000C000,irq-num=6 \
@@ -236,19 +236,26 @@ EXPECTED=(
     "All tests done"
     "Dual-CPU IPC PASS"
     "Dual-master MMIO PASS"
-    "SV APB timer"
+    "SV APB island timer"
     "SV timer fired"
     "IRQ observed and cleared PASSED"
     "Python master SV register access PASSED"
     "SV DMA prototype"
     "SV DMA ID SDMA PASSED"
     "SV DMA M2M copy PASSED"
+    "SV DMA CH1 ID DCH1 PASSED"
+    "SV DMA CH1 SPI TX PASSED"
     "SV GPIO test"
     "SV GPIO ID GPIO PASSED"
     "Output toggle PASSED"
     "Input simulation PASSED"
     "Change IRQ PASSED"
     "MCAL output toggle PASSED"
+    "SV SPI TX test"
+    "SPI TX ID SPTX PASSED"
+    "SPI TX CPU FIFO transfer PASSED"
+    "SV DMA CH1 SPI TX PASSED"
+    "SPI TX error path PASSED"
     "HSM AES-CBC encrypt test"
     "HSM AES-CBC encrypt PASSED"
     "HSM AES-CMAC PASSED"
@@ -355,6 +362,29 @@ for LINE in "${EXPECTED[@]}"; do
     fi
 done
 
+SV_EXPECTED=(
+    "[SVSPI] frame done data=0xa5"
+    "[SVSPI] frame done data=0x5a"
+    "[SVSPI] frame done data=0x3c"
+    "[SV-FABRIC] local write addr=0x4000b324 data=0x00000011"
+    "[SV-FABRIC] local write addr=0x4000b324 data=0x00000022"
+    "[SV-FABRIC] local write addr=0x4000b324 data=0x00000033"
+    "[SV-FABRIC] local write addr=0x4000b324 data=0x00000044"
+    "[SVSPI] frame done data=0x11"
+    "[SVSPI] frame done data=0x22"
+    "[SVSPI] frame done data=0x33"
+    "[SVSPI] frame done data=0x44"
+)
+
+for LINE in "${SV_EXPECTED[@]}"; do
+    if grep -Fq "$LINE" "$SV_LOG" 2>/dev/null; then
+        pass "[SV] Found: \"$LINE\""
+    else
+        fail "[SV] Missing: \"$LINE\""
+        RESULT=1
+    fi
+done
+
 # -----------------------------------------------------------------------
 # 5b. Verify UART terminal channel (port 7904) received firmware output
 # -----------------------------------------------------------------------
@@ -380,6 +410,7 @@ UART_EXPECTED=(
     "All tests done"
     "Dual-master MMIO PASS"
     "MCAL output toggle PASSED"
+    "SPI TX CPU FIFO transfer PASSED"
     "HSM AES-CMAC PASSED"
     "HSM OTP KEY_ID0 AES-CBC PASSED"
     "DEVCTL UART STATUS read PASSED"

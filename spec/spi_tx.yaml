@@ -1,0 +1,247 @@
+# ============================================================================
+# SPI TX Controller - transmit-only SPI master register specification
+# ============================================================================
+#
+# Status
+# ------
+# Standalone device-level SPEC. This file defines the register-visible contract
+# for a future SPI transmit controller, but it is not yet referenced by
+# spec/devices.yaml. Integration still needs base_addr/size/IRQ/port assignment
+# and a Python, SV, or QEMU-native implementation.
+#
+# Device class
+# ------------
+# Interface peripheral: transmit-only SPI master.
+#
+# Functional features
+# -------------------
+# - SPI master transmit path with SCLK, MOSI, and active-low chip-select output.
+# - Transmit-only operation; MISO receive data is intentionally not exposed.
+# - Programmable clock polarity/phase: modes 0, 1, 2, and 3.
+# - Programmable frame width from 4 to 16 bits.
+# - Configurable MSB-first or LSB-first shift order.
+# - 16-entry transmit FIFO, one frame per FIFO entry.
+# - Programmable TX FIFO threshold interrupt.
+# - DONE interrupt when the programmed frame count drains to zero.
+# - ERROR interrupt for overflow, underrun, invalid configuration, or busy start.
+# - Optional automatic chip-select control with programmable setup/hold delays.
+# - Untimed functional reset values are specified here; exact bit timing is
+#   implementation-defined until the device is connected to the platform clock.
+#
+# Usage sequence
+# --------------
+# 1. Ensure STATUS.BUSY is 0.
+# 2. Program BAUD_DIV, CFG, CS_SETUP, CS_HOLD, and FRAME_COUNT.
+# 3. Optionally program TX_THRESHOLD and INT_ENABLE.
+# 4. Fill TXDATA while STATUS.TX_FULL is 0. Each write enqueues one SPI frame.
+# 5. Write CTRL.ENABLE=1 and CTRL.START=1 to start transmission.
+# 6. Poll STATUS.DONE or wait for INT_STATUS.DONE_IRQ.
+# 7. Clear latched interrupts by writing 1s to INT_STATUS bits.
+# 8. For a new transfer, refill TXDATA and write CTRL.START again.
+#
+# Programming notes
+# -----------------
+# - TXDATA bits above the configured frame width are ignored on transmit.
+# - Writing TXDATA when STATUS.TX_FULL=1 is ignored and latches ERROR.OVERFLOW.
+# - Starting with FRAME_COUNT=0 or with an empty FIFO latches ERROR.UNDERRUN.
+# - CFG.FRAME_BITS encodes the actual frame width minus 1. Legal values are
+#   3..15, representing 4..16-bit frames.
+# - BAUD_DIV must be >= 2. The target SCLK formula is:
+#     sclk_hz = pclk_hz / (2 * BAUD_DIV)
+# - CTRL.SOFT_RESET clears FIFO contents, STATUS, INT_STATUS, ERROR, and
+#   transfer counters, then self-clears. Configuration registers keep their
+#   reset values after SOFT_RESET.
+# - CTRL.ABORT stops an active transfer, deasserts chip select, clears BUSY,
+#   latches ERROR.ABORTED, and self-clears.
+# - TX_LAST_FRAME, TX_FRAME_DONE_COUNT, and TX_BIT_COUNT are read-only debug
+#   observability registers for simulation and firmware self-test. They are not
+#   required for production software sequencing.
+#
+# Interrupt behavior
+# ------------------
+# IRQ is level-style in the register contract: IRQ is asserted when any
+# INT_STATUS bit is set and the corresponding INT_ENABLE bit is 1. INT_STATUS
+# bits are W1C. STATUS.IRQ_PENDING mirrors the enabled interrupt condition.
+#
+# Reset behavior
+# --------------
+# All registers reset to the reset_value below on peripheral reset. No retention
+# state is defined for this block.
+
+model:
+  class: interface_peripheral
+  direction: tx_only
+  role: spi_master
+  fifo_depth: 16
+  supported_modes: [0, 1, 2, 3]
+  min_frame_bits: 4
+  max_frame_bits: 16
+  default_frame_bits: 8
+  default_baud_div: 2
+  chip_select_polarity: active_low
+  timing: implementation_defined
+  reset_domain: peripheral_reset
+
+registers:
+  - offset:      0x00
+    name:        ID
+    access:      R
+    description: "Device ID: ASCII 'SPTX' encoded little-endian"
+    reset_value: 0x58545053
+
+  - offset:      0x04
+    name:        VERSION
+    access:      R
+    description: "Model/spec version: major.minor encoded as 0x00010000 for v1.0"
+    reset_value: 0x00010000
+
+  - offset:      0x08
+    name:        CTRL
+    access:      RW
+    description: >
+      Control register.
+      bit0 = ENABLE;
+      bit1 = START (write 1 to start queued transfer, self-clears);
+      bit2 = ABORT (write 1 to stop active transfer, self-clears);
+      bit3 = SOFT_RESET (write 1 to clear FIFO/status/error, self-clears);
+      bit4 = CS_AUTO (1=hardware asserts/deasserts chip select per transfer);
+      bit5 = CS_HOLD_ACTIVE (1=keep chip select asserted after DONE);
+      bits31:6 reserved, write 0.
+    reset_value: 0x00000010
+
+  - offset:      0x0C
+    name:        STATUS
+    access:      R
+    description: >
+      Status register.
+      bit0 = BUSY;
+      bit1 = DONE;
+      bit2 = ERROR;
+      bit3 = TX_EMPTY;
+      bit4 = TX_FULL;
+      bit5 = TX_THRESHOLD_HIT;
+      bit6 = CS_ACTIVE;
+      bit7 = IRQ_PENDING;
+      bits15:8 = TX_LEVEL;
+      bits31:16 reserved.
+    reset_value: 0x00000008
+
+  - offset:      0x10
+    name:        INT_STATUS
+    access:      RW
+    description: >
+      Interrupt status, W1C.
+      bit0 = DONE_IRQ;
+      bit1 = TX_THRESHOLD_IRQ;
+      bit2 = ERROR_IRQ;
+      bits31:3 reserved.
+    reset_value: 0x00000000
+
+  - offset:      0x14
+    name:        INT_ENABLE
+    access:      RW
+    description: >
+      Interrupt enable mask.
+      bit0 enables DONE_IRQ;
+      bit1 enables TX_THRESHOLD_IRQ;
+      bit2 enables ERROR_IRQ;
+      bits31:3 reserved, write 0.
+    reset_value: 0x00000000
+
+  - offset:      0x18
+    name:        ERROR
+    access:      R
+    description: >
+      Last error/status code.
+      0=NONE;
+      1=TX_OVERFLOW;
+      2=TX_UNDERRUN;
+      3=INVALID_CFG;
+      4=BUSY_START;
+      5=ABORTED.
+    reset_value: 0x00000000
+
+  - offset:      0x1C
+    name:        CFG
+    access:      RW
+    description: >
+      SPI format configuration.
+      bit0 = CPOL;
+      bit1 = CPHA;
+      bit2 = LSB_FIRST (0=MSB first, 1=LSB first);
+      bits7:3 reserved, write 0;
+      bits12:8 = FRAME_BITS_MINUS_1 (legal 3..15 for 4..16-bit frames);
+      bits31:13 reserved, write 0.
+    reset_value: 0x00000700
+
+  - offset:      0x20
+    name:        BAUD_DIV
+    access:      RW
+    description: "SPI clock divider. Legal values >= 2; SCLK = PCLK / (2 * BAUD_DIV)."
+    reset_value: 0x00000002
+
+  - offset:      0x24
+    name:        TXDATA
+    access:      W
+    description: "Transmit FIFO write port. One write enqueues one frame using low FRAME_BITS bits."
+    reset_value: 0x00000000
+
+  - offset:      0x28
+    name:        TX_LEVEL
+    access:      R
+    description: "Current number of frames queued in the transmit FIFO, range 0..16."
+    reset_value: 0x00000000
+
+  - offset:      0x2C
+    name:        TX_THRESHOLD
+    access:      RW
+    description: "TX threshold level for interrupt generation. IRQ condition is TX_LEVEL <= TX_THRESHOLD."
+    reset_value: 0x00000000
+
+  - offset:      0x30
+    name:        FRAME_COUNT
+    access:      RW
+    description: >
+      Number of frames to transmit after START.
+      0 is illegal for START and latches ERROR.TX_UNDERRUN.
+      Hardware decrements this value as frames complete.
+    reset_value: 0x00000000
+
+  - offset:      0x34
+    name:        CS_SETUP
+    access:      RW
+    description: "Chip-select setup delay in PCLK cycles before first SCLK edge."
+    reset_value: 0x00000000
+
+  - offset:      0x38
+    name:        CS_HOLD
+    access:      RW
+    description: "Chip-select hold delay in PCLK cycles after final SCLK edge."
+    reset_value: 0x00000000
+
+  - offset:      0x3C
+    name:        FIFO_CTRL
+    access:      W
+    description: >
+      FIFO control.
+      bit0 = TX_FIFO_CLEAR (write 1 to clear TX FIFO and TX_LEVEL);
+      bits31:1 reserved, write 0.
+    reset_value: 0x00000000
+
+  - offset:      0x40
+    name:        TX_LAST_FRAME
+    access:      R
+    description: "Debug: most recently completed transmit frame, right-aligned."
+    reset_value: 0x00000000
+
+  - offset:      0x44
+    name:        TX_FRAME_DONE_COUNT
+    access:      R
+    description: "Debug: number of frames completed since reset or SOFT_RESET."
+    reset_value: 0x00000000
+
+  - offset:      0x48
+    name:        TX_BIT_COUNT
+    access:      R
+    description: "Debug: number of SPI bits shifted since reset or SOFT_RESET."
+    reset_value: 0x00000000

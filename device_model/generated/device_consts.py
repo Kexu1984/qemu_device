@@ -141,7 +141,7 @@ SYSCTRL_CPU_CTRL_REG                     = 0x4000A018  # offset 0x0018  RW  CPU 
 SYSCTRL_CPU_STATUS_REG                   = 0x4000A01C  # offset 0x001C  R  CPU status. bit0=CPU0_ACTIVE; bit1=CPU1_RELEASED; bit2=CPU1_HALTED_OR_HELD.
 SYSCTRL_BOOT_MODE_REG                    = 0x4000A020  # offset 0x0020  RW  Boot mode straps/policy. bits[1:0]=BOOT_SRC (0=FLASH_HEX, 1=BOOTROM reserved, 2=SRAM reserved); bit8 reflects SECURE_BOOT_EN after OTP metadata is decoded.
 SYSCTRL_BOOT_STATUS_REG                  = 0x4000A024  # offset 0x0024  R  Boot status. bit0=FLASH_IMAGE_LOADED; bit1=BOOT_VECTOR_VALID; bit2=SECURE_BOOT_DONE; bit3=SECURE_BOOT_PASS; bit4=SECURE_BOOT_FAIL.
-SYSCTRL_DEVICE_CLK_EN_REG                = 0x4000A030  # offset 0x0030  RW  Coarse peripheral clock enable bitmap. bit0=UART, bit1=DMA, bit2=TIMER0, bit3=DMA_CLIENT_DEMO, bit4=CRC, bit5=WDT, bit6=SV_TIMER, bit7=HSM. Current models keep clocks effectively enabled but expose policy state here.
+SYSCTRL_DEVICE_CLK_EN_REG                = 0x4000A030  # offset 0x0030  RW  Coarse peripheral clock enable bitmap. bit0=UART, bit1=DMA, bit2=TIMER0, bit3=DMA_CLIENT_DEMO, bit4=CRC, bit5=WDT, bit6=SV_ISLAND, bit7=HSM. Current models keep clocks effectively enabled but expose policy state here.
 SYSCTRL_DEVICE_RST_CTRL_REG              = 0x4000A034  # offset 0x0034  RW  Peripheral reset request bitmap, W1 pulse semantic in QEMU model. bit assignments match DEVICE_CLK_EN. Actual Python-device reset propagation is future work; QEMU records requested reset pulses in DEVICE_RST_STATUS.
 SYSCTRL_DEVICE_RST_STATUS_REG            = 0x4000A038  # offset 0x0038  R  Last peripheral reset request bitmap latched from DEVICE_RST_CTRL writes. Firmware can use this as an observable SYSCTRL policy state.
 SYSCTRL_DEVCTL_ADDR_REG                  = 0x4000A040  # offset 0x0040  RW  Indirect device register access target physical address. Must be 32-bit aligned and must not point back into SYSCTRL.
@@ -171,40 +171,69 @@ CRU_RESET_REASON_REG                     = 0x4000F018  # offset 0x0018  R  Reten
 CRU_SOFT_SYSRST_REQ_REG                  = 0x4000F01C  # offset 0x001C  W  Write the magic value 0xDEADBEEF to request a software system reset. Sets RESET_REASON = 2, then triggers QEMU subsystem reset. All other write values are ignored.  Reads return 0.
 
 
-# ── SV_TIMER ────────────────────────────────────────────────────
-# SystemVerilog APB peripheral subsystem — timer, GPIO, and DMA prototype
-SV_TIMER_BASE         = 0x4000B000
-SV_TIMER_SIZE         = 0x1000
-SV_TIMER_IRQ_INTID    = 5
-SV_TIMER_IRQ_DELAY_S  = 0.0
-SV_TIMER_IRQ_PORT     = 7907
-SV_TIMER_RW_PORT      = 7906
+# ── SV_ISLAND ───────────────────────────────────────────────────
+# SystemVerilog APB peripheral island — timer, GPIO, and DMA prototype
+SV_ISLAND_BASE         = 0x4000B000
+SV_ISLAND_SIZE         = 0x1000
+SV_ISLAND_IRQ_INTID    = 5
+SV_ISLAND_IRQ_DELAY_S  = 0.0
+SV_ISLAND_IRQ_PORT     = 7907
+SV_ISLAND_RW_PORT      = 7906
 
 # Registers
-SV_TIMER_CTRL_REG                        = 0x4000B000  # offset 0x0000  RW  Control: bit0=ENABLE, bit1=IRQ_EN
-SV_TIMER_LOAD_REG                        = 0x4000B004  # offset 0x0004  RW  Countdown load value in SV clock cycles
-SV_TIMER_VALUE_REG                       = 0x4000B008  # offset 0x0008  R  Current countdown value
-SV_TIMER_STATUS_REG                      = 0x4000B00C  # offset 0x000C  R  Status: bit0=IRQ_PENDING
-SV_TIMER_IRQ_CLEAR_REG                   = 0x4000B010  # offset 0x0010  W  Write bit0=1 to clear IRQ_PENDING and deassert IRQ
-SV_TIMER_DMA_ID_REG                      = 0x4000B100  # offset 0x0100  R  SV DMA ID: ASCII 'SDMA' little-endian
-SV_TIMER_DMA_CTRL_REG                    = 0x4000B104  # offset 0x0104  RW  SV DMA control: bit0=START, bit1=IRQ_EN
-SV_TIMER_DMA_STATUS_REG                  = 0x4000B108  # offset 0x0108  R  SV DMA status: bit0=BUSY, bit1=DONE, bit2=ERROR
-SV_TIMER_DMA_SRC_ADDR_REG                = 0x4000B10C  # offset 0x010C  RW  SV DMA source physical address; first prototype requires 32-bit alignment
-SV_TIMER_DMA_DST_ADDR_REG                = 0x4000B110  # offset 0x0110  RW  SV DMA destination physical address; first prototype requires 32-bit alignment
-SV_TIMER_DMA_LENGTH_REG                  = 0x4000B114  # offset 0x0114  RW  SV DMA transfer length in bytes; first prototype requires a non-zero multiple of 4
-SV_TIMER_DMA_ERROR_REG                   = 0x4000B118  # offset 0x0118  R  SV DMA error: 0=NONE, 1=BAD_CONFIG, 2=AHB_READ_ERROR, 3=AHB_WRITE_ERROR
-SV_TIMER_DMA_IRQ_CLEAR_REG               = 0x4000B11C  # offset 0x011C  W  Write bit0=1 to clear SV DMA DONE/ERROR IRQ and return DMA FSM to idle
-SV_TIMER_DMA_COUNT_REG                   = 0x4000B120  # offset 0x0120  R  Number of bytes completed by the SV DMA engine
-SV_TIMER_GPIO_ID_REG                     = 0x4000B200  # offset 0x0200  R  SV GPIO ID: ASCII 'GPIO' little-endian
-SV_TIMER_GPIO_DATA_OUT_REG               = 0x4000B204  # offset 0x0204  RW  GPIO output data shadow
-SV_TIMER_GPIO_DATA_IN_REG                = 0x4000B208  # offset 0x0208  R  GPIO sampled input data; output pins read back DATA_OUT
-SV_TIMER_GPIO_DIR_REG                    = 0x4000B20C  # offset 0x020C  RW  GPIO direction bitmap: bit=1 output, bit=0 input
-SV_TIMER_GPIO_SET_REG                    = 0x4000B210  # offset 0x0210  W  Write-one set bits in GPIO_DATA_OUT
-SV_TIMER_GPIO_CLR_REG                    = 0x4000B214  # offset 0x0214  W  Write-one clear bits in GPIO_DATA_OUT
-SV_TIMER_GPIO_TOGGLE_REG                 = 0x4000B218  # offset 0x0218  W  Write-one toggle bits in GPIO_DATA_OUT
-SV_TIMER_GPIO_IRQ_EN_REG                 = 0x4000B21C  # offset 0x021C  RW  GPIO data-change IRQ enable bitmap
-SV_TIMER_GPIO_IRQ_STATUS_REG             = 0x4000B220  # offset 0x0220  RW  GPIO data-change IRQ pending bitmap; write-one clears bits
-SV_TIMER_GPIO_INPUT_SIM_REG              = 0x4000B224  # offset 0x0224  RW  Simulation input value for pins configured as inputs
+SV_ISLAND_CTRL_REG                       = 0x4000B000  # offset 0x0000  RW  Control: bit0=ENABLE, bit1=IRQ_EN
+SV_ISLAND_LOAD_REG                       = 0x4000B004  # offset 0x0004  RW  Countdown load value in SV clock cycles
+SV_ISLAND_VALUE_REG                      = 0x4000B008  # offset 0x0008  R  Current countdown value
+SV_ISLAND_STATUS_REG                     = 0x4000B00C  # offset 0x000C  R  Status: bit0=IRQ_PENDING
+SV_ISLAND_IRQ_CLEAR_REG                  = 0x4000B010  # offset 0x0010  W  Write bit0=1 to clear IRQ_PENDING and deassert IRQ
+SV_ISLAND_DMA_ID_REG                     = 0x4000B100  # offset 0x0100  R  SV DMA ID: ASCII 'SDMA' little-endian
+SV_ISLAND_DMA_CTRL_REG                   = 0x4000B104  # offset 0x0104  RW  SV DMA control: bit0=START, bit1=IRQ_EN
+SV_ISLAND_DMA_STATUS_REG                 = 0x4000B108  # offset 0x0108  R  SV DMA status: bit0=BUSY, bit1=DONE, bit2=ERROR
+SV_ISLAND_DMA_SRC_ADDR_REG               = 0x4000B10C  # offset 0x010C  RW  SV DMA source physical address; first prototype requires 32-bit alignment
+SV_ISLAND_DMA_DST_ADDR_REG               = 0x4000B110  # offset 0x0110  RW  SV DMA destination physical address; first prototype requires 32-bit alignment
+SV_ISLAND_DMA_LENGTH_REG                 = 0x4000B114  # offset 0x0114  RW  SV DMA transfer length in bytes; first prototype requires a non-zero multiple of 4
+SV_ISLAND_DMA_ERROR_REG                  = 0x4000B118  # offset 0x0118  R  SV DMA error: 0=NONE, 1=BAD_CONFIG, 2=AHB_READ_ERROR, 3=AHB_WRITE_ERROR
+SV_ISLAND_DMA_IRQ_CLEAR_REG              = 0x4000B11C  # offset 0x011C  W  Write bit0=1 to clear SV DMA DONE/ERROR IRQ and return DMA FSM to idle
+SV_ISLAND_DMA_COUNT_REG                  = 0x4000B120  # offset 0x0120  R  Number of bytes completed by the SV DMA engine
+SV_ISLAND_DMA_CH1_ID_REG                 = 0x4000B140  # offset 0x0140  R  SV DMA CH1 ID: ASCII 'DCH1' little-endian
+SV_ISLAND_DMA_CH1_CTRL_REG               = 0x4000B144  # offset 0x0144  RW  SV DMA CH1 control: bit0=START, bit1=IRQ_EN
+SV_ISLAND_DMA_CH1_STATUS_REG             = 0x4000B148  # offset 0x0148  R  SV DMA CH1 status: bit0=BUSY, bit1=DONE, bit2=ERROR
+SV_ISLAND_DMA_CH1_SRC_ADDR_REG           = 0x4000B14C  # offset 0x014C  RW  SV DMA CH1 source physical address; first prototype requires 32-bit alignment
+SV_ISLAND_DMA_CH1_LENGTH_REG             = 0x4000B150  # offset 0x0150  RW  SV DMA CH1 transfer length in bytes; first prototype requires a non-zero multiple of 4
+SV_ISLAND_DMA_CH1_DST_ADDR_REG           = 0x4000B154  # offset 0x0154  RW  SV DMA CH1 fixed destination physical address; for SPI TX use SPI_TX_TXDATA
+SV_ISLAND_DMA_CH1_PERIPH_SEL_REG         = 0x4000B158  # offset 0x0158  RW  SV DMA CH1 request source selector: 1=SPI_TX dma_req
+SV_ISLAND_DMA_CH1_ERROR_REG              = 0x4000B15C  # offset 0x015C  R  SV DMA CH1 error: 0=NONE, 1=BAD_CONFIG, 2=FABRIC_READ_ERROR, 3=FABRIC_WRITE_ERROR
+SV_ISLAND_DMA_CH1_IRQ_CLEAR_REG          = 0x4000B160  # offset 0x0160  W  Write bit0=1 to clear SV DMA CH1 DONE/ERROR IRQ and return CH1 FSM to idle
+SV_ISLAND_DMA_CH1_COUNT_REG              = 0x4000B164  # offset 0x0164  R  Number of bytes completed by SV DMA CH1
+SV_ISLAND_GPIO_ID_REG                    = 0x4000B200  # offset 0x0200  R  SV GPIO ID: ASCII 'GPIO' little-endian
+SV_ISLAND_GPIO_DATA_OUT_REG              = 0x4000B204  # offset 0x0204  RW  GPIO output data shadow
+SV_ISLAND_GPIO_DATA_IN_REG               = 0x4000B208  # offset 0x0208  R  GPIO sampled input data; output pins read back DATA_OUT
+SV_ISLAND_GPIO_DIR_REG                   = 0x4000B20C  # offset 0x020C  RW  GPIO direction bitmap: bit=1 output, bit=0 input
+SV_ISLAND_GPIO_SET_REG                   = 0x4000B210  # offset 0x0210  W  Write-one set bits in GPIO_DATA_OUT
+SV_ISLAND_GPIO_CLR_REG                   = 0x4000B214  # offset 0x0214  W  Write-one clear bits in GPIO_DATA_OUT
+SV_ISLAND_GPIO_TOGGLE_REG                = 0x4000B218  # offset 0x0218  W  Write-one toggle bits in GPIO_DATA_OUT
+SV_ISLAND_GPIO_IRQ_EN_REG                = 0x4000B21C  # offset 0x021C  RW  GPIO data-change IRQ enable bitmap
+SV_ISLAND_GPIO_IRQ_STATUS_REG            = 0x4000B220  # offset 0x0220  RW  GPIO data-change IRQ pending bitmap; write-one clears bits
+SV_ISLAND_GPIO_INPUT_SIM_REG             = 0x4000B224  # offset 0x0224  RW  Simulation input value for pins configured as inputs
+SV_ISLAND_SPI_TX_ID_REG                  = 0x4000B300  # offset 0x0300  R  SPI TX ID: ASCII 'SPTX' little-endian
+SV_ISLAND_SPI_TX_VERSION_REG             = 0x4000B304  # offset 0x0304  R  SPI TX spec version: 0x00010000 for v1.0
+SV_ISLAND_SPI_TX_CTRL_REG                = 0x4000B308  # offset 0x0308  RW  SPI TX control: bit0=ENABLE, bit1=START, bit2=ABORT, bit3=SOFT_RESET, bit4=CS_AUTO, bit5=CS_HOLD_ACTIVE
+SV_ISLAND_SPI_TX_STATUS_REG              = 0x4000B30C  # offset 0x030C  R  SPI TX status: bit0=BUSY, bit1=DONE, bit2=ERROR, bit3=TX_EMPTY, bit4=TX_FULL, bit5=TX_THRESHOLD_HIT, bit6=CS_ACTIVE, bit7=IRQ_PENDING, bits15:8=TX_LEVEL
+SV_ISLAND_SPI_TX_INT_STATUS_REG          = 0x4000B310  # offset 0x0310  RW  SPI TX interrupt status, W1C: bit0=DONE_IRQ, bit1=TX_THRESHOLD_IRQ, bit2=ERROR_IRQ
+SV_ISLAND_SPI_TX_INT_ENABLE_REG          = 0x4000B314  # offset 0x0314  RW  SPI TX interrupt enable: bit0=DONE_IRQ, bit1=TX_THRESHOLD_IRQ, bit2=ERROR_IRQ
+SV_ISLAND_SPI_TX_ERROR_REG               = 0x4000B318  # offset 0x0318  R  SPI TX last error: 0=NONE, 1=TX_OVERFLOW, 2=TX_UNDERRUN, 3=INVALID_CFG, 4=BUSY_START, 5=ABORTED
+SV_ISLAND_SPI_TX_CFG_REG                 = 0x4000B31C  # offset 0x031C  RW  SPI TX format: bit0=CPOL, bit1=CPHA, bit2=LSB_FIRST, bits12:8=FRAME_BITS_MINUS_1
+SV_ISLAND_SPI_TX_BAUD_DIV_REG            = 0x4000B320  # offset 0x0320  RW  SPI TX clock divider. Legal values >=2; SCLK = PCLK / (2 * BAUD_DIV).
+SV_ISLAND_SPI_TX_TXDATA_REG              = 0x4000B324  # offset 0x0324  W  SPI TX FIFO write port. One write enqueues one frame using low FRAME_BITS bits.
+SV_ISLAND_SPI_TX_TX_LEVEL_REG            = 0x4000B328  # offset 0x0328  R  SPI TX FIFO queued frame count, range 0..16
+SV_ISLAND_SPI_TX_TX_THRESHOLD_REG        = 0x4000B32C  # offset 0x032C  RW  SPI TX threshold level; IRQ condition is TX_LEVEL <= TX_THRESHOLD
+SV_ISLAND_SPI_TX_FRAME_COUNT_REG         = 0x4000B330  # offset 0x0330  RW  SPI TX frames remaining in the active transfer; firmware writes the requested frame count before START
+SV_ISLAND_SPI_TX_CS_SETUP_REG            = 0x4000B334  # offset 0x0334  RW  SPI TX chip-select setup delay in SV clock cycles
+SV_ISLAND_SPI_TX_CS_HOLD_REG             = 0x4000B338  # offset 0x0338  RW  SPI TX chip-select hold delay in SV clock cycles
+SV_ISLAND_SPI_TX_FIFO_CTRL_REG           = 0x4000B33C  # offset 0x033C  W  SPI TX FIFO control: write bit0=1 to clear the TX FIFO
+SV_ISLAND_SPI_TX_LAST_FRAME_REG          = 0x4000B340  # offset 0x0340  R  SPI TX debug: most recently completed frame, right-aligned
+SV_ISLAND_SPI_TX_FRAME_DONE_COUNT_REG    = 0x4000B344  # offset 0x0344  R  SPI TX debug: number of completed frames since reset or SOFT_RESET
+SV_ISLAND_SPI_TX_BIT_COUNT_REG           = 0x4000B348  # offset 0x0348  R  SPI TX debug: number of shifted bits since reset or SOFT_RESET
 
 # ── HSM ─────────────────────────────────────────────────────────
 # HSM crypto accelerator — AES-128 ECB/CBC/CFB/CTR/CMAC with OTP KEY_ID or open-register key source

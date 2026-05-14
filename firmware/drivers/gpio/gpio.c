@@ -9,77 +9,77 @@ static volatile int gpio_irq_fired = 0;
 
 void gpio_init(void)
 {
-    mmio_write32(SV_TIMER_GPIO_IRQ_EN_REG, 0U);
-    mmio_write32(SV_TIMER_GPIO_IRQ_STATUS_REG, 0xFFFFFFFFU);
-    mmio_write32(SV_TIMER_GPIO_DIR_REG, 0U);
-    mmio_write32(SV_TIMER_GPIO_DATA_OUT_REG, 0U);
-    mmio_write32(SV_TIMER_GPIO_INPUT_SIM_REG, 0U);
+    mmio_write32(SV_ISLAND_GPIO_IRQ_EN_REG, 0U);
+    mmio_write32(SV_ISLAND_GPIO_IRQ_STATUS_REG, 0xFFFFFFFFU);
+    mmio_write32(SV_ISLAND_GPIO_DIR_REG, 0U);
+    mmio_write32(SV_ISLAND_GPIO_DATA_OUT_REG, 0U);
+    mmio_write32(SV_ISLAND_GPIO_INPUT_SIM_REG, 0U);
     gpio_irq_fired = 0;
 }
 
 uint32_t gpio_id(void)
 {
-    return mmio_read32(SV_TIMER_GPIO_ID_REG);
+    return mmio_read32(SV_ISLAND_GPIO_ID_REG);
 }
 
 void gpio_set_direction(uint32_t mask)
 {
-    mmio_write32(SV_TIMER_GPIO_DIR_REG, mask);
+    mmio_write32(SV_ISLAND_GPIO_DIR_REG, mask);
 }
 
 uint32_t gpio_get_direction(void)
 {
-    return mmio_read32(SV_TIMER_GPIO_DIR_REG);
+    return mmio_read32(SV_ISLAND_GPIO_DIR_REG);
 }
 
 void gpio_write(uint32_t value)
 {
-    mmio_write32(SV_TIMER_GPIO_DATA_OUT_REG, value);
+    mmio_write32(SV_ISLAND_GPIO_DATA_OUT_REG, value);
 }
 
 uint32_t gpio_read_output(void)
 {
-    return mmio_read32(SV_TIMER_GPIO_DATA_OUT_REG);
+    return mmio_read32(SV_ISLAND_GPIO_DATA_OUT_REG);
 }
 
 uint32_t gpio_read_input(void)
 {
-    return mmio_read32(SV_TIMER_GPIO_DATA_IN_REG);
+    return mmio_read32(SV_ISLAND_GPIO_DATA_IN_REG);
 }
 
 void gpio_set_bits(uint32_t mask)
 {
-    mmio_write32(SV_TIMER_GPIO_SET_REG, mask);
+    mmio_write32(SV_ISLAND_GPIO_SET_REG, mask);
 }
 
 void gpio_clear_bits(uint32_t mask)
 {
-    mmio_write32(SV_TIMER_GPIO_CLR_REG, mask);
+    mmio_write32(SV_ISLAND_GPIO_CLR_REG, mask);
 }
 
 void gpio_toggle_bits(uint32_t mask)
 {
-    mmio_write32(SV_TIMER_GPIO_TOGGLE_REG, mask);
+    mmio_write32(SV_ISLAND_GPIO_TOGGLE_REG, mask);
 }
 
 void gpio_set_input_sim(uint32_t value)
 {
-    mmio_write32(SV_TIMER_GPIO_INPUT_SIM_REG, value);
+    mmio_write32(SV_ISLAND_GPIO_INPUT_SIM_REG, value);
 }
 
 void gpio_irq_enable(uint32_t mask)
 {
-    mmio_write32(SV_TIMER_GPIO_IRQ_EN_REG, mask);
+    mmio_write32(SV_ISLAND_GPIO_IRQ_EN_REG, mask);
 }
 
 void gpio_irq_clear(uint32_t mask)
 {
-    mmio_write32(SV_TIMER_GPIO_IRQ_STATUS_REG, mask);
+    mmio_write32(SV_ISLAND_GPIO_IRQ_STATUS_REG, mask);
 }
 
 uint32_t gpio_irq_status(void)
 {
-    return mmio_read32(SV_TIMER_GPIO_IRQ_STATUS_REG);
+    return mmio_read32(SV_ISLAND_GPIO_IRQ_STATUS_REG);
 }
 
 void gpio_reset_irq_seen(void)
@@ -146,4 +146,7 @@ void test_gpio(void)
         ok = ok && Mcal_Gpio_ToggleChannel(2U) == MCAL_GPIO_LOW;
         send_string(ok ? "[GPIO] MCAL output toggle PASSED!\n" : "[GPIO] MCAL output toggle FAILED!\n");
     }
+
+    gpio_irq_enable(0U);
+    gpio_irq_clear(0xFFFFFFFFU);
 }

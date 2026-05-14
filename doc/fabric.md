@@ -662,7 +662,7 @@ and adds both Python-side and QEMU-side fabric runtime pieces:
 
 The demo master currently proves Python-master-to-Python-slave register access
 by driving the CRC peripheral through the fabric on the first Python tick. It
-also performs the first Python-to-SV proof by reading `SV_TIMER_DMA_ID_REG`
+also performs the first Python-to-SV proof by reading `SV_ISLAND_DMA_ID_REG`
 through QEMU fabric decode and expecting `0x414D4453` (`"SDMA"`). QEMU e2e also
 proves that SYSCTRL native accesses and Python/SV external master accesses
 continue to work through the QEMU fabric helper.
@@ -681,7 +681,7 @@ The following decisions close the current review questions:
   status values for decode error, slave error, permission denied, timeout, and
   disconnected target.
 - Python-to-SV is the first cross-domain target-routing proof. Use a Python APB
-  master to read a stable SV register such as `SV_TIMER_DMA_ID_REG` before
+  master to read a stable SV register such as `SV_ISLAND_DMA_ID_REG` before
   expanding to SV-to-Python access.
 - Reserve 32 bits of protocol sideband metadata for future simulated bus signals
   such as secure/non-secure, privilege, QoS, cacheability, protection, and debug

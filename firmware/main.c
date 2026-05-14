@@ -19,6 +19,7 @@
 #include "hsm.h"
 #include "irq.h"
 #include "otp.h"
+#include "spi_tx.h"
 #include "sv_periph.h"
 #include "sysctrl.h"
 #include "wdt.h"
@@ -70,7 +71,7 @@ static void app_task(void *arg)
     send_string("[FW] Device enabled.\n");
 
     nvic_init();
-    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer, IRQ5=SV timer, IRQ6=HSM, IRQ7=OTP).\n");
+    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer, IRQ5=SV island, IRQ6=HSM, IRQ7=OTP).\n");
 
     __asm__ volatile ("cpsie i" ::: "memory");
 
@@ -89,11 +90,12 @@ static void app_task(void *arg)
         send_string(" 4) CRC-32\n");
         send_string(" 5) WDT reset\n");
         send_string(" 6) Dual-CPU IPC\n");
-        send_string(" 7) SV APB timer/DMA\n");
+        send_string(" 7) SV APB island timer/DMA\n");
         send_string(" 8) HSM AES/CMAC\n");
         send_string(" 9) SYSCTRL native controller\n");
         send_string(" 0) OTP controller\n");
         send_string(" g) SV GPIO\n");
+        send_string(" s) SV SPI TX\n");
         send_string(" a) All tests\n");
         send_string("# ");
 
@@ -123,6 +125,8 @@ static void app_task(void *arg)
             test_otp();
         } else if (cmd == 'g') {
             test_gpio();
+        } else if (cmd == 's') {
+            test_spi_tx();
         } else if (cmd == 'a') {
             console_uart_reset_irq_count();
             test_uart_irq();
@@ -133,6 +137,7 @@ static void app_task(void *arg)
             test_sv_timer();
             test_sv_dma();
             test_gpio();
+            test_spi_tx();
             test_otp();
             test_hsm();
             test_sysctrl();

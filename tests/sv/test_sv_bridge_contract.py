@@ -52,22 +52,14 @@ def test_sv_apb_ingress_owns_host_to_apb_setup_access_fsm() -> None:
     assert 'host_rsp_error_o <= pslverr_i || (size_q != 3\'b010)' in body
 
 
-def test_sv_master_router_is_stable_pass_through_integration_point() -> None:
+def test_sv_master_router_routes_local_sv_window_and_external_fabric() -> None:
     body = module_body(read_source(SV_MASTER_ROUTER), 'sv_master_router')
 
-    expected_assignments = (
-        'assign ext_req_valid_o = req_valid_i',
-        'assign req_ready_o = ext_req_ready_i',
-        'assign ext_req_write_o = req_write_i',
-        'assign ext_req_addr_o = req_addr_i',
-        'assign ext_req_wdata_o = req_wdata_i',
-        'assign ext_req_size_o = req_size_i',
-        'assign rsp_valid_o = ext_rsp_valid_i',
-        'assign rsp_rdata_o = ext_rsp_rdata_i',
-        'assign rsp_error_o = ext_rsp_error_i',
-    )
-    for assignment in expected_assignments:
-        assert assignment in body
+    assert "SV_ISLAND_BASE = 32'h4000_B000" in body
+    assert "SV_ISLAND_MASK = 32'hFFFF_F000" in body
+    assert 'local_sel' in body
+    assert 'local_psel_o' in body
+    assert 'assign ext_req_valid_o = req_valid_i && !local_sel' in body
 
 
 def test_sv_fabric_egress_dpi_enforces_32bit_request_response_contract() -> None:
@@ -93,11 +85,16 @@ def test_sv_device_top_wires_ingress_decoder_slaves_router_egress_and_irq() -> N
         'sv_timer_apb u_timer',
         'sv_dma_apb u_dma',
         'sv_gpio_apb u_gpio',
+        'sv_spi_tx_apb u_spi_tx',
         'sv_master_router u_master_router',
         'sv_fabric_egress_dpi u_fabric_egress',
     ):
         assert instance in body
-    assert 'assign irq_o = timer_irq | dma_irq | gpio_irq' in body
+    assert 'assign irq_o = timer_irq | dma_irq | gpio_irq | spi_irq' in body
+    assert 'spi_dma_req' in body
+    assert '.spi_req_i     (spi_dma_req)' in body
+    assert '.dma_req_o (spi_dma_req)' in body
+    assert '.local_psel_o    (fabric_psel)' in body
 
 
 def test_sv_host_shell_fabric_frames_use_sv_dma_master_id_and_le32_accesses() -> None:
@@ -132,6 +129,9 @@ def test_sv_makefile_builds_expected_bridge_top_with_trace_enabled() -> None:
     assert '--top-module sv_device_top' in source
     assert '--trace' in source
     assert 'sv_fabric_egress_dpi.sv' in source
+    assert 'sv_spi_tx_apb.sv' in source
+    assert 'sv_dma_core.sv' in source
+    assert 'sv_dma_m2p_core.sv' not in source
     assert 'sv_master_router.sv' in source
     assert 'sv_apb_ingress.sv' in source
     assert 'sv_host_shell.cpp' in source
