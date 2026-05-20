@@ -1,0 +1,284 @@
+# ============================================================================
+# Display Controller - per-device register map (draft v0.3)
+# ============================================================================
+#
+# Intended first implementation: Python device model.
+#
+# Scope for the first functional model:
+#   - CPU programs one or two framebuffers located in QEMU physical memory.
+#   - Display acts as a single bus master and reads the enabled layers through
+#     the existing fabric/memory access path. Multi-layer scanout reuses this
+#     one bus master per scanline: read layer0 line, read intersecting layer1
+#     line, compose that output line, then advance to the next line.
+#   - The model continuously scans frames while CTRL.ENABLE=1 using programmable
+#     display timing, computes a frame CRC, renders the active image to a host
+#     window, and raises a frame-done interrupt at the end of each frame.
+#   - The first supported pixel format is RGB565 only for both layers. Other
+#     FORMAT values must report BAD_FORMAT until explicitly implemented.
+#
+# Timing model:
+#   - PIXEL_CLOCK_HZ and the horizontal/vertical timing registers define the
+#     nominal frame period:
+#       frame_ns = htotal * vtotal * 1e9 / PIXEL_CLOCK_HZ
+#   - The first Python implementation uses the existing shared virtual-tick
+#     broadcast to detect frame completion while CTRL.ENABLE remains set.
+#
+# Framebuffer layout for FORMAT=RGB565:
+#   - 16 bits per pixel, little-endian halfwords.
+#   - Layer0 uses FB_BASE/FB_STRIDE and covers the active output. This preserves
+#     compatibility with the original single-framebuffer programming model.
+#   - Layer1 uses L1_* registers and may be positioned within the active output.
+#   - STRIDE is bytes per line and must be at least layer_width * 2.
+#   - STRIDE and FB_BASE/L1_FB_BASE must be 4-byte aligned for the first model.
+#
+# Layer composition model:
+#   - LAYER_CTRL bit0 enables layer0. For backward compatibility, LAYER_CTRL=0
+#     behaves as layer0-only scanout using FB_BASE.
+#   - LAYER_CTRL bit1 enables layer1 overlay.
+#   - LAYER_CTRL bit8 enables layer1 RGB565 color-key transparency. Pixels equal
+#     to L1_COLORKEY are transparent; all other L1 pixels replace layer0.
+#   - Composition order is layer0 then layer1 on each scanline. FRAME_CRC covers
+#     the final composed active image bytes in scanout order.
+#
+# Output model:
+#   - The Python model should render the active image into a host window for
+#     interactive debug. CI and headless runs may rely on FRAME_CRC and trace
+#     events without opening the window.
+#
+# Register access conventions:
+#   - W1C means write-one-to-clear.
+#   - W1P means write-one pulse; the bit does not remain set when read back.
+#   - Geometry, timing, format, and active framebuffer configuration registers
+#     are programmed while disabled. Runtime framebuffer switching uses
+#     SHADOW_FB_BASE and SHADOW_CTRL; the pending value latches at the next
+#     frame boundary.
+
+registers:
+  - offset:      0x00
+    name:        ID
+    access:      R
+    description: "Display controller ID: ASCII 'DISP' little-endian"
+    reset_value: 0x50534944
+
+  - offset:      0x04
+    name:        VERSION
+    access:      R
+    description: "Display controller spec version: 0x00010000 for v1.0"
+    reset_value: 0x00010000
+
+  - offset:      0x08
+    name:        CTRL
+    access:      RW
+    description: "Control: bit0=ENABLE, bit1=SOFT_RESET(W1P), bit2=OUTPUT_ENABLE"
+    reset_value: 0x00000000
+
+  - offset:      0x0C
+    name:        STATUS
+    access:      R
+    description: "Status: bit0=BUSY, bit1=FRAME_DONE, bit2=ERROR, bit3=ENABLED, bit4=ACTIVE_VIDEO, bit5=SHADOW_PENDING, bits23:16=LINE_STATE, bits31:24=FRAME_STATE"
+    reset_value: 0x00000000
+
+  - offset:      0x10
+    name:        INT_STATUS
+    access:      RW
+    description: "Interrupt status W1C: bit0=FRAME_DONE"
+    reset_value: 0x00000000
+
+  - offset:      0x14
+    name:        INT_ENABLE
+    access:      RW
+    description: "Interrupt enable: bit0=FRAME_DONE"
+    reset_value: 0x00000000
+
+  - offset:      0x18
+    name:        INT_CLEAR
+    access:      W
+    description: "Interrupt clear alias: write bit0=1 to clear FRAME_DONE"
+    reset_value: 0x00000000
+
+  - offset:      0x1C
+    name:        ERROR
+    access:      R
+    description: "Error code: 0=NONE, 1=BAD_CONFIG, 2=BAD_FORMAT, 3=BAD_FB_ADDR, 4=FABRIC_READ_ERROR, 5=BUSY_CFG"
+    reset_value: 0x00000000
+
+  - offset:      0x20
+    name:        FB_BASE
+    access:      RW
+    description: "Framebuffer base physical address for active scanout; first model requires 4-byte alignment"
+    reset_value: 0x00000000
+
+  - offset:      0x24
+    name:        FB_STRIDE
+    access:      RW
+    description: "Framebuffer stride in bytes per line; must be at least WIDTH * bytes_per_pixel"
+    reset_value: 0x00000000
+
+  - offset:      0x28
+    name:        WIDTH
+    access:      RW
+    description: "Active width in pixels"
+    reset_value: 0x00000000
+
+  - offset:      0x2C
+    name:        HEIGHT
+    access:      RW
+    description: "Active height in lines"
+    reset_value: 0x00000000
+
+  - offset:      0x30
+    name:        FORMAT
+    access:      RW
+    description: "Pixel format: 0=RGB565 little-endian only; other values report BAD_FORMAT"
+    reset_value: 0x00000000
+
+  - offset:      0x34
+    name:        BG_COLOR
+    access:      RW
+    description: "Background/fill color in native FORMAT encoding, used only if the model supports blanking artifact output"
+    reset_value: 0x00000000
+
+  - offset:      0x38
+    name:        H_TIMING
+    access:      RW
+    description: "Horizontal timing: bits9:0=H_FRONT_PORCH, bits19:10=H_SYNC_WIDTH, bits29:20=H_BACK_PORCH"
+    reset_value: 0x00000000
+
+  - offset:      0x3C
+    name:        V_TIMING
+    access:      RW
+    description: "Vertical timing: bits9:0=V_FRONT_PORCH, bits19:10=V_SYNC_WIDTH, bits29:20=V_BACK_PORCH"
+    reset_value: 0x00000000
+
+  - offset:      0x40
+    name:        PIXEL_CLOCK_HZ
+    access:      RW
+    description: "Nominal pixel clock in Hz; used to compute scanout completion time"
+    reset_value: 0x00000000
+
+  - offset:      0x48
+    name:        SHADOW_FB_BASE
+    access:      RW
+    description: "Next framebuffer base physical address; latched to FB_BASE at the next frame boundary after SHADOW_CTRL.APPLY"
+    reset_value: 0x00000000
+
+  - offset:      0x4C
+    name:        SHADOW_CTRL
+    access:      RW
+    description: "Shadow control: bit0=APPLY(W1P), bit1=PENDING(R), bit2=CANCEL(W1P)"
+    reset_value: 0x00000000
+
+  - offset:      0x50
+    name:        CUR_LINE
+    access:      R
+    description: "Current scanout line index; active-video lines start at 0"
+    reset_value: 0x00000000
+
+  - offset:      0x54
+    name:        CUR_PIXEL
+    access:      R
+    description: "Current scanout pixel index within the current line"
+    reset_value: 0x00000000
+
+  - offset:      0x58
+    name:        FRAME_COUNT
+    access:      R
+    description: "Number of frames completed since reset or SOFT_RESET"
+    reset_value: 0x00000000
+
+  - offset:      0x5C
+    name:        FRAME_CRC
+    access:      R
+    description: "CRC-32 of the last completed active pixel bytes only, computed in scanout order"
+    reset_value: 0x00000000
+
+  - offset:      0x60
+    name:        LAST_FB_BASE
+    access:      R
+    description: "Framebuffer base address used for the last completed frame"
+    reset_value: 0x00000000
+
+  - offset:      0x64
+    name:        OUTPUT_CTRL
+    access:      RW
+    description: "Output control: bit0=WINDOW_ENABLE, bit1=TRACE_EVENTS"
+    reset_value: 0x00000003
+
+  - offset:      0x68
+    name:        OUTPUT_INDEX
+    access:      R
+    description: "Index of the last rendered frame in the host display window"
+    reset_value: 0x00000000
+
+  - offset:      0x6C
+    name:        LAYER_CTRL
+    access:      RW
+    description: "Layer control: bit0=LAYER0_ENABLE, bit1=LAYER1_ENABLE, bit8=LAYER1_COLORKEY_ENABLE. Reset 0 keeps legacy layer0-only behavior."
+    reset_value: 0x00000000
+
+  - offset:      0x70
+    name:        L1_FB_BASE
+    access:      RW
+    description: "Layer1 framebuffer base physical address; requires 4-byte alignment when LAYER1_ENABLE=1"
+    reset_value: 0x00000000
+
+  - offset:      0x74
+    name:        L1_FB_STRIDE
+    access:      RW
+    description: "Layer1 framebuffer stride in bytes per line; must be at least L1_WIDTH * bytes_per_pixel"
+    reset_value: 0x00000000
+
+  - offset:      0x78
+    name:        L1_X
+    access:      RW
+    description: "Layer1 top-left X position in output pixels"
+    reset_value: 0x00000000
+
+  - offset:      0x7C
+    name:        L1_Y
+    access:      RW
+    description: "Layer1 top-left Y position in output pixels"
+    reset_value: 0x00000000
+
+  - offset:      0x80
+    name:        L1_WIDTH
+    access:      RW
+    description: "Layer1 width in pixels"
+    reset_value: 0x00000000
+
+  - offset:      0x84
+    name:        L1_HEIGHT
+    access:      RW
+    description: "Layer1 height in lines"
+    reset_value: 0x00000000
+
+  - offset:      0x88
+    name:        L1_FORMAT
+    access:      RW
+    description: "Layer1 pixel format: 0=RGB565 little-endian only; other values report BAD_FORMAT"
+    reset_value: 0x00000000
+
+  - offset:      0x8C
+    name:        L1_COLORKEY
+    access:      RW
+    description: "Layer1 transparent color key in native FORMAT encoding when LAYER1_COLORKEY_ENABLE=1"
+    reset_value: 0x00000000
+
+  - offset:      0x90
+    name:        LAST_L1_FB_BASE
+    access:      R
+    description: "Layer1 framebuffer base address used for the last completed composed frame, or zero if layer1 was disabled"
+    reset_value: 0x00000000
+
+# Implementation decisions captured from review:
+#   - FORMAT v1 is RGB565 only for layer0 and layer1.
+#   - WIDTH and HEIGHT are programmable.
+#   - FRAME_CRC covers final composed active pixel bytes only; stride padding is excluded.
+#   - CTRL.ENABLE starts and keeps scanout running; clearing ENABLE stops it.
+#   - Runtime framebuffer switching uses SHADOW_FB_BASE and SHADOW_CTRL.
+#   - The MVP exposes only FRAME_DONE as the CPU interrupt source.
+#   - The framebuffer lives in QEMU physical memory, typically SRAM.
+#   - Layer0 and layer1 framebuffer reads reuse the same existing Python
+#     bus-master fabric path; the display does not allocate per-layer masters or
+#     require a private framebuffer memory window.
+#   - The Python model should open a host window and dynamically render frames.

@@ -16,6 +16,8 @@
  *   IRQ2: timer0
  *   IRQ5: sv_island
  *   IRQ6: hsm
+ *   IRQ7: otp
+ *   IRQ9: display
  */
 
 .syntax unified
@@ -37,6 +39,10 @@
 .extern wdt_irq_handler
 .extern sv_island_irq_handler
 .extern hsm_irq_handler
+.extern otp_irq_handler
+.extern display_irq_handler
+.extern firmware_hardfault_handler
+.extern firmware_defaultfault_handler
 .extern vPortSVCHandler
 .extern xPortPendSVHandler
 .extern xPortSysTickHandler
@@ -64,7 +70,7 @@ _vectors:
     .word   xPortPendSVHandler  /* 14: PendSV                                 */
     .word   xPortSysTickHandler /* 15: SysTick                                */
 
-    /* ── External IRQs 0-6 (indices 16-22) ─────────────────────────────── */
+    /* ── External IRQs 0-9 (indices 16-25) ─────────────────────────────── */
     .word   uart_irq_handler       /* IRQ0: console_uart device  */
     .word   dma_irq_handler        /* IRQ1: dma device           */
     .word   timer_irq_handler      /* IRQ2: timer0 device        */
@@ -72,9 +78,12 @@ _vectors:
     .word   wdt_irq_handler        /* IRQ4: watchdog timer       */
     .word   sv_island_irq_handler  /* IRQ5: SV APB island        */
     .word   hsm_irq_handler        /* IRQ6: HSM crypto           */
+    .word   otp_irq_handler        /* IRQ7: OTP controller       */
+    .word   default_handler        /* IRQ8: FLASH controller     */
+    .word   display_irq_handler    /* IRQ9: Display controller   */
 
-    /* ── External IRQs 7-15 (indices 23-31) — default ────────────────── */
-    .rept 9
+    /* ── External IRQs 10-15 (indices 26-31) — default ───────────────── */
+    .rept 6
     .word   default_handler
     .endr
 
@@ -138,9 +147,15 @@ cpu1_entry:
 .thumb_func
 .global hardfault_handler
 hardfault_handler:
+    tst     lr, #4
+    ite     eq
+    mrseq   r0, msp
+    mrsne   r0, psp
+    bl      firmware_hardfault_handler
     b       .
 
 .thumb_func
 .global default_handler
 default_handler:
+    bl      firmware_defaultfault_handler
     b       .

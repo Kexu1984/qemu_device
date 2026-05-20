@@ -9,11 +9,15 @@
 #include <stdint.h>
 #include "FreeRTOS.h"
 #include "task.h"
+#ifdef AWTK_DEMO_BUILD
+#include "awtk_demo.h"
+#endif
 #include "console_uart.h"
 #include "crc.h"
 #include "cru.h"
 #include "dma.h"
 #include "dma_client.h"
+#include "display.h"
 #include "dual_cpu.h"
 #include "gpio.h"
 #include "hsm.h"
@@ -71,7 +75,7 @@ static void app_task(void *arg)
     send_string("[FW] Device enabled.\n");
 
     nvic_init();
-    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer, IRQ5=SV island, IRQ6=HSM, IRQ7=OTP).\n");
+    send_string("[FW] NVIC initialised (IRQ0=UART, IRQ1=DMA, IRQ2=Timer, IRQ5=SV island, IRQ6=HSM, IRQ7=OTP, IRQ9=Display).\n");
 
     __asm__ volatile ("cpsie i" ::: "memory");
 
@@ -96,6 +100,10 @@ static void app_task(void *arg)
         send_string(" 0) OTP controller\n");
         send_string(" g) SV GPIO\n");
         send_string(" s) SV SPI TX\n");
+        send_string(" d) Display controller\n");
+    #ifdef AWTK_DEMO_BUILD
+        send_string(" w) AWTK display demo\n");
+    #endif
         send_string(" a) All tests\n");
         send_string("# ");
 
@@ -127,6 +135,12 @@ static void app_task(void *arg)
             test_gpio();
         } else if (cmd == 's') {
             test_spi_tx();
+        } else if (cmd == 'd') {
+            test_display();
+#ifdef AWTK_DEMO_BUILD
+        } else if (cmd == 'w') {
+            test_awtk_display();
+#endif
         } else if (cmd == 'a') {
             console_uart_reset_irq_count();
             test_uart_irq();
@@ -138,13 +152,18 @@ static void app_task(void *arg)
             test_sv_dma();
             test_gpio();
             test_spi_tx();
+            test_display();
             test_otp();
             test_hsm();
             test_sysctrl();
             coverage_dump_if_enabled();
             test_wdt();
         } else {
-            send_string("[FW] Unknown command. Enter 0-9, 'g', or 'a'.\n");
+#ifdef AWTK_DEMO_BUILD
+            send_string("[FW] Unknown command. Enter 0-9, 'g', 's', 'd', 'w', or 'a'.\n");
+#else
+            send_string("[FW] Unknown command. Enter 0-9, 'g', 's', 'd', or 'a'.\n");
+#endif
         }
     }
 }

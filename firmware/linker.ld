@@ -32,7 +32,7 @@ SECTIONS
 {
     /* Cortex-M vector table must be at the very start of FLASH */
     .vectors : {
-        *(.vectors)
+        KEEP(*(.vectors))
     } > FLASH
 
     .text : {
@@ -80,5 +80,7 @@ SECTIONS
         *(COMMON)
         . = ALIGN(4);
         _ebss = .;
+        end = .;
+        _end = .;
     } > RAM
 }

@@ -110,6 +110,7 @@ from device_model.hsm_model         import HsmDevice            # noqa: E402
 from device_model.otp_model         import OtpControllerDevice   # noqa: E402
 from device_model.flash_controller  import FlashControllerDevice # noqa: E402
 from device_model.coverage_device    import CoverageDevice        # noqa: E402
+from device_model.display_model     import DisplayController     # noqa: E402
 from device_model.tracer            import Tracer               # noqa: E402
 try:                                                        # noqa: E402
     from device_model.generated.device_consts import (
@@ -131,6 +132,8 @@ except ModuleNotFoundError:                                # noqa: E402
     SRAM_SIZE = 0x00020000
     SV_ISLAND_BASE = 0x4000B000
     SV_ISLAND_SIZE = 0x1000
+
+MASTER_ID_DISPLAY = 0x14
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -332,6 +335,16 @@ class CoverageCfg:
     size:         int = 0x1000
 
 
+@dataclass
+class DisplayCfg:
+    """Configuration for the display controller."""
+    base_addr: int
+    rw_port:   int
+    irq_port:  int
+    nvic_irq:  int
+    size:      int = 0x1000
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PythonDeviceDomain
 # ─────────────────────────────────────────────────────────────────────────────
@@ -384,6 +397,7 @@ class PythonDeviceDomain:
         hsm:             Optional[HsmCfg]           = None,
         flash_ctrl:      Optional[FlashCtrlCfg]     = None,
         coverage:        Optional[CoverageCfg]      = None,
+        display:         Optional[DisplayCfg]       = None,
         enable_fabric_demo_master: bool             = True,
         tick_port:       int                        = 7896,
         cru_notify_port: Optional[int]              = None,
@@ -393,6 +407,8 @@ class PythonDeviceDomain:
             raise ValueError('DmaClientDemoCfg requires a DmaCfg')
         if hsm is not None and dma is None:
             raise ValueError('HsmCfg requires a DmaCfg')
+        if display is not None and dma is None:
+            raise ValueError('DisplayCfg requires a DmaCfg for the shared fabric channel')
 
         self._tracer   = tracer
         self._servers: list = []    # transport server objects (have .stop())
@@ -416,6 +432,7 @@ class PythonDeviceDomain:
             + ([(flash_ctrl.base_addr, flash_ctrl.size),
                 (flash_ctrl.ahb_base_addr, flash_ctrl.ahb_size)] if flash_ctrl else [])
             + ([(coverage.base_addr, coverage.size)] if coverage else [])
+            + ([(display.base_addr, display.size)] if display else [])
         )
 
         fabric_local_regions = [
@@ -606,6 +623,25 @@ class PythonDeviceDomain:
             self._add_server(RWServer(port=coverage.rw_port, bus=bus,
                                       base_addr=coverage.base_addr))
 
+        # ── 12. Display controller ─────────────────────────────────────
+        if display is not None and system_fabric_channel is not None:
+            display_irq_ctrl = IRQController()
+            display_addr_space = BusMasterAddressSpace(
+                fabric_channel = system_fabric_channel,
+                mmio_bus     = bus,
+                mmio_regions = mmio_regions,
+                master_id    = MASTER_ID_DISPLAY,
+            )
+            display_dev = DisplayController(
+                address_space  = display_addr_space,
+                irq_controller = display_irq_ctrl,
+                irq_idx        = 0,
+                tracer         = tracer,
+            )
+            bus.register(display.base_addr, display.size, display_dev)
+            self._add_server(IRQServer(port=display.irq_port, irq_controller=display_irq_ctrl))
+            self._add_server(RWServer(port=display.rw_port, bus=bus, base_addr=display.base_addr))
+
         # ── Platform fabric + Python demo master ─────────────────────────
         # The first fabric client is intentionally tick-driven and has no MMIO
         # slave window. It proves that a Python master can access another
@@ -735,6 +771,7 @@ def kx6625_default(
         flash   @ 0x4000E000  rw=7913 irq=7914 mem=7915 nvic_irq=8
         dflash  @ 0x10000000  rw=7916 size=512KB file=build/dflash.hex
         coverage @ 0x40010000 rw=7918 file=build/coverage/firmware.kxcv
+        display @ 0x40011000 rw=7919 irq=7920 nvic_irq=9
     """
     return PythonDeviceDomain(
         uarts=[
@@ -813,6 +850,12 @@ def kx6625_default(
             rw_port      = 7918,
             output_file  = 'build/coverage/firmware.kxcv',
             summary_file = 'build/coverage/firmware_coverage_summary.json',
+        ),
+        display=DisplayCfg(
+            base_addr = 0x40011000,
+            rw_port   = 7919,
+            irq_port  = 7920,
+            nvic_irq  = 9,
         ),
         tick_port = 7896,
         tracer    = tracer,

@@ -167,6 +167,16 @@ devices:
     summary_file: build/coverage/firmware_coverage_summary.json
     spec:        coverage.yaml
 
+  - name:        display
+    description: "Display controller — RGB565 framebuffer scanout to a host window"
+    base_addr:   0x40011000
+    size:        0x1000
+    irq_num:     9           # External IRQ 9 on KX6625
+    irq_delay:   0.0
+    rw_port:     7919
+    irq_port:    7920
+    spec:        display.yaml
+
 # ── Physical Memory Regions ──────────────────────────────────────────────────────────────────
 #
 # RAM regions visible to both firmware (CPU) and device models through QEMU fabric.

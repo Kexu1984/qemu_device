@@ -411,6 +411,53 @@ COVERAGE_NONZERO_WORDS_REG               = 0x4001002C  # offset 0x002C  R  Numbe
 COVERAGE_REGION_COUNT_REG                = 0x40010030  # offset 0x0030  R  Number of non-empty regions captured
 COVERAGE_CRC32_REG                       = 0x40010034  # offset 0x0034  R  CRC-32 of captured KXCV payload bytes
 
+# ── DISPLAY ─────────────────────────────────────────────────────
+# Display controller — RGB565 framebuffer scanout to a host window
+DISPLAY_BASE         = 0x40011000
+DISPLAY_SIZE         = 0x1000
+DISPLAY_IRQ_INTID    = 9
+DISPLAY_IRQ_DELAY_S  = 0.0
+DISPLAY_IRQ_PORT     = 7920
+DISPLAY_RW_PORT      = 7919
+
+# Registers
+DISPLAY_ID_REG                           = 0x40011000  # offset 0x0000  R  Display controller ID: ASCII 'DISP' little-endian
+DISPLAY_VERSION_REG                      = 0x40011004  # offset 0x0004  R  Display controller spec version: 0x00010000 for v1.0
+DISPLAY_CTRL_REG                         = 0x40011008  # offset 0x0008  RW  Control: bit0=ENABLE, bit1=SOFT_RESET(W1P), bit2=OUTPUT_ENABLE
+DISPLAY_STATUS_REG                       = 0x4001100C  # offset 0x000C  R  Status: bit0=BUSY, bit1=FRAME_DONE, bit2=ERROR, bit3=ENABLED, bit4=ACTIVE_VIDEO, bit5=SHADOW_PENDING, bits23:16=LINE_STATE, bits31:24=FRAME_STATE
+DISPLAY_INT_STATUS_REG                   = 0x40011010  # offset 0x0010  RW  Interrupt status W1C: bit0=FRAME_DONE
+DISPLAY_INT_ENABLE_REG                   = 0x40011014  # offset 0x0014  RW  Interrupt enable: bit0=FRAME_DONE
+DISPLAY_INT_CLEAR_REG                    = 0x40011018  # offset 0x0018  W  Interrupt clear alias: write bit0=1 to clear FRAME_DONE
+DISPLAY_ERROR_REG                        = 0x4001101C  # offset 0x001C  R  Error code: 0=NONE, 1=BAD_CONFIG, 2=BAD_FORMAT, 3=BAD_FB_ADDR, 4=FABRIC_READ_ERROR, 5=BUSY_CFG
+DISPLAY_FB_BASE_REG                      = 0x40011020  # offset 0x0020  RW  Framebuffer base physical address for active scanout; first model requires 4-byte alignment
+DISPLAY_FB_STRIDE_REG                    = 0x40011024  # offset 0x0024  RW  Framebuffer stride in bytes per line; must be at least WIDTH * bytes_per_pixel
+DISPLAY_WIDTH_REG                        = 0x40011028  # offset 0x0028  RW  Active width in pixels
+DISPLAY_HEIGHT_REG                       = 0x4001102C  # offset 0x002C  RW  Active height in lines
+DISPLAY_FORMAT_REG                       = 0x40011030  # offset 0x0030  RW  Pixel format: 0=RGB565 little-endian only; other values report BAD_FORMAT
+DISPLAY_BG_COLOR_REG                     = 0x40011034  # offset 0x0034  RW  Background/fill color in native FORMAT encoding, used only if the model supports blanking artifact output
+DISPLAY_H_TIMING_REG                     = 0x40011038  # offset 0x0038  RW  Horizontal timing: bits9:0=H_FRONT_PORCH, bits19:10=H_SYNC_WIDTH, bits29:20=H_BACK_PORCH
+DISPLAY_V_TIMING_REG                     = 0x4001103C  # offset 0x003C  RW  Vertical timing: bits9:0=V_FRONT_PORCH, bits19:10=V_SYNC_WIDTH, bits29:20=V_BACK_PORCH
+DISPLAY_PIXEL_CLOCK_HZ_REG               = 0x40011040  # offset 0x0040  RW  Nominal pixel clock in Hz; used to compute scanout completion time
+DISPLAY_SHADOW_FB_BASE_REG               = 0x40011048  # offset 0x0048  RW  Next framebuffer base physical address; latched to FB_BASE at the next frame boundary after SHADOW_CTRL.APPLY
+DISPLAY_SHADOW_CTRL_REG                  = 0x4001104C  # offset 0x004C  RW  Shadow control: bit0=APPLY(W1P), bit1=PENDING(R), bit2=CANCEL(W1P)
+DISPLAY_CUR_LINE_REG                     = 0x40011050  # offset 0x0050  R  Current scanout line index; active-video lines start at 0
+DISPLAY_CUR_PIXEL_REG                    = 0x40011054  # offset 0x0054  R  Current scanout pixel index within the current line
+DISPLAY_FRAME_COUNT_REG                  = 0x40011058  # offset 0x0058  R  Number of frames completed since reset or SOFT_RESET
+DISPLAY_FRAME_CRC_REG                    = 0x4001105C  # offset 0x005C  R  CRC-32 of the last completed active pixel bytes only, computed in scanout order
+DISPLAY_LAST_FB_BASE_REG                 = 0x40011060  # offset 0x0060  R  Framebuffer base address used for the last completed frame
+DISPLAY_OUTPUT_CTRL_REG                  = 0x40011064  # offset 0x0064  RW  Output control: bit0=WINDOW_ENABLE, bit1=TRACE_EVENTS
+DISPLAY_OUTPUT_INDEX_REG                 = 0x40011068  # offset 0x0068  R  Index of the last rendered frame in the host display window
+DISPLAY_LAYER_CTRL_REG                   = 0x4001106C  # offset 0x006C  RW  Layer control: bit0=LAYER0_ENABLE, bit1=LAYER1_ENABLE, bit8=LAYER1_COLORKEY_ENABLE. Reset 0 keeps legacy layer0-only behavior.
+DISPLAY_L1_FB_BASE_REG                   = 0x40011070  # offset 0x0070  RW  Layer1 framebuffer base physical address; requires 4-byte alignment when LAYER1_ENABLE=1
+DISPLAY_L1_FB_STRIDE_REG                 = 0x40011074  # offset 0x0074  RW  Layer1 framebuffer stride in bytes per line; must be at least L1_WIDTH * bytes_per_pixel
+DISPLAY_L1_X_REG                         = 0x40011078  # offset 0x0078  RW  Layer1 top-left X position in output pixels
+DISPLAY_L1_Y_REG                         = 0x4001107C  # offset 0x007C  RW  Layer1 top-left Y position in output pixels
+DISPLAY_L1_WIDTH_REG                     = 0x40011080  # offset 0x0080  RW  Layer1 width in pixels
+DISPLAY_L1_HEIGHT_REG                    = 0x40011084  # offset 0x0084  RW  Layer1 height in lines
+DISPLAY_L1_FORMAT_REG                    = 0x40011088  # offset 0x0088  RW  Layer1 pixel format: 0=RGB565 little-endian only; other values report BAD_FORMAT
+DISPLAY_L1_COLORKEY_REG                  = 0x4001108C  # offset 0x008C  RW  Layer1 transparent color key in native FORMAT encoding when LAYER1_COLORKEY_ENABLE=1
+DISPLAY_LAST_L1_FB_BASE_REG              = 0x40011090  # offset 0x0090  R  Layer1 framebuffer base address used for the last completed composed frame, or zero if layer1 was disabled
+
 # ── DATA_FLASH memory region ──────────────────────────────────────────────────
 # Data FLASH read-only memory window; program/erase via FLASH controller
 DATA_FLASH_BASE         = 0x10000000

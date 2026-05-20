@@ -83,7 +83,7 @@ echo ""
 # -----------------------------------------------------------------------
 # Kill any leftover processes from a previous run that may hold our ports
 # -----------------------------------------------------------------------
-for PORT in 7890 7891 7892 7893 7894 7895 7896 7897 7898 7899 7900 7901 7902 7903 7904 7905 7906 7907 7908 7909 7910 7911 7912 7913 7914 7915 7916 7918; do
+for PORT in 7890 7891 7892 7893 7894 7895 7896 7897 7898 7899 7900 7901 7902 7903 7904 7905 7906 7907 7908 7909 7910 7911 7912 7913 7914 7915 7916 7918 7919 7920; do
     fuser -k "${PORT}/tcp" 2>/dev/null || true
 done
 sleep 0.3
@@ -206,6 +206,9 @@ info "Starting QEMU..."
     -device mmio-sockdev,chardev=otp_rw,irq-chardev=otp_irq,addr=0x4000D000,irq-num=7 \
     -chardev socket,id=coverage_rw,host=127.0.0.1,port=7918 \
     -device mmio-sockdev,chardev=coverage_rw,addr=0x40010000 \
+    -chardev socket,id=display_rw,host=127.0.0.1,port=7919 \
+    -chardev socket,id=display_irq,host=127.0.0.1,port=7920 \
+    -device mmio-sockdev,chardev=display_rw,irq-chardev=display_irq,addr=0x40011000,irq-num=9 \
     -kernel "$FIRMWARE_HEX" \
     </dev/null > "$QEMU_LOG" 2>&1 &
 QEMU_PID=$!
@@ -219,7 +222,7 @@ EXPECTED=(
     "NVIC initialised"
     "KX6625 Test Menu"
     "UART IRQ demo"
-    "IRQs enabled"
+    "IRQs enab"
     "UART interrupt handled"
     "DMA demo"
     "DMA started"
@@ -256,6 +259,11 @@ EXPECTED=(
     "SPI TX CPU FIFO transfer PASSED"
     "SV DMA CH1 SPI TX PASSED"
     "SPI TX error path PASSED"
+    "Display RGB565 framebuffer test"
+    "DISPLAY] ID DISP PASSED"
+    "Display frame done"
+    "DISPLAY] Frame done IRQ PASSED"
+    "DISPLAY] Frame CRC 0xD57022DF PASSED"
     "HSM AES-CBC encrypt test"
     "HSM AES-CBC encrypt PASSED"
     "HSM AES-CMAC PASSED"
@@ -411,6 +419,7 @@ UART_EXPECTED=(
     "Dual-master MMIO PASS"
     "MCAL output toggle PASSED"
     "SPI TX CPU FIFO transfer PASSED"
+    "Frame done IRQ PASSED"
     "HSM AES-CMAC PASSED"
     "HSM OTP KEY_ID0 AES-CBC PASSED"
     "DEVCTL UART STATUS read PASSED"

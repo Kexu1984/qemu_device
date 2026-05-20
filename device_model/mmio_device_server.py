@@ -40,6 +40,7 @@ Port assignments (all 127.0.0.1):
   FlashCtrl RW=7913  IRQ=7914  MEM=7915
   DFlash    RW=7916
     Coverage  RW=7918
+    Display   RW=7919  IRQ=7920  (framebuffer reads reuse DMA MEM=7897 fabric channel)
   CRU-NOTIFY=7917  (optional; not yet wired in e2e_test.sh / run_interactive.sh)
 
 Adding a new device

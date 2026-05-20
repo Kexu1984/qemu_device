@@ -30,7 +30,7 @@ This project implements:
 - **Python Device Domain** (`device_model/soc_top.py`): `PythonDeviceDomain` wires transport servers, the `PeripheralBus`, `BusMasterAddressSpace`, reset/tick managers, and abstract `MMIODevice` instances. `SoCTop` remains as a compatibility alias. `kx6625_default()` returns the canonical KX6625 device-domain map.
 - **Transport Boundary** (`device_model/mmio_device_server.py`): TCP servers for `mmio-sockdev` channels — R/W, IRQ, periodic/DES tick, fabric bus-master access, and reset. Each peripheral model is a `MMIODevice` subclass with `read()`, `write()`, and optional `on_tick()`.
 - **Native SYSCTRL block**: QEMU-native system controller at `0x4000A000` for CPU identity, CPU1 reset release, boot status, device clock/reset policy state, and SYSCTRL-mediated indirect device-register access.
-- **Nine socket-backed peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT), SystemVerilog APB timer/DMA subsystem, an HSM crypto accelerator with AES-128/CMAC support, and an OTP controller with 1-to-0 programming and ECC. See [`spec/README.md`](spec/README.md) for register maps.
+- **Ten socket-backed peripherals**: Console UART, multi-channel DMA controller, countdown timer, DMA client demo peripheral, CRC-32 hardware accelerator, Watchdog Timer (WDT), SystemVerilog APB timer/DMA subsystem, an HSM crypto accelerator with AES-128/CMAC support, an OTP controller with 1-to-0 programming and ECC, and an RGB565 display controller with optional two-layer composition. See [`spec/README.md`](spec/README.md) for register maps.
 - **SystemVerilog Device Prototype** (`sv_device/`): A Verilator-built APB peripheral subsystem listening on TCP ports 7906/7907/7912. QEMU drives it through a normal `mmio-sockdev` instance at `0x4000B000`; the SV subsystem contains an APB timer at offset `0x000` and a first-version SV DMA at offset `0x100`, with completion IRQs returned through NVIC IRQ5.
 - **KX6625 Custom SoC** (`scripts/qemu-fork/hw/arm/kx6625.c`): Dual Cortex-M4 @ 48 MHz, 512 KB FLASH @ `0x00000000`, 128 KB SRAM @ `0x20000000`, NVIC with 16 external IRQs per ARMv7-M container.
 - **FreeRTOS Cortex-M4F Firmware**: CPU0 boots FreeRTOS using the official GCC `ARM_CM4F` port and Cortex-M SysTick; CPU1 runs a lightweight bare-metal IPC loop. The demo task exercises UART, DMA M2M, DMA peripheral DREQ/DACK, CRC-32, dual-core IPC, SV timer IRQ, SV DMA M2M copy, OTP programming/read protection, HSM AES-CBC/CMAC including OTP-backed `KEY_ID`, SYSCTRL, and WDT countdown-reset warm-boot detection.
@@ -638,6 +638,7 @@ qemu-system-arm -M kx6625 -smp 2 -nographic -no-reboot \
     -device mmio-sockdev,...,addr=0x4000B000,irq-num=5 \
     -device mmio-sockdev,...,addr=0x4000C000,irq-num=6 \
     -device mmio-sockdev,...,addr=0x4000D000,irq-num=7 \
+    -device mmio-sockdev,...,addr=0x40011000,irq-num=9 \
     -kernel build/firmware.hex
 ```
 
@@ -741,7 +742,7 @@ Logs are written to `build/e2e_server.log`, `build/e2e_qemu.log`, and `build/e2e
 | Port already in use | Leftover process | `fuser -k 7890/tcp 7891/tcp` |
 | Timeout / FAIL | IRQ not firing | Check `build/e2e_server.log` and `build/e2e_qemu.log` |
 
-### 4. Run the full server interactively
+### 5. Run the full server interactively
 
 **Option A — one-command interactive demo (recommended)**
 
@@ -779,9 +780,40 @@ python3 scripts/uart_console.py
 # or: nc 127.0.0.1 7904
 ```
 
+### 6. Run display-path validation
+
+The display controller is a Python device model at `0x40011000` with NVIC IRQ9. Firmware writes RGB565 pixels into SRAM, then programs the display registers. The display model reads framebuffer memory through the QEMU fabric as a bus master, renders a host Tk window when a GUI display is available, computes `FRAME_CRC`, and pulses the frame-done IRQ.
+
+Run the default single-layer display smoke test:
+
+```bash
+DISPLAY_KEEPALIVE=0 ICOUNT_SHIFT=5 bash scripts/display_interactive.sh
+```
+
+Expected firmware output includes:
+
+```text
+[DISPLAY] Frame done IRQ PASSED!
+[DISPLAY] Frame CRC 0xD57022DF PASSED!
+```
+
+Run the interactive display session and leave the Tk window open for inspection:
+
+```bash
+ICOUNT_SHIFT=5 bash scripts/display_interactive.sh
+```
+
+Run the AWTK RGB565 demo on the two-layer display path:
+
+```bash
+DISPLAY_KEEPALIVE=0 AWTK_DEMO=1 ICOUNT_SHIFT=5 bash scripts/display_interactive.sh
+```
+
+In AWTK mode, the firmware build is selected with `AWTK_DEMO=1`. AWTK draws into a foreground RGB565 framebuffer, firmware programs layer0/layer1 scanout, and the display model composes each scanline by reading layer0 then layer1 through the same display bus master. The project-owned AWTK port glue lives under `awtk/port/`; the upstream AWTK source tree is expected under `third_party/awtk`.
+
 ## Firmware Demo Sequence
 
-The FreeRTOS application task (`firmware/main.c`) executes nine demos from the UART menu. Command `a` runs them back-to-back:
+The FreeRTOS application task (`firmware/main.c`) executes ten demos from the UART menu. Command `a` runs them back-to-back:
 
 ### Phase 1 — UART IRQ
 
@@ -868,6 +900,7 @@ qemu_device/
 │   ├── crc.yaml                      # CRC-32 engine register map
 │   ├── hsm.yaml                      # HSM AES/CMAC accelerator register map
 │   ├── otp.yaml                      # OTP controller register map and HSM direct-key provider
+│   ├── display.yaml                  # RGB565 display controller + two-layer composition register map
 │   ├── sysctrl.yaml                  # Native SYSCTRL register map
 │   ├── wdt.yaml                      # Watchdog Timer register map
 │   └── sv_device.yaml                # SystemVerilog APB timer/GPIO/DMA prototype register map
@@ -878,7 +911,11 @@ qemu_device/
 │   ├── cpu1_main.c                   # CPU1 bare-metal IPC polling loop
 │   ├── runtime.c                     # Minimal freestanding memset/memcpy for -nostdlib
 │   ├── linker.ld                     # Memory layout (FLASH @ 0x00000000, SRAM @ 0x20000000)
+│   ├── drivers/display/              # Display controller firmware driver and CRC smoke test
+│   ├── drivers/awtk_demo/            # Optional AWTK RGB565/two-layer pointer demo
 │   └── Makefile                      # Runs gen_device_code.py then compiles FreeRTOS firmware
+├── awtk/                             # Project-owned AWTK port glue for KX6625/QEMU
+│   └── port/                         # awtk_config.h + raw main-loop/platform shims
 ├── freertos/
 │   └── FreeRTOS-Kernel/              # Vendored FreeRTOS kernel source + GCC ARM_CM4F port
 ├── sv_device/                        # SystemVerilog device prototypes
@@ -908,6 +945,7 @@ qemu_device/
 │   ├── crc_device.py                 # CRC-32/ISO-HDLC hardware accelerator
 │   ├── hsm_model.py                  # HSM AES/CMAC accelerator with direct OTP key provider
 │   ├── otp_model.py                  # File-backed OTP controller with ECC and protected key rows
+│   ├── display_model.py              # RGB565 display bus-master model + host Tk output
 │   ├── wdt_model.py                  # Watchdog Timer (countdown reset + retention registers)
 │   └── generated/                    # Auto-generated constants (make gen / make fw)
 │       └── device_consts.py          # Python constants mirroring mmio_devices.h
@@ -915,6 +953,7 @@ qemu_device/
 │   ├── build_qemu.sh                 # QEMU configure + ninja build
 │   ├── gen_device_code.py            # Code generator: spec/ → C header + Python consts
 │   ├── run_interactive.sh            # One-command demo: server + QEMU + UART console
+│   ├── display_interactive.sh        # Display-focused validation + optional AWTK demo
 │   ├── uart_console.py               # Bidirectional UART terminal client (port 7904)
 │   ├── visualize_trace.py            # Generate self-contained HTML trace report from JSONL
 │   ├── e2e_test.sh                   # Automated end-to-end smoke test → trace_report.html
